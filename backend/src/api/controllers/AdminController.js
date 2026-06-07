@@ -26,7 +26,7 @@ class AdminController {
                 SystemDB.all(`SELECT username, action, created_at, ip_address
                     FROM activity_logs ORDER BY created_at DESC LIMIT 20`),
                 SystemDB.get(`SELECT COUNT(*) as cnt FROM login_attempts
-                    WHERE success=0 AND created_at > datetime('now','-24 hours')`)
+                    WHERE success=false AND created_at > NOW() - INTERVAL '24 hours'`)
             ]);
 
             // Subscriptions breakdown by plan
@@ -39,7 +39,7 @@ class AdminController {
             const userGrowth = await SystemDB.all(`
                 SELECT date(created_at) as day, COUNT(*) as cnt
                 FROM users
-                WHERE created_at > datetime('now','-7 days')
+                WHERE created_at > NOW() - INTERVAL '7 days'
                 GROUP BY day ORDER BY day ASC`);
 
             res.json({
