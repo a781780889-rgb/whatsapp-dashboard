@@ -41,7 +41,7 @@ class UserController {
                 FROM users u
                 LEFT JOIN subscriptions s ON s.user_id=u.id
                     AND s.status='active'
-                    AND (s.expires_at IS NULL OR s.expires_at > datetime('now'))
+                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
                 LEFT JOIN licenses l ON l.user_id=u.id AND l.status='active'
                 ${where}
                 GROUP BY u.id
@@ -143,16 +143,16 @@ class UserController {
                 return res.status(403).json({ success:false, error:'لا يمكن تعديل Super Admin.' });
 
             const fields = [], params = [];
-            if (fullName !== undefined) { fields.push('full_name=?'); params.push(fullName); }
-            if (email    !== undefined) { fields.push('email=?');     params.push(email); }
-            if (role && ALLOWED_ROLES.includes(role)) { fields.push('role=?'); params.push(role); }
+            if (fullName !== undefined) { fields.push(`full_name=$${params.push(fullName)}`); }
+            if (email    !== undefined) { fields.push(`email=$${params.push(email)}`); }
+            if (role && ALLOWED_ROLES.includes(role)) { fields.push(`role=$${params.push(role)}`); }
             if (newPassword && newPassword.length >= 6) {
-                fields.push('password=?');
-                params.push(await bcrypt.hash(newPassword, 12));
+                fields.push(`password=$${params.push(await bcrypt.hash(newPassword, 12))}`);
             }
             if (fields.length) {
                 fields.push('updated_at=NOW()');
-                await SystemDB.run(`UPDATE users SET ${fields.join(',')} WHERE id=$1`, [...params, id]);
+                params.push(id);
+                await SystemDB.run(`UPDATE users SET ${fields.join(',')} WHERE id=$${params.length}`, params);
             }
 
             await SystemDB.log(req.user.id, req.user.username, 'USER_UPDATED', `Updated: ${user.username}`, this._ip(req));
