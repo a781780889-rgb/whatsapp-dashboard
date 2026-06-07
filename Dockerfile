@@ -1,6 +1,7 @@
 # Stage 1: Build Frontend (TypeScript + Tailwind v4)
 FROM node:20 AS frontend-build
 WORKDIR /build/frontend
+ENV NODE_OPTIONS="--max-old-space-size=1024"
 COPY frontend/package.json ./
 RUN npm install
 COPY frontend/ ./
