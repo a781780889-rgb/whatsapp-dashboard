@@ -1,14 +1,31 @@
 'use strict';
 /**
  * SystemDB — PostgreSQL
- * Section 5.2 / 16.3 من وثيقة التحليل:
- * انتقال كامل من SQLite → PostgreSQL.
- * يحتوي على: Users, Subscriptions, Licenses, Login Attempts, Blocks,
- * Activity Logs, WA Accounts, WhatsApp Sessions (بديل FileSystem).
+ * Section 5.2 / 16.3 من وثيقة التحليل
  */
 const { query, queryOne, queryAll } = require('../lib/postgres');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
+
+// ── BufferJSON: serialization صحيح لـ Baileys session keys ──────────────────
+// Baileys يخزن مفاتيح التشفير كـ Buffer/Uint8Array.
+// JSON.stringify العادي يحوّلها لـ {0:1, 1:2, ...} → جلسة فاسدة → 500.
+// BufferJSON يحفظها كـ {"type":"Buffer","data":[...]} ويستعيدها صحيحاً.
+let _replacer, _reviver;
+try {
+    const { BufferJSON } = require('@whiskeysockets/baileys');
+    _replacer = BufferJSON.replacer;
+    _reviver  = BufferJSON.reviver;
+} catch (_) {
+    // fallback: نفس السلوك القديم إن لم تتوفر المكتبة
+    _replacer = undefined;
+    _reviver  = undefined;
+}
+const SESSION_STRINGIFY = (v) => JSON.stringify(v, _replacer);
+const SESSION_PARSE     = (s) => {
+    try { return JSON.parse(s, _reviver); }
+    catch { return s; }
+};
 
 class SystemDB {
 
@@ -289,7 +306,7 @@ class SystemDB {
              VALUES ($1, $2, $3, NOW())
              ON CONFLICT (account_id, data_key)
              DO UPDATE SET data_value = EXCLUDED.data_value, updated_at = NOW()`,
-            [accountId, dataKey, JSON.stringify(dataValue)]
+            [accountId, dataKey, SESSION_STRINGIFY(dataValue)]
         );
     }
 
@@ -299,7 +316,7 @@ class SystemDB {
             [accountId, dataKey]
         );
         if (!row) return null;
-        try { return JSON.parse(row.data_value); } catch { return row.data_value; }
+        return SESSION_PARSE(row.data_value);
     }
 
     async getAllSessionData(accountId) {
@@ -309,8 +326,7 @@ class SystemDB {
         );
         const result = {};
         for (const row of rows) {
-            try { result[row.data_key] = JSON.parse(row.data_value); }
-            catch { result[row.data_key] = row.data_value; }
+            result[row.data_key] = SESSION_PARSE(row.data_value);
         }
         return result;
     }
