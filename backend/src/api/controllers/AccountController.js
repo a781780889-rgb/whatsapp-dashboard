@@ -109,6 +109,28 @@ class AccountController {
         }
     }
 
+    async resetSession(req, res) {
+        try {
+            const { id } = req.params;
+
+            const account = await DatabaseManager.systemDB.get(
+                `SELECT id FROM accounts WHERE id = $1`, [id]
+            );
+            if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+            // مسح الجلسة القديمة وبدء QR جديد
+            await WhatsAppManager.forceResetSession(id);
+
+            return res.json({
+                success: true,
+                message: 'تم مسح الجلسة. انتظر رمز QR الجديد في لوحة التحكم.'
+            });
+        } catch (error) {
+            console.error('Reset Session Error:', error);
+            return res.status(500).json({ success: false, error: 'Internal Server Error' });
+        }
+    }
+
     async deleteAccount(req, res) {
         try {
             const { id } = req.params;
