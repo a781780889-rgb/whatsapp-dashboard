@@ -162,11 +162,11 @@ function AppInner() {
               setSelectedAccountId={setSelectedAccountId}
             />
           } />
-          <Route path="/campaigns"      element={<CampaignsView />} />
-          <Route path="/links"          element={<LinkDashboardView />} />
-          <Route path="/schedules"      element={<ScheduleDashboardView />} />
-          <Route path="/ad-library"     element={<AdLibraryView />} />
-          <Route path="/direct-publish" element={<DirectPublishView />} />
+          <Route path="/campaigns"      element={<CampaignsView      accountId={selectedAccountId} />} />
+          <Route path="/links"          element={<LinkDashboardView    accountId={selectedAccountId} />} />
+          <Route path="/schedules"      element={<ScheduleDashboardView accountId={selectedAccountId} />} />
+          <Route path="/ad-library"     element={<AdLibraryView        accountId={selectedAccountId} />} />
+          <Route path="/direct-publish" element={<DirectPublishView    accountId={selectedAccountId} accounts={accounts} />} />
 
           {/* Admin-only routes */}
           <Route path="/admin/stats"   element={
