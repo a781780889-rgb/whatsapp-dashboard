@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Plus, Smartphone, Trash2, Link as LinkIcon, AlertCircle } from 'lucide-react';
+import { Search, Plus, Smartphone, Trash2, Link as LinkIcon, AlertCircle, RotateCcw } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -28,6 +28,8 @@ export default function AccountsView({ accounts, loading, fetchAccounts, selecte
   const [newAccountName, setNewAccountName] = useState('');
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [resettingId, setResettingId] = useState<string | null>(null);
+  const socketRef = React.useRef<any>(null);
   const { addToast } = useToast();
 
   const filteredAccounts = accounts.filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || (a.phone && a.phone.includes(search)));
@@ -53,6 +55,12 @@ export default function AccountsView({ accounts, loading, fetchAccounts, selecte
   };
 
   const handleConnect = async (id: string) => {
+    // قطع الاتصال القديم إن وُجد
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
     setConnectingId(id);
     setQrCode(null);
     setIsQrOpen(true);
@@ -60,10 +68,16 @@ export default function AccountsView({ accounts, loading, fetchAccounts, selecte
     try {
       await authFetch(`${API}/accounts/${id}/connect`, { method: 'POST' });
       const socket = io(SOCKET_URL);
+      socketRef.current = socket;
       socket.emit('join_account', id);
       
       socket.on('qr_code', ({ qr }: { qr: string }) => {
         setQrCode(qr);
+      });
+
+      // QR جديد بعد مسح الجلسة الفاسدة
+      socket.on('session_cleared', () => {
+        setQrCode(null); // أظهر spinner حتى يأتي QR الجديد
       });
       
       socket.on('account_status', ({ status }: { status: string }) => {
@@ -72,11 +86,55 @@ export default function AccountsView({ accounts, loading, fetchAccounts, selecte
           addToast({ title: 'متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
           fetchAccounts();
           socket.disconnect();
+          socketRef.current = null;
         }
       });
     } catch {
       addToast({ title: 'خطأ', description: 'فشل طلب الاتصال', type: 'error' });
       setIsQrOpen(false);
+    }
+  };
+
+  const handleResetSession = async (id: string) => {
+    setResettingId(id);
+    setQrCode(null);
+
+    try {
+      await authFetch(`${API}/accounts/${id}/reset`, { method: 'POST' });
+
+      // قطع الاتصال القديم إن وُجد
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+
+      // افتح نافذة QR وانتظر الرمز الجديد
+      setConnectingId(id);
+      setIsQrOpen(true);
+
+      const socket = io(SOCKET_URL);
+      socketRef.current = socket;
+      socket.emit('join_account', id);
+
+      socket.on('qr_code', ({ qr }: { qr: string }) => {
+        setQrCode(qr);
+      });
+
+      socket.on('account_status', ({ status }: { status: string }) => {
+        if (status === 'connected') {
+          setIsQrOpen(false);
+          addToast({ title: 'متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
+          fetchAccounts();
+          socket.disconnect();
+          socketRef.current = null;
+        }
+      });
+
+      addToast({ title: 'جاري الإعادة', description: 'تم مسح الجلسة القديمة، انتظر QR الجديد', type: 'success' });
+    } catch {
+      addToast({ title: 'خطأ', description: 'فشلت إعادة تهيئة الجلسة', type: 'error' });
+    } finally {
+      setResettingId(null);
     }
   };
 
@@ -184,6 +242,17 @@ export default function AccountsView({ accounts, loading, fetchAccounts, selecte
                   {account.status !== 'connected' && (
                     <Button variant="outline" className="px-3" onClick={() => handleConnect(account.id)} title="ربط">
                       <LinkIcon className="w-4 h-4" />
+                    </Button>
+                  )}
+                  {account.status !== 'connected' && (
+                    <Button
+                      variant="outline"
+                      className="px-3 text-orange-500 hover:bg-orange-500/10 hover:text-orange-500"
+                      onClick={() => handleResetSession(account.id)}
+                      disabled={resettingId === account.id}
+                      title="إعادة تهيئة الجلسة"
+                    >
+                      <RotateCcw className={`w-4 h-4 ${resettingId === account.id ? 'animate-spin' : ''}`} />
                     </Button>
                   )}
                   <Button variant="outline" className="px-3 text-red-500 hover:bg-red-500/10 hover:text-red-500" onClick={() => handleDelete(account.id)}>
