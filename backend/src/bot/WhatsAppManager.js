@@ -180,7 +180,7 @@ class WhatsAppManager {
                     if (qr) {
                         console.log(`[Account ${accountId}] QR Code received.`);
                         if (this.io) {
-                            this.io.to(`account_${accountId}`).emit('qr_code', qr);
+                            this.io.to(`account_${accountId}`).emit('qr_code', { qr });
                         }
                     }
 
@@ -321,3 +321,4 @@ class WhatsAppManager {
 }
 
 module.exports = new WhatsAppManager();
+
