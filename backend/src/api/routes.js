@@ -63,6 +63,7 @@ router.post('/accounts',                auth, subCheck, AccountController.create
 router.get('/accounts',                 auth, subCheck, AccountController.listAccounts.bind(AccountController));
 router.get('/accounts/:id',             auth, subCheck, AccountController.getAccountDetails.bind(AccountController));
 router.post('/accounts/:id/connect',    auth, subCheck, AccountController.connectAccount.bind(AccountController));
+router.post('/accounts/:id/reset',      auth, subCheck, AccountController.resetSession.bind(AccountController));
 router.post('/accounts/:id/disconnect', auth, subCheck, AccountController.disconnectAccount.bind(AccountController));
 router.delete('/accounts/:id',          auth, subCheck, AccountController.deleteAccount.bind(AccountController));
 
