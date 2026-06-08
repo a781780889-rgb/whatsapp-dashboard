@@ -37,9 +37,10 @@ export function Sidebar({ isCollapsed, setIsCollapsed, currentUser, onLogout }: 
       ]
     },
     {
-      section: 'الروابط',
+      section: 'الروابط والحماية',
       items: [
-        { to: '/links', icon: LinkIcon, label: 'مراقبة الروابط' },
+        { to: '/links',      icon: LinkIcon, label: 'مراقبة الروابط' },
+        { to: '/protection', icon: Shield,   label: 'نظام الحماية'   },
       ]
     },
   ];
