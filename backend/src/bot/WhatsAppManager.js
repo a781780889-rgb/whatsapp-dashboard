@@ -212,6 +212,8 @@ class WhatsAppManager {
                         const statusCode = new Boom.Boom(lastDisconnect?.error)?.output?.statusCode;
                         console.error(`[Account ${accountId}] Connection closed. Code: ${statusCode}.`);
                         this.sessions.delete(accountId);
+                        // إيقاف مراقبة هذا الحساب
+                        try { require('../api/services/LinkMonitorEngine').markInactive(accountId); } catch {}
 
                         // 1. جلسة فاسدة أو تسجيل خروج → امسح وأعد QR
                         if (CLEAR_SESSION_CODES.has(statusCode) || statusCode === 500) {
@@ -273,6 +275,11 @@ class WhatsAppManager {
                             `UPDATE accounts SET status = 'connected', health_status = 'normal' WHERE id = $1`,
                             [accountId]
                         );
+                        // تفعيل محرك المراقبة للحساب
+                        try {
+                            const LinkMonitorEngine = require('../api/services/LinkMonitorEngine');
+                            LinkMonitorEngine.markActive(accountId);
+                        } catch {}
                         if (this.io) {
                             this.io.emit('account_status', { accountId, status: 'connected' });
                             this.io.emit('notification', {
@@ -284,17 +291,22 @@ class WhatsAppManager {
                     }
                 });
 
+                // ── مراقبة الرسائل الواردة (الجزء الثالث) ───────────────────
                 sock.ev.on('messages.upsert', async (m) => {
                     if (m.type !== 'notify') return;
                     for (const msg of m.messages) {
                         if (!msg.message) continue;
+                        // استخراج النص من كل أنواع الرسائل
                         const text = msg.message.conversation
                                   || msg.message.extendedTextMessage?.text
+                                  || msg.message.imageMessage?.caption
+                                  || msg.message.videoMessage?.caption
+                                  || msg.message.documentMessage?.caption
                                   || '';
                         if (text) {
                             const LinkExtractorService = require('../api/services/LinkExtractorService');
                             const senderId = msg.key.participant || msg.key.remoteJid;
-                            const groupId  = msg.key.remoteJid.endsWith('@g.us') ? msg.key.remoteJid : null;
+                            const groupId  = msg.key.remoteJid?.endsWith('@g.us') ? msg.key.remoteJid : null;
                             LinkExtractorService.processMessage(accountId, {
                                 text, senderJid: senderId, groupJid: groupId, messageId: msg.key.id
                             }).catch(err => console.error(`[Account ${accountId}] Link extraction failed:`, err));
