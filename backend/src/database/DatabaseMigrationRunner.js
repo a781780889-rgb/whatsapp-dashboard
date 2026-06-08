@@ -11,7 +11,8 @@ class DatabaseMigrationRunner {
             await this._migrateExtractedLinks(accountDB);
             await this._migrateCampaigns(accountDB);
             await this._migrateAccounts(accountDB);
-            await this._migrateWaGroups(accountDB);  // ← جديد: مجموعات واتساب
+            await this._migrateWaGroups(accountDB);
+            await this._migrateAutoJoinSettings(accountDB); // ← الجزء الثالث
             console.log(`[Migration] Account ${accountId} — PostgreSQL migrations applied.`);
         } catch (err) {
             console.error(`[Migration] Account ${accountId} error:`, err.message);
@@ -20,13 +21,18 @@ class DatabaseMigrationRunner {
 
     async _migrateExtractedLinks(accountDB) {
         const migrations = [
-            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS ai_rating  INTEGER DEFAULT 0`,
-            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS ai_summary TEXT`,
-            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS is_spam    BOOLEAN DEFAULT FALSE`,
-            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS category_id TEXT`,
-            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS country    TEXT`,
-            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS region     TEXT`,
-            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS keywords   TEXT`,
+            // الأعمدة القديمة
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS ai_rating              INTEGER DEFAULT 0`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS ai_summary             TEXT`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS is_spam                BOOLEAN DEFAULT FALSE`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS category_id            TEXT`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS country                TEXT`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS region                 TEXT`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS keywords               TEXT`,
+            // الجزء الثالث — أعمدة جديدة
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS link_type              TEXT DEFAULT 'other'`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS invite_code            TEXT`,
+            `ALTER TABLE extracted_links ADD COLUMN IF NOT EXISTS discovered_by_account_id TEXT`,
         ];
         for (const sql of migrations) {
             await accountDB.run(sql).catch(() => {}); // Silently skip if column exists
@@ -114,6 +120,30 @@ class DatabaseMigrationRunner {
         await accountDB.run(
             `CREATE UNIQUE INDEX IF NOT EXISTS idx_wa_groups_jid ON wa_groups(group_jid)`
         ).catch(() => {});
+    }
+
+    // ── الجزء الثالث: إعدادات الانضمام التلقائي ──────────────────────────────
+    async _migrateAutoJoinSettings(accountDB) {
+        const migrations = [
+            // أعمدة إعدادات الانضمام الجديدة
+            `ALTER TABLE auto_join_settings ADD COLUMN IF NOT EXISTS join_mode              TEXT DEFAULT 'immediate'`,
+            `ALTER TABLE auto_join_settings ADD COLUMN IF NOT EXISTS join_delay_seconds     INTEGER DEFAULT 30`,
+            `ALTER TABLE auto_join_settings ADD COLUMN IF NOT EXISTS distribution_mode      TEXT DEFAULT 'single'`,
+
+            // أعمدة طابور الانضمام الجديدة
+            `ALTER TABLE auto_join_queue ADD COLUMN IF NOT EXISTS join_mode          TEXT DEFAULT 'immediate'`,
+            `ALTER TABLE auto_join_queue ADD COLUMN IF NOT EXISTS delay_seconds      INTEGER DEFAULT 0`,
+            `ALTER TABLE auto_join_queue ADD COLUMN IF NOT EXISTS distribution_mode  TEXT DEFAULT 'single'`,
+            `ALTER TABLE auto_join_queue ADD COLUMN IF NOT EXISTS result_group_id    TEXT`,
+            `ALTER TABLE auto_join_queue ADD COLUMN IF NOT EXISTS error_msg         TEXT`,
+
+            // Index للأداء
+            `CREATE INDEX IF NOT EXISTS idx_auto_join_queue_status ON auto_join_queue(status)`,
+            `CREATE INDEX IF NOT EXISTS idx_extracted_links_link_type ON extracted_links(link_type)`,
+        ];
+        for (const sql of migrations) {
+            await accountDB.run(sql).catch(() => {});
+        }
     }
 }
 
