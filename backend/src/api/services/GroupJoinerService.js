@@ -1,57 +1,125 @@
-const DatabaseManager = require('../../database/DatabaseManager');
-const JobScheduler = require('../../scheduler/JobScheduler');
-const crypto = require('crypto');
+'use strict';
+/**
+ * GroupSyncService — مزامنة تلقائية للمجموعات في الخلفية
+ * يُشغَّل كـ Singleton عند بدء الخادم ويزامن مجموعات جميع الحسابات
+ * المتصلة تلقائياً وفق إعداداتها المحفوظة
+ */
+const WhatsAppManager  = require('../../../bot/WhatsAppManager');
+const DatabaseManager  = require('../../../database/DatabaseManager');
 
-class GroupJoinerService {
+class GroupSyncService {
+    constructor() {
+        this._timer   = null;
+        this._running = false;
+        this._syncing = new Set(); // accounts being synced now — avoid overlap
+    }
 
-    /**
-     * Start the auto join process for a specific link or multiple links
-     * Load Balancing: Selects a random active account to join the group to avoid spamming from one account.
-     * Delay: Adds random delay between 5 to 15 minutes for safety.
-     */
-    async scheduleAutoJoin(linksArray) {
-        // Find active accounts available for rotation
-        const activeAccountIds = Array.from(DatabaseManager.activeAccounts.keys());
-        if (activeAccountIds.length === 0) {
-            throw new Error("لا يوجد أي حسابات واتساب نشطة لتنفيذ عملية الانضمام.");
+    // ── بدء الخدمة ─────────────────────────────────────────────────────────
+    start() {
+        if (this._running) return;
+        this._running = true;
+        // يفحص كل دقيقة هل حان وقت المزامنة لأي حساب
+        this._timer = setInterval(() => this._tick(), 60 * 1000);
+        console.log('[GroupSyncService] Started. Checking every 60s.');
+        // فحص فوري عند البدء
+        setTimeout(() => this._tick(), 5000);
+    }
+
+    stop() {
+        this._running = false;
+        if (this._timer) { clearInterval(this._timer); this._timer = null; }
+        console.log('[GroupSyncService] Stopped.');
+    }
+
+    // ── دورة الفحص ─────────────────────────────────────────────────────────
+    async _tick() {
+        if (!this._running) return;
+        try {
+            const GroupController = require('../controllers/GroupController');
+            const sessions = Array.from(WhatsAppManager.sessions.keys());
+
+            for (const accountId of sessions) {
+                if (this._syncing.has(accountId)) continue;
+
+                const sock = WhatsAppManager.getSession(accountId);
+                if (!sock) continue;
+
+                try {
+                    const accountDB = await DatabaseManager.getAccountDB(accountId);
+                    await GroupController._ensureSyncSettingsTable(accountDB);
+                    await GroupController._ensureGroupsTable(accountDB);
+
+                    // جلب إعدادات المزامنة
+                    const settings = await accountDB.get(
+                        `SELECT * FROM group_sync_settings WHERE account_id = $1`, [accountId]
+                    );
+
+                    if (!settings || !settings.auto_sync_enabled) continue;
+
+                    const intervalMs = (settings.interval_minutes || 15) * 60 * 1000;
+                    const lastSync   = settings.last_auto_sync
+                        ? new Date(settings.last_auto_sync).getTime() : 0;
+
+                    if (Date.now() - lastSync < intervalMs) continue; // لم يحن الوقت
+
+                    // حان وقت المزامنة
+                    this._syncing.add(accountId);
+                    console.log(`[GroupSyncService] Auto-syncing account ${accountId}...`);
+
+                    GroupController._syncFromWhatsApp(accountId, sock, accountDB)
+                        .then(async () => {
+                            await accountDB.run(
+                                `UPDATE group_sync_settings
+                                 SET last_auto_sync = NOW(), updated_at = NOW()
+                                 WHERE account_id = $1`, [accountId]
+                            );
+                            console.log(`[GroupSyncService] ✅ Done: account ${accountId}`);
+                        })
+                        .catch(err => {
+                            console.error(`[GroupSyncService] ❌ Failed: account ${accountId}:`, err.message);
+                        })
+                        .finally(() => {
+                            this._syncing.delete(accountId);
+                        });
+
+                } catch (err) {
+                    console.error(`[GroupSyncService] Error for account ${accountId}:`, err.message);
+                    this._syncing.delete(accountId);
+                }
+            }
+        } catch (err) {
+            console.error('[GroupSyncService] Tick error:', err.message);
         }
+    }
 
-        let addedCount = 0;
-        let baseTime = new Date();
+    // ── مزامنة فورية بالطلب (من API) ──────────────────────────────────────
+    async triggerSync(accountId) {
+        if (this._syncing.has(accountId)) {
+            return { success: false, error: 'مزامنة جارية بالفعل' };
+        }
+        const sock = WhatsAppManager.getSession(accountId);
+        if (!sock) return { success: false, error: 'الحساب غير متصل' };
 
-        for (const linkObj of linksArray) {
-            const { linkId, url } = linkObj;
+        try {
+            const GroupController = require('../controllers/GroupController');
+            const accountDB       = await DatabaseManager.getAccountDB(accountId);
+            await GroupController._ensureGroupsTable(accountDB);
 
-            // 1. Smart Rotation: Pick a random active account for load balancing
-            const randomAccountIndex = Math.floor(Math.random() * activeAccountIds.length);
-            const targetAccountId = activeAccountIds[randomAccountIndex];
+            this._syncing.add(accountId);
+            const groups = await GroupController._syncFromWhatsApp(accountId, sock, accountDB);
 
-            // 2. Delay Strategy: Add random 2 to 10 minutes delay sequentially
-            const randomDelayMinutes = Math.floor(Math.random() * (10 - 2 + 1)) + 2;
-            baseTime.setMinutes(baseTime.getMinutes() + randomDelayMinutes);
-
-            const queueId = crypto.randomUUID();
-            const accountDB = await DatabaseManager.getAccountDB(targetAccountId);
-
-            // 3. Register in auto_join_queue
             await accountDB.run(
-                `INSERT INTO auto_join_queue (id, link_id, status, target_account_id, scheduled_at) VALUES ($1, $2, 'pending', $3, $4)`,
-                [queueId, linkId, targetAccountId, baseTime.toISOString()]
-            );
+                `UPDATE group_sync_settings SET last_auto_sync = NOW() WHERE account_id = $1`,
+                [accountId]
+            ).catch(() => {});
 
-            // 4. Schedule the background task
-            await JobScheduler.scheduleTask(
-                targetAccountId,
-                'join_group',
-                { queueId, linkId, url },
-                baseTime
-            );
-
-            addedCount++;
+            return { success: true, groups, count: groups.length };
+        } catch (err) {
+            return { success: false, error: err.message };
+        } finally {
+            this._syncing.delete(accountId);
         }
-
-        return addedCount;
     }
 }
 
-module.exports = new GroupJoinerService();
+module.exports = new GroupSyncService();
