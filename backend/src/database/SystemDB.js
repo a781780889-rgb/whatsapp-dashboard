@@ -171,6 +171,35 @@ class SystemDB {
                 )
             `);
 
+            // ── Schema Migrations (safe for existing deployments) ────────────
+            // يُصلح مشكلة "column does not exist" عند الترقية من نسخ قديمة.
+            // CREATE TABLE IF NOT EXISTS لا تُضيف أعمدة جديدة للجداول الموجودة،
+            // لذا نستخدم ALTER TABLE ADD COLUMN IF NOT EXISTS قبل إنشاء الـ indexes.
+            const schemaMigrations = [
+                // login_attempts: username وجد لاحقاً في بعض النشرات
+                `ALTER TABLE login_attempts ADD COLUMN IF NOT EXISTS username      TEXT DEFAULT ''`,
+                `ALTER TABLE login_attempts ADD COLUMN IF NOT EXISTS ip            TEXT`,
+                `ALTER TABLE login_attempts ADD COLUMN IF NOT EXISTS success       BOOLEAN DEFAULT FALSE`,
+                `ALTER TABLE login_attempts ADD COLUMN IF NOT EXISTS blocked_until TIMESTAMP`,
+                `ALTER TABLE login_attempts ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 1`,
+                `ALTER TABLE login_attempts ADD COLUMN IF NOT EXISTS updated_at    TIMESTAMP DEFAULT NOW()`,
+                // users: أعمدة MFA وجدت لاحقاً
+                `ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT FALSE`,
+                `ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret  TEXT`,
+                `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login  TIMESTAMP`,
+                `ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMP DEFAULT NOW()`,
+                // accounts: أعمدة health وجدت لاحقاً
+                `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS health_status       TEXT DEFAULT 'normal'`,
+                `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_phase        BOOLEAN DEFAULT FALSE`,
+                `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS task_status         TEXT DEFAULT 'idle'`,
+                `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS messages_sent_today INTEGER DEFAULT 0`,
+            ];
+            for (const sql of schemaMigrations) {
+                await client.query(sql).catch(err =>
+                    console.warn(`[SystemDB] Migration skipped: ${err.message}`)
+                );
+            }
+
             // ── Performance Indexes ───────────────────────────────────────────
             await client.query(`CREATE INDEX IF NOT EXISTS idx_accounts_status       ON accounts(status)`);
             await client.query(`CREATE INDEX IF NOT EXISTS idx_subscriptions_user    ON subscriptions(user_id, status)`);
