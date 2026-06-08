@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -10,7 +10,8 @@ import {
   Activity, Globe, Hash, Clock, TrendingUp, FileText,
   X, Copy, ExternalLink, Zap, Bell, Star, Phone, Image,
   RefreshCw, AlertCircle, WifiOff, CheckCircle2,
-  Video, Paperclip, Megaphone, Lock, Unlock
+  Video, Paperclip, Megaphone, Lock, Unlock, Settings,
+  Timer, RotateCcw, Wifi, ChevronRight, Play, Pause
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { API, authFetch } from '@/utils/api';
@@ -47,7 +48,29 @@ interface WaMember {
   admin: string | null;
 }
 
+interface SyncSettings {
+  interval_minutes:  number;
+  auto_sync_enabled: boolean;
+  last_auto_sync:    string | null;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   ★ كاش عالمي — يحافظ على البيانات عند مغادرة القسم والعودة إليه
+   ─────────────────────────────────────────────────────────────────────────── */
+const globalCache = new Map<string, {
+  groups:   WaGroup[];
+  syncedAt: string | null;
+  ts:       number; // وقت آخر تحديث
+}>();
+
 /* ─────────────── Helpers ─────────────── */
+const SYNC_OPTIONS = [
+  { value: 5,   label: 'كل 5 دقائق',  short: '5د'  },
+  { value: 15,  label: 'كل 15 دقيقة', short: '15د' },
+  { value: 60,  label: 'كل ساعة',     short: '1س'  },
+  { value: 0,   label: 'يدوي فقط',    short: 'يدوي'},
+];
+
 const FILTERS = [
   { id: 'all',      label: 'جميع المجموعات' },
   { id: 'green',    label: 'يستطيع النشر 🟢' },
@@ -59,12 +82,12 @@ const FILTERS = [
 ];
 
 const GROUP_TABS = [
-  { id: 'info',    icon: BarChart3,    label: 'معلومات' },
-  { id: 'publish', icon: Send,         label: 'صلاحيات' },
-  { id: 'members', icon: Users,        label: 'الأعضاء' },
-  { id: 'stats',   icon: TrendingUp,   label: 'إحصائيات' },
-  { id: 'send',    icon: Megaphone,    label: 'إرسال' },
-  { id: 'auto',    icon: Bot,          label: 'أتمتة' },
+  { id: 'info',    icon: BarChart3,  label: 'معلومات'  },
+  { id: 'publish', icon: Send,       label: 'صلاحيات'  },
+  { id: 'members', icon: Users,      label: 'الأعضاء'  },
+  { id: 'stats',   icon: TrendingUp, label: 'إحصائيات' },
+  { id: 'send',    icon: Megaphone,  label: 'إرسال'    },
+  { id: 'auto',    icon: Bot,        label: 'أتمتة'    },
 ];
 
 function formatDate(ts: number): string {
@@ -74,6 +97,16 @@ function formatDate(ts: number): string {
 
 function formatJid(jid: string): string {
   return jid ? jid.replace('@g.us', '').replace('@s.whatsapp.net', '') : '—';
+}
+
+/** كم مضى منذ وقت معيّن — بالعربية */
+function timeAgo(iso: string | null): string {
+  if (!iso) return 'لم يتم بعد';
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diff < 60)  return `منذ ${diff} ثانية`;
+  if (diff < 3600) return `منذ ${Math.floor(diff / 60)} دقيقة`;
+  if (diff < 86400) return `منذ ${Math.floor(diff / 3600)} ساعة`;
+  return `منذ ${Math.floor(diff / 86400)} يوم`;
 }
 
 /* ─────────────── Sub-components ─────────────── */
@@ -109,9 +142,9 @@ function ActivityBar({ level }: { level: number }) {
 
 function PublishBadge({ status }: { status: 'green' | 'yellow' | 'red' }) {
   const map = {
-    green:  { emoji: '🟢', label: 'يستطيع النشر',       cls: 'bg-green-500/10 text-green-500 border-green-500/20'  },
-    yellow: { emoji: '🟡', label: 'مقيد جزئياً',          cls: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' },
-    red:    { emoji: '🔴', label: 'لا يستطيع النشر',      cls: 'bg-red-500/10 text-red-400 border-red-500/20'        },
+    green:  { emoji: '🟢', label: 'يستطيع النشر',    cls: 'bg-green-500/10 text-green-500 border-green-500/20'  },
+    yellow: { emoji: '🟡', label: 'مقيد جزئياً',      cls: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' },
+    red:    { emoji: '🔴', label: 'لا يستطيع النشر',  cls: 'bg-red-500/10 text-red-400 border-red-500/20'        },
   };
   const cfg = map[status] || map.red;
   return (
@@ -137,19 +170,123 @@ function CapabilityRow({ icon: Icon, label, allowed, color = 'text-[var(--brand-
   );
 }
 
+/* ─────────────── Sync Settings Panel ─────────────── */
+function SyncSettingsPanel({
+  accountId,
+  settings,
+  onSave,
+  onClose,
+}: {
+  accountId: string;
+  settings: SyncSettings;
+  onSave: (s: SyncSettings) => void;
+  onClose: () => void;
+}) {
+  const [interval, setInterval_]   = useState(settings.interval_minutes);
+  const [enabled,  setEnabled]     = useState(settings.auto_sync_enabled);
+  const [saving,   setSaving]      = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const res  = await authFetch(`${API}/accounts/${accountId}/groups/sync-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ interval_minutes: interval, auto_sync_enabled: enabled }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onSave({ interval_minutes: interval, auto_sync_enabled: enabled, last_auto_sync: settings.last_auto_sync });
+        onClose();
+      }
+    } catch {}
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="absolute top-full left-0 mt-2 w-72 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-2xl shadow-2xl z-50 p-4" dir="rtl">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Timer className="w-4 h-4 text-[var(--brand-primary)]" />
+          <span className="font-bold text-sm text-[var(--text-primary)]">إعدادات المزامنة</span>
+        </div>
+        <button onClick={onClose} className="p-1 rounded-lg hover:bg-[var(--bg-elevated)]">
+          <X className="w-4 h-4 text-[var(--text-muted)]" />
+        </button>
+      </div>
+
+      {/* تفعيل/إيقاف */}
+      <div className="flex items-center justify-between p-3 rounded-xl bg-[var(--bg-elevated)] mb-3">
+        <div>
+          <p className="text-sm font-medium text-[var(--text-primary)]">المزامنة التلقائية</p>
+          <p className="text-xs text-[var(--text-muted)]">تحديث المجموعات تلقائياً</p>
+        </div>
+        <button
+          onClick={() => setEnabled(!enabled)}
+          className={cn(
+            'w-11 h-6 rounded-full transition-all relative',
+            enabled ? 'bg-[var(--brand-primary)]' : 'bg-[var(--bg-overlay)]'
+          )}
+        >
+          <div className={cn(
+            'absolute top-1 w-4 h-4 bg-white rounded-full transition-all shadow-sm',
+            enabled ? 'right-1' : 'left-1'
+          )} />
+        </button>
+      </div>
+
+      {/* الفاصل الزمني */}
+      <p className="text-xs font-semibold text-[var(--text-secondary)] mb-2">الفاصل الزمني</p>
+      <div className="grid grid-cols-2 gap-2 mb-4">
+        {SYNC_OPTIONS.map(opt => (
+          <button
+            key={opt.value}
+            onClick={() => setInterval_(opt.value)}
+            disabled={!enabled}
+            className={cn(
+              'px-3 py-2 rounded-xl text-xs font-medium transition-all border',
+              interval === opt.value && enabled
+                ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)] shadow-[var(--shadow-glow)]'
+                : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] border-[var(--border-default)]',
+              !enabled && 'opacity-40 cursor-not-allowed'
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {/* آخر مزامنة تلقائية */}
+      {settings.last_auto_sync && (
+        <div className="flex items-center gap-2 p-2 rounded-lg bg-[var(--bg-elevated)] mb-3">
+          <Clock className="w-3 h-3 text-[var(--text-muted)]" />
+          <span className="text-xs text-[var(--text-muted)]">
+            آخر مزامنة تلقائية: {timeAgo(settings.last_auto_sync)}
+          </span>
+        </div>
+      )}
+
+      <Button onClick={handleSave} disabled={saving} className="w-full gap-2" size="sm">
+        {saving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+        {saving ? 'جاري الحفظ...' : 'حفظ الإعدادات'}
+      </Button>
+    </div>
+  );
+}
+
 /* ─────────────── Modal Tabs ─────────────── */
 function TabInfo({ group }: { group: WaGroup }) {
   const rows = [
-    { label: 'اسم المجموعة',    value: group.name,                  mono: false },
-    { label: 'معرّف المجموعة',  value: formatJid(group.group_jid),  mono: true  },
-    { label: 'الوصف',           value: group.description || '—',    mono: false },
-    { label: 'تاريخ الإنشاء',   value: formatDate(group.creation_ts), mono: false },
-    { label: 'المالك',          value: formatJid(group.owner),      mono: true  },
-    { label: 'عدد الأعضاء',     value: group.members_count.toLocaleString(), mono: false },
-    { label: 'عدد المشرفين',    value: group.admins_count,          mono: false },
-    { label: 'نوع المجموعة',    value: group.announce ? 'قناة إعلانات (مشرفون فقط)' : 'مجموعة عامة', mono: false },
-    { label: 'دورك',            value: group.is_admin ? 'مشرف' : 'عضو', mono: false },
-    { label: 'آخر مزامنة',      value: group.last_sync ? new Date(group.last_sync).toLocaleString('ar-SA') : '—', mono: false },
+    { label: 'اسم المجموعة',    value: group.name,                              mono: false },
+    { label: 'معرّف المجموعة',  value: formatJid(group.group_jid),              mono: true  },
+    { label: 'الوصف',           value: group.description || '—',                mono: false },
+    { label: 'تاريخ الإنشاء',   value: formatDate(group.creation_ts),           mono: false },
+    { label: 'المالك',          value: formatJid(group.owner),                  mono: true  },
+    { label: 'عدد الأعضاء',     value: group.members_count.toLocaleString(),    mono: false },
+    { label: 'عدد المشرفين',    value: group.admins_count,                       mono: false },
+    { label: 'نوع المجموعة',    value: group.announce ? 'قناة إعلانات' : 'مجموعة عامة', mono: false },
+    { label: 'دورك',            value: group.is_admin ? 'مشرف' : 'عضو',         mono: false },
+    { label: 'آخر مزامنة',      value: group.last_sync ? timeAgo(group.last_sync) : '—', mono: false },
   ];
 
   return (
@@ -176,7 +313,6 @@ function TabInfo({ group }: { group: WaGroup }) {
 function TabPublish({ group }: { group: WaGroup }) {
   return (
     <div className="flex flex-col gap-4">
-      {/* حالة النشر الإجمالية */}
       <div className={cn(
         'p-4 rounded-2xl border-2',
         group.publish_status === 'green'  ? 'bg-green-500/5 border-green-500/20'  :
@@ -189,8 +325,8 @@ function TabPublish({ group }: { group: WaGroup }) {
           </span>
           <div>
             <p className="font-bold text-[var(--text-primary)]">
-              {group.publish_status === 'green'  ? 'يستطيع النشر بحرية'       :
-               group.publish_status === 'yellow' ? 'مقيد — أنت مشرف فقط'      :
+              {group.publish_status === 'green'  ? 'يستطيع النشر بحرية'  :
+               group.publish_status === 'yellow' ? 'مقيد — أنت مشرف فقط' :
                                                     'لا يستطيع النشر'}
             </p>
             <p className="text-xs text-[var(--text-muted)] mt-0.5">
@@ -200,45 +336,23 @@ function TabPublish({ group }: { group: WaGroup }) {
             </p>
           </div>
         </div>
-        <div className="flex gap-2 flex-wrap mt-1">
-          {group.is_admin && (
-            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[var(--brand-primary)]/10 text-[var(--brand-primary)] border border-[var(--brand-primary)]/20">
-              👑 مشرف
-            </span>
-          )}
-          {group.announce && (
-            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">
-              📢 قناة إعلانات
-            </span>
-          )}
-          {group.restrict && (
-            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-orange-500/10 text-orange-400 border border-orange-500/20">
-              🔒 إعدادات مقيدة
-            </span>
-          )}
-        </div>
       </div>
-
-      {/* تفاصيل صلاحيات النشر */}
       <div>
         <p className="text-xs font-semibold text-[var(--text-secondary)] mb-2 uppercase tracking-wider">أنواع المحتوى</p>
         <div className="bg-[var(--bg-elevated)] rounded-2xl px-4">
-          <CapabilityRow icon={MessageSquare} label="نشر نصوص"           allowed={group.can_send_text}   />
-          <CapabilityRow icon={Image}         label="نشر صور"             allowed={group.can_send_images} />
-          <CapabilityRow icon={Video}         label="نشر فيديو"           allowed={group.can_send_video}  />
-          <CapabilityRow icon={Paperclip}     label="نشر ملفات"           allowed={group.can_send_files}  />
-          <CapabilityRow icon={Link2}         label="نشر روابط"           allowed={group.can_send_links}  />
-          <CapabilityRow icon={Megaphone}     label="رسائل جماعية (بث)"  allowed={group.can_broadcast}   color="text-purple-400" />
+          <CapabilityRow icon={MessageSquare} label="نشر نصوص"          allowed={group.can_send_text}   />
+          <CapabilityRow icon={Image}         label="نشر صور"            allowed={group.can_send_images} />
+          <CapabilityRow icon={Video}         label="نشر فيديو"          allowed={group.can_send_video}  />
+          <CapabilityRow icon={Paperclip}     label="نشر ملفات"          allowed={group.can_send_files}  />
+          <CapabilityRow icon={Link2}         label="نشر روابط"          allowed={group.can_send_links}  />
+          <CapabilityRow icon={Megaphone}     label="رسائل جماعية (بث)" allowed={group.can_broadcast}   color="text-purple-400" />
         </div>
       </div>
-
-      {/* نصيحة */}
       {!group.can_send_text && (
         <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/5 border border-red-500/15">
           <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
           <p className="text-xs text-red-400">
             هذه المجموعة في وضع الإعلانات وأنت لست مشرفاً. لا يمكن النشر فيها.
-            تواصل مع مشرف المجموعة للحصول على صلاحيات.
           </p>
         </div>
       )}
@@ -257,25 +371,20 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
     let cancelled = false;
     setLoading(true);
     setError(null);
-
     authFetch(`${API}/accounts/${accountId}/groups/${encodeURIComponent(group.group_jid)}/members`)
       .then(r => r.json())
       .then(d => {
         if (cancelled) return;
         if (d.success) {
-          // بناء قائمة الأعضاء من target_jids + admins
           const all: WaMember[] = [
             ...(d.admins || []).map((id: string) => ({ id, admin: 'admin' })),
             ...(d.target_jids || []).map((id: string) => ({ id, admin: null })),
           ];
           setMembers(all);
-        } else {
-          setError(d.error || 'فشل جلب الأعضاء');
-        }
+        } else { setError(d.error || 'فشل جلب الأعضاء'); }
       })
-      .catch(() => { if (!cancelled) setError('خطأ في الاتصال بالخادم'); })
+      .catch(() => { if (!cancelled) setError('خطأ في الاتصال'); })
       .finally(() => { if (!cancelled) setLoading(false); });
-
     return () => { cancelled = true; };
   }, [group.group_jid, accountId]);
 
@@ -288,12 +397,9 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
 
   if (loading) return (
     <div className="flex flex-col gap-2">
-      {[...Array(5)].map((_, i) => (
-        <div key={i} className="h-12 bg-[var(--bg-elevated)] rounded-xl animate-pulse" />
-      ))}
+      {[...Array(5)].map((_, i) => <div key={i} className="h-12 bg-[var(--bg-elevated)] rounded-xl animate-pulse" />)}
     </div>
   );
-
   if (error) return (
     <div className="flex items-center gap-2 p-4 rounded-xl bg-red-500/5 border border-red-500/15">
       <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
@@ -324,7 +430,7 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
         {shown.length === 0
           ? <p className="text-sm text-[var(--text-muted)] text-center py-4">لا توجد نتائج</p>
           : shown.map((m, i) => {
-              const phone = m.id.split('@')[0].replace(/:/g, '');
+              const phone   = m.id.split('@')[0].replace(/:/g, '');
               const isAdmin = !!m.admin;
               return (
                 <div key={i} className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-[var(--bg-elevated)] transition-colors">
@@ -336,8 +442,7 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
                     <p className="text-xs font-mono text-[var(--text-primary)]">+{phone}</p>
                     {isAdmin && <p className="text-[10px] text-[var(--brand-primary)]">{m.admin === 'superadmin' ? 'مشرف رئيسي' : 'مشرف'}</p>}
                   </div>
-                  <button onClick={() => navigator.clipboard?.writeText('+' + phone)}
-                    className="p-1 rounded hover:bg-[var(--bg-overlay)]">
+                  <button onClick={() => navigator.clipboard?.writeText('+' + phone)} className="p-1 rounded hover:bg-[var(--bg-overlay)]">
                     <Copy className="w-3 h-3 text-[var(--text-muted)]" />
                   </button>
                 </div>
@@ -352,7 +457,6 @@ function TabStats({ group }: { group: WaGroup }) {
   const memberCount  = group.members_count;
   const adminCount   = group.admins_count;
   const membersPct   = memberCount > 0 ? Math.round((adminCount / memberCount) * 100) : 0;
-
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-3 gap-2">
@@ -367,7 +471,6 @@ function TabStats({ group }: { group: WaGroup }) {
           </div>
         ))}
       </div>
-
       <div>
         <p className="text-xs font-medium text-[var(--text-secondary)] mb-3">نسبة المشرفين إلى الأعضاء</p>
         <div className="flex items-center gap-2">
@@ -376,18 +479,14 @@ function TabStats({ group }: { group: WaGroup }) {
           </div>
           <span className="text-xs text-[var(--text-muted)] w-8">{membersPct}%</span>
         </div>
-        <p className="text-xs text-[var(--text-muted)] mt-1">
-          {adminCount} مشرف من أصل {memberCount} عضو
-        </p>
       </div>
-
       <div>
         <p className="text-xs font-medium text-[var(--text-secondary)] mb-2">معلومات إضافية</p>
         <div className="flex flex-col gap-1 bg-[var(--bg-elevated)] rounded-2xl px-4 py-2">
           {[
             { label: 'نوع المجموعة', value: group.announce ? 'قناة إعلانات' : 'مجموعة عامة' },
-            { label: 'الإعدادات',    value: group.restrict  ? 'مقيدة'        : 'مفتوحة'     },
-            { label: 'دورك',         value: group.is_admin  ? '👑 مشرف'       : '👤 عضو'     },
+            { label: 'الإعدادات',    value: group.restrict  ? 'مقيدة'         : 'مفتوحة'     },
+            { label: 'دورك',         value: group.is_admin  ? '👑 مشرف'        : '👤 عضو'     },
             { label: 'تاريخ الإنشاء', value: formatDate(group.creation_ts) },
           ].map((r, i) => (
             <div key={i} className="flex justify-between py-2 border-b border-[var(--border-default)] last:border-0">
@@ -404,15 +503,13 @@ function TabStats({ group }: { group: WaGroup }) {
 function TabSend({ group }: { group: WaGroup }) {
   const [msgType, setMsgType] = useState('text');
   const canSend = group.can_send_text;
-
   const types = [
-    { id: 'text',     icon: MessageSquare, label: 'نص',     allowed: group.can_send_text   },
-    { id: 'image',    icon: Image,         label: 'صورة',   allowed: group.can_send_images },
-    { id: 'video',    icon: Video,         label: 'فيديو',  allowed: group.can_send_video  },
-    { id: 'file',     icon: FileText,      label: 'ملف',    allowed: group.can_send_files  },
-    { id: 'schedule', icon: Calendar,      label: 'مجدول',  allowed: canSend              },
+    { id: 'text',     icon: MessageSquare, label: 'نص',    allowed: group.can_send_text   },
+    { id: 'image',    icon: Image,         label: 'صورة',  allowed: group.can_send_images },
+    { id: 'video',    icon: Video,         label: 'فيديو', allowed: group.can_send_video  },
+    { id: 'file',     icon: FileText,      label: 'ملف',   allowed: group.can_send_files  },
+    { id: 'schedule', icon: Calendar,      label: 'مجدول', allowed: canSend              },
   ];
-
   if (!canSend) return (
     <div className="flex flex-col items-center gap-3 py-8 text-center">
       <div className="w-14 h-14 rounded-2xl bg-red-500/10 flex items-center justify-center">
@@ -420,18 +517,17 @@ function TabSend({ group }: { group: WaGroup }) {
       </div>
       <p className="font-bold text-[var(--text-primary)]">لا يمكن الإرسال</p>
       <p className="text-sm text-[var(--text-muted)] max-w-[220px]">
-        هذه مجموعة إعلانات وأنت لست مشرفاً. لا يمكن إرسال رسائل إليها.
+        هذه مجموعة إعلانات وأنت لست مشرفاً.
       </p>
     </div>
   );
-
   return (
     <div className="flex flex-col gap-3">
       <div className="flex gap-1 flex-wrap">
         {types.map(t => (
           <button key={t.id} onClick={() => t.allowed && setMsgType(t.id)} disabled={!t.allowed}
             className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-              !t.allowed    ? 'opacity-30 cursor-not-allowed bg-[var(--bg-elevated)] text-[var(--text-muted)]' :
+              !t.allowed ? 'opacity-30 cursor-not-allowed bg-[var(--bg-elevated)] text-[var(--text-muted)]' :
               msgType===t.id ? 'bg-[var(--brand-primary)] text-white' :
                                'bg-[var(--bg-elevated)] text-[var(--text-secondary)]')}>
             <t.icon className="w-3 h-3" />{t.label}
@@ -447,9 +543,7 @@ function TabSend({ group }: { group: WaGroup }) {
           <p className="text-sm text-[var(--text-secondary)]">اسحب صورة أو <span className="text-[var(--brand-primary)] cursor-pointer">اختر ملف</span></p>
         </div>
       )}
-      {msgType === 'schedule' && (
-        <input type="datetime-local" className="input" />
-      )}
+      {msgType === 'schedule' && <input type="datetime-local" className="input" />}
       <Button className="w-full gap-2"><Send className="w-4 h-4" />إرسال للمجموعة</Button>
     </div>
   );
@@ -458,22 +552,21 @@ function TabSend({ group }: { group: WaGroup }) {
 function TabAuto({ group }: { group: WaGroup }) {
   const canAutomate = group.is_admin;
   const automations = [
-    { id: 'links',   icon: Link2,         label: 'مراقبة الروابط',    desc: 'رصد وحذف الروابط المحظورة تلقائياً', enabled: false, needsAdmin: true  },
-    { id: 'reply',   icon: MessageSquare, label: 'الرد التلقائي',     desc: 'الرد على رسائل بكلمات مفتاحية',      enabled: false, needsAdmin: false },
-    { id: 'welcome', icon: Bell,          label: 'الترحيب التلقائي',  desc: 'رسالة ترحيب للأعضاء الجدد',         enabled: false, needsAdmin: true  },
-    { id: 'spam',    icon: Shield,        label: 'الحماية من السبام', desc: 'حذف الرسائل المتكررة والمزعجة',      enabled: false, needsAdmin: true  },
-    { id: 'filter',  icon: Filter,        label: 'فلترة الكلمات',     desc: 'منع كلمات معينة من المجموعة',        enabled: false, needsAdmin: true  },
+    { id: 'links',   icon: Link2,         label: 'مراقبة الروابط',    desc: 'رصد وحذف الروابط المحظورة', enabled: false, needsAdmin: true  },
+    { id: 'reply',   icon: MessageSquare, label: 'الرد التلقائي',     desc: 'الرد على كلمات مفتاحية',    enabled: false, needsAdmin: false },
+    { id: 'welcome', icon: Bell,          label: 'الترحيب التلقائي',  desc: 'رسالة ترحيب للأعضاء الجدد', enabled: false, needsAdmin: true  },
+    { id: 'spam',    icon: Shield,        label: 'الحماية من السبام', desc: 'حذف الرسائل المزعجة',       enabled: false, needsAdmin: true  },
+    { id: 'filter',  icon: Filter,        label: 'فلترة الكلمات',     desc: 'منع كلمات معينة',            enabled: false, needsAdmin: true  },
   ];
   const [states, setStates] = useState(() =>
     Object.fromEntries(automations.map(a => [a.id, a.enabled]))
   );
-
   return (
     <div className="flex flex-col gap-2">
       {!canAutomate && (
         <div className="flex items-center gap-2 p-3 rounded-xl bg-yellow-500/5 border border-yellow-500/20 mb-1">
           <AlertCircle className="w-4 h-4 text-yellow-400 shrink-0" />
-          <p className="text-xs text-yellow-400">بعض الأتمتة تحتاج صلاحية مشرف في المجموعة.</p>
+          <p className="text-xs text-yellow-400">بعض الأتمتة تحتاج صلاحية مشرف.</p>
         </div>
       )}
       {automations.map(a => {
@@ -486,10 +579,8 @@ function TabAuto({ group }: { group: WaGroup }) {
             <div className="flex-1">
               <p className="text-sm font-bold text-[var(--text-primary)]">{a.label}</p>
               <p className="text-xs text-[var(--text-muted)]">{a.desc}</p>
-              {locked && <p className="text-[10px] text-yellow-400 mt-0.5">⚠️ يحتاج صلاحية مشرف</p>}
             </div>
-            <button
-              disabled={locked}
+            <button disabled={locked}
               onClick={() => !locked && setStates(s => ({ ...s, [a.id]: !s[a.id] }))}
               className={cn('w-11 h-6 rounded-full transition-all relative shrink-0',
                 states[a.id] ? 'bg-[var(--brand-primary)]' : 'bg-[var(--bg-overlay)]',
@@ -509,18 +600,12 @@ function GroupAvatar({ group, size = 'md' }: { group: WaGroup; size?: 'sm' | 'md
   const [imgError, setImgError] = useState(false);
   const sizeMap = { sm: 'w-10 h-10 text-xs', md: 'w-12 h-12 text-sm', lg: 'w-14 h-14 text-base' };
   const initials = group.name.split(' ').slice(0, 2).map(w => w[0]).join('');
-
   if (group.avatar_url && !imgError) {
     return (
-      <img
-        src={group.avatar_url}
-        alt={group.name}
-        onError={() => setImgError(true)}
-        className={cn('rounded-2xl object-cover shrink-0', sizeMap[size])}
-      />
+      <img src={group.avatar_url} alt={group.name} onError={() => setImgError(true)}
+        className={cn('rounded-2xl object-cover shrink-0', sizeMap[size])} />
     );
   }
-
   return (
     <div className={cn(
       'rounded-2xl bg-gradient-to-br from-[var(--brand-primary)] to-[var(--brand-secondary)] flex items-center justify-center text-white font-bold shrink-0',
@@ -534,11 +619,8 @@ function GroupAvatar({ group, size = 'md' }: { group: WaGroup; size?: 'sm' | 'md
 /* ─────────────── Group Card ─────────────── */
 function GroupCard({ group, onClick }: { group: WaGroup; onClick: () => void }) {
   return (
-    <div
-      onClick={onClick}
-      className="card p-4 cursor-pointer hover:border-[var(--brand-primary)]/40 transition-all hover:-translate-y-0.5 group"
-    >
-      {/* Header */}
+    <div onClick={onClick}
+      className="card p-4 cursor-pointer hover:border-[var(--brand-primary)]/40 transition-all hover:-translate-y-0.5 group">
       <div className="flex items-start gap-3 mb-3">
         <GroupAvatar group={group} />
         <div className="flex-1 min-w-0">
@@ -551,13 +633,11 @@ function GroupCard({ group, onClick }: { group: WaGroup; onClick: () => void }) 
           )}
         </div>
       </div>
-
-      {/* Stats */}
       <div className="grid grid-cols-3 gap-2 mb-3">
         {[
-          { icon: Users,         value: group.members_count.toLocaleString(), label: 'عضو'      },
-          { icon: Crown,         value: group.admins_count,                    label: 'مشرف'     },
-          { icon: Activity,      value: `${group.activity_level}%`,           label: 'نشاط'     },
+          { icon: Users,    value: group.members_count.toLocaleString(), label: 'عضو'  },
+          { icon: Crown,    value: group.admins_count,                    label: 'مشرف' },
+          { icon: Activity, value: `${group.activity_level}%`,           label: 'نشاط' },
         ].map((s, i) => (
           <div key={i} className="bg-[var(--bg-elevated)] rounded-xl p-2 text-center">
             <s.icon className="w-3.5 h-3.5 text-[var(--brand-primary)] mx-auto mb-1" />
@@ -566,10 +646,7 @@ function GroupCard({ group, onClick }: { group: WaGroup; onClick: () => void }) 
           </div>
         ))}
       </div>
-
       <ActivityBar level={group.activity_level} />
-
-      {/* Footer */}
       <div className="flex items-center justify-between mt-3 pt-3 border-t border-[var(--border-default)]">
         <div className="flex items-center gap-2">
           {group.is_admin && (
@@ -596,7 +673,6 @@ function GroupModal({ group, accountId, onClose }: {
   group: WaGroup; accountId: string; onClose: () => void
 }) {
   const [tab, setTab] = useState('info');
-
   const content: Record<string, React.ReactNode> = {
     info:    <TabInfo    group={group} />,
     publish: <TabPublish group={group} />,
@@ -605,7 +681,6 @@ function GroupModal({ group, accountId, onClose }: {
     send:    <TabSend    group={group} />,
     auto:    <TabAuto    group={group} />,
   };
-
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="max-w-lg flex flex-col max-h-[90vh]">
@@ -617,34 +692,24 @@ function GroupModal({ group, accountId, onClose }: {
               <p className="text-xs text-[var(--text-muted)] mt-0.5">
                 {group.members_count.toLocaleString()} عضو • {group.admins_count} مشرف
               </p>
-              <div className="mt-1">
-                <PublishBadge status={group.publish_status} />
-              </div>
+              <div className="mt-1"><PublishBadge status={group.publish_status} /></div>
             </div>
           </div>
         </DialogHeader>
-
-        {/* Tabs */}
         <div className="flex gap-1 overflow-x-auto py-1 shrink-0" style={{ scrollbarWidth: 'none' }}>
           {GROUP_TABS.map(t => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
+            <button key={t.id} onClick={() => setTab(t.id)}
               className={cn(
                 'flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium whitespace-nowrap transition-colors shrink-0',
                 tab === t.id
                   ? 'bg-[var(--brand-primary)] text-white shadow-[var(--shadow-glow)]'
                   : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-              )}
-            >
+              )}>
               <t.icon className="w-3.5 h-3.5" />{t.label}
             </button>
           ))}
         </div>
-
-        <div className="flex-1 overflow-y-auto">
-          {content[tab]}
-        </div>
+        <div className="flex-1 overflow-y-auto">{content[tab]}</div>
       </DialogContent>
     </Dialog>
   );
@@ -669,39 +734,113 @@ function GroupSkeleton() {
   );
 }
 
+/* ─────────────── Progress Indicator ─────────────── */
+function AutoSyncIndicator({
+  enabled,
+  intervalMinutes,
+  syncedAt,
+  nextSyncIn,
+}: {
+  enabled: boolean;
+  intervalMinutes: number;
+  syncedAt: string | null;
+  nextSyncIn: number; // seconds
+}) {
+  if (!enabled || intervalMinutes === 0) return null;
+
+  const totalSeconds = intervalMinutes * 60;
+  const pct = totalSeconds > 0 ? Math.max(0, Math.min(100, ((totalSeconds - nextSyncIn) / totalSeconds) * 100)) : 0;
+
+  const fmt = (s: number) => {
+    if (s <= 0) return 'الآن';
+    if (s < 60) return `${s}ث`;
+    if (s < 3600) return `${Math.floor(s / 60)}د`;
+    return `${Math.floor(s / 3600)}س`;
+  };
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-default)]">
+      <div className="relative w-6 h-6 shrink-0">
+        <svg className="w-6 h-6 -rotate-90" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" fill="none" stroke="var(--border-default)" strokeWidth="2.5" />
+          <circle cx="12" cy="12" r="9" fill="none" stroke="var(--brand-primary)" strokeWidth="2.5"
+            strokeDasharray={`${2 * Math.PI * 9}`}
+            strokeDashoffset={`${2 * Math.PI * 9 * (1 - pct / 100)}`}
+            strokeLinecap="round"
+            style={{ transition: 'stroke-dashoffset 1s linear' }}
+          />
+        </svg>
+        <RefreshCw className="w-2.5 h-2.5 text-[var(--brand-primary)] absolute inset-0 m-auto" />
+      </div>
+      <div className="flex flex-col min-w-0">
+        <span className="text-[10px] text-[var(--text-muted)]">تحديث تلقائي</span>
+        <span className="text-xs font-bold text-[var(--brand-primary)]">
+          {nextSyncIn <= 0 ? 'جاري التحديث...' : `بعد ${fmt(nextSyncIn)}`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /* ─────────────── Main View ─────────────── */
 export default function GroupsView({ accountId }: { accountId: string | null }) {
-  const [groups,        setGroups       ] = useState<WaGroup[]>([]);
+  // ★ تهيئة الحالة من الكاش العالمي مباشرة — لا يختفي البيانات عند العودة
+  const cached = accountId ? globalCache.get(accountId) : null;
+
+  const [groups,        setGroups       ] = useState<WaGroup[]>(cached?.groups || []);
   const [loading,       setLoading      ] = useState(false);
   const [syncing,       setSyncing      ] = useState(false);
   const [error,         setError        ] = useState<string | null>(null);
-  const [syncedAt,      setSyncedAt     ] = useState<string | null>(null);
+  const [syncedAt,      setSyncedAt     ] = useState<string | null>(cached?.syncedAt || null);
   const [filter,        setFilter       ] = useState('all');
   const [search,        setSearch       ] = useState('');
   const [showFilters,   setShowFilters  ] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState<WaGroup | null>(null);
+  const [showSyncSettings, setShowSyncSettings] = useState(false);
+  const [nextSyncIn,    setNextSyncIn   ] = useState(0);
 
-  // ── جلب المجموعات ─────────────────────────────────────────────────────────
+  // إعدادات المزامنة — مخزّنة في localStorage
+  const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => {
+    if (!accountId) return { interval_minutes: 15, auto_sync_enabled: true, last_auto_sync: null };
+    try {
+      const stored = localStorage.getItem(`wa_sync_${accountId}`);
+      return stored ? JSON.parse(stored) : { interval_minutes: 15, auto_sync_enabled: true, last_auto_sync: null };
+    } catch { return { interval_minutes: 15, auto_sync_enabled: true, last_auto_sync: null }; }
+  });
+
+  const autoRefreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const nextSyncRef      = useRef<number>(syncSettings.interval_minutes * 60);
+
+  // ── حفظ إعدادات المزامنة ───────────────────────────────────────────────
+  const saveSyncSettings = useCallback((s: SyncSettings) => {
+    if (!accountId) return;
+    setSyncSettings(s);
+    try { localStorage.setItem(`wa_sync_${accountId}`, JSON.stringify(s)); } catch {}
+  }, [accountId]);
+
+  // ── جلب المجموعات من الكاش أولاً ثم تحديث الـ state ───────────────────
   const fetchGroups = useCallback(async (forceRefresh = false) => {
     if (!accountId) return;
-    setLoading(true);
+
+    // إذا لدينا كاش حديث (< 60 ثانية) وليس force refresh — لا داعي للجلب
+    const existing = globalCache.get(accountId);
+    if (!forceRefresh && existing && (Date.now() - existing.ts) < 60_000) return;
+
+    // إذا كان هناك كاش قديم، أبقِ عليه أثناء التحميل (لا تعرض حالة فارغة)
+    if (!existing) setLoading(true);
     setError(null);
 
     try {
       const url = `${API}/accounts/${accountId}/groups${forceRefresh ? '?refresh=1' : ''}`;
       const res  = await authFetch(url);
-
-      // تحقق أن الرد JSON وليس HTML أو خطأ شبكة
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
+      const ct   = res.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
         setError('خطأ في الاتصال بالخادم — تأكد من تشغيل الـ backend');
         return;
       }
-
       const data = await res.json();
-
       if (data.success) {
-        // تأكد أن كل مجموعة تحتوي بيانات آمنة قبل الـ render
         const safeGroups = (data.groups || []).map((g: any) => ({
           id:              String(g.id              ?? g.group_jid ?? ''),
           group_jid:       String(g.group_jid       ?? ''),
@@ -727,36 +866,45 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
           messages_today:  Number(g.messages_today) || 0,
           last_sync:       g.last_sync ? String(g.last_sync) : null,
         }));
+
         setGroups(safeGroups);
-        setSyncedAt(data.synced_at ? String(data.synced_at) : null);
+        const newSyncedAt = data.synced_at ? String(data.synced_at) : null;
+        setSyncedAt(newSyncedAt);
+
+        // ★ تحديث الكاش العالمي
+        globalCache.set(accountId, { groups: safeGroups, syncedAt: newSyncedAt, ts: Date.now() });
+
+        // تحديث إعدادات المزامنة من الخادم إن وُجدت
+        if (data.sync_settings) {
+          const ss: SyncSettings = {
+            interval_minutes:  data.sync_settings.interval_minutes ?? 15,
+            auto_sync_enabled: data.sync_settings.auto_sync_enabled ?? true,
+            last_auto_sync:    data.sync_settings.last_auto_sync ?? null,
+          };
+          saveSyncSettings(ss);
+        }
+
         if (data.warning) setError(String(data.warning));
       } else {
         setError(String(data.error || 'فشل جلب المجموعات'));
       }
     } catch (e: any) {
-      setError(String(e?.message || 'خطأ في الاتصال بالخادم'));
+      setError(String(e?.message || 'خطأ في الاتصال'));
     } finally {
       setLoading(false);
     }
-  }, [accountId]);
+  }, [accountId, saveSyncSettings]);
 
-  // ── مزامنة فورية من واتساب ────────────────────────────────────────────────
+  // ── مزامنة يدوية فورية ─────────────────────────────────────────────────
   const handleSync = async () => {
     if (!accountId || syncing) return;
     setSyncing(true);
     setError(null);
-
     try {
       const res  = await authFetch(`${API}/accounts/${accountId}/groups/sync`, { method: 'POST' });
-
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        setError('خطأ في الاتصال بالخادم');
-        return;
-      }
-
+      const ct   = res.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) { setError('خطأ في الاتصال'); return; }
       const data = await res.json();
-
       if (data.success) {
         const safeGroups = (data.groups || []).map((g: any) => ({
           id:              String(g.id              ?? g.group_jid ?? ''),
@@ -783,30 +931,75 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
           messages_today:  Number(g.messages_today) || 0,
           last_sync:       g.last_sync ? String(g.last_sync) : null,
         }));
+        const newSyncedAt = data.synced_at ? String(data.synced_at) : new Date().toISOString();
         setGroups(safeGroups);
-        setSyncedAt(data.synced_at ? String(data.synced_at) : null);
+        setSyncedAt(newSyncedAt);
+        globalCache.set(accountId, { groups: safeGroups, syncedAt: newSyncedAt, ts: Date.now() });
+        // إعادة ضبط العداد التنازلي
+        nextSyncRef.current = syncSettings.interval_minutes * 60;
+        setNextSyncIn(nextSyncRef.current);
       } else {
         setError(String(data.error || 'فشلت المزامنة'));
       }
     } catch (e: any) {
-      setError(String(e?.message || 'خطأ في الاتصال — تأكد أن الخادم يعمل'));
+      setError(String(e?.message || 'خطأ في الاتصال'));
     } finally {
       setSyncing(false);
     }
   };
 
-  // ── تحميل تلقائي عند اختيار حساب ────────────────────────────────────────
+  // ── تحميل عند تغيير الحساب ─────────────────────────────────────────────
   useEffect(() => {
-    if (accountId) {
-      setGroups([]);
-      setSyncedAt(null);
-      setError(null);
-      fetchGroups(false);
+    if (!accountId) return;
+    const existing = globalCache.get(accountId);
+    if (existing) {
+      // عرض الكاش فوراً
+      setGroups(existing.groups);
+      setSyncedAt(existing.syncedAt);
     }
+    // جلب التحديثات من الخادم في الخلفية (بدون إخفاء البيانات)
+    fetchGroups(false);
   }, [accountId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── فلترة المجموعات ───────────────────────────────────────────────────────
-  // ⚠️ يجب أن تكون useMemo هنا قبل أي return مشروط — قاعدة React Hooks
+  // ── العداد التنازلي ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (countdownTimer.current) clearInterval(countdownTimer.current);
+    if (!syncSettings.auto_sync_enabled || syncSettings.interval_minutes === 0) {
+      setNextSyncIn(0);
+      return;
+    }
+    nextSyncRef.current = syncSettings.interval_minutes * 60;
+    setNextSyncIn(nextSyncRef.current);
+
+    countdownTimer.current = setInterval(() => {
+      nextSyncRef.current = Math.max(0, nextSyncRef.current - 1);
+      setNextSyncIn(nextSyncRef.current);
+    }, 1000);
+
+    return () => {
+      if (countdownTimer.current) clearInterval(countdownTimer.current);
+    };
+  }, [syncSettings.interval_minutes, syncSettings.auto_sync_enabled]);
+
+  // ── التحديث التلقائي الدوري ─────────────────────────────────────────────
+  useEffect(() => {
+    if (autoRefreshTimer.current) clearInterval(autoRefreshTimer.current);
+    if (!accountId || !syncSettings.auto_sync_enabled || syncSettings.interval_minutes === 0) return;
+
+    const intervalMs = syncSettings.interval_minutes * 60 * 1000;
+    autoRefreshTimer.current = setInterval(async () => {
+      console.log(`[GroupsView] Auto-fetching groups for ${accountId}...`);
+      await fetchGroups(false);
+      nextSyncRef.current = syncSettings.interval_minutes * 60;
+      setNextSyncIn(nextSyncRef.current);
+    }, intervalMs);
+
+    return () => {
+      if (autoRefreshTimer.current) clearInterval(autoRefreshTimer.current);
+    };
+  }, [accountId, syncSettings.interval_minutes, syncSettings.auto_sync_enabled, fetchGroups]);
+
+  // ── فلترة المجموعات ─────────────────────────────────────────────────────
   const filtered = useMemo(() => {
     if (!accountId) return [];
     return groups.filter(g => {
@@ -821,8 +1014,7 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     });
   }, [accountId, groups, filter, search]);
 
-  // ── إحصائيات ─────────────────────────────────────────────────────────────
-  // ⚠️ يجب أن تكون useMemo هنا قبل أي return مشروط — قاعدة React Hooks
+  // ── إحصائيات ────────────────────────────────────────────────────────────
   const stats = useMemo(() => {
     if (!accountId) return { total: 0, canPublish: 0, asAdmin: 0, totalMem: 0, restricted: 0, avgAct: 0 };
     const total      = groups.length;
@@ -834,7 +1026,7 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     return { total, canPublish, asAdmin, totalMem, restricted, avgAct };
   }, [accountId, groups]);
 
-  // ── حالة: لا يوجد حساب مختار ─────────────────────────────────────────────
+  // ── حالة: لا يوجد حساب مختار ────────────────────────────────────────────
   if (!accountId) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -849,6 +1041,8 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     );
   }
 
+  const activeInterval = SYNC_OPTIONS.find(o => o.value === syncSettings.interval_minutes);
+
   return (
     <div className="flex flex-col gap-5 h-full">
 
@@ -860,53 +1054,94 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
             بيانات حقيقية مستخرجة مباشرة من الحساب المتصل
             {syncedAt && (
               <span className="text-[var(--text-muted)] mr-1">
-                · آخر مزامنة: {new Date(syncedAt).toLocaleTimeString('ar-SA')}
+                · آخر مزامنة: {timeAgo(syncedAt)}
               </span>
             )}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={handleSync}
-            disabled={syncing}
-            className="gap-2 shrink-0"
-            size="sm"
-          >
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+
+          {/* مؤشر التحديث التلقائي */}
+          <AutoSyncIndicator
+            enabled={syncSettings.auto_sync_enabled}
+            intervalMinutes={syncSettings.interval_minutes}
+            syncedAt={syncedAt}
+            nextSyncIn={nextSyncIn}
+          />
+
+          {/* زر المزامنة اليدوية */}
+          <Button onClick={handleSync} disabled={syncing} className="gap-2 shrink-0" size="sm">
             <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
             {syncing ? 'جارٍ المزامنة...' : '🔄 مزامنة'}
           </Button>
-          <Button
-            variant="outline" size="sm"
-            className="gap-2 shrink-0"
-            onClick={() => setShowFilters(!showFilters)}
-          >
+
+          {/* إعدادات المزامنة التلقائية */}
+          <div className="relative">
+            <Button
+              variant="outline" size="sm"
+              className={cn('gap-2 shrink-0', syncSettings.auto_sync_enabled && syncSettings.interval_minutes > 0 && 'border-[var(--brand-primary)]/40')}
+              onClick={() => setShowSyncSettings(!showSyncSettings)}
+            >
+              <Timer className="w-4 h-4" />
+              {activeInterval?.short || 'يدوي'}
+              <ChevronDown className={cn('w-3 h-3 transition-transform', showSyncSettings && 'rotate-180')} />
+            </Button>
+
+            {showSyncSettings && (
+              <SyncSettingsPanel
+                accountId={accountId}
+                settings={syncSettings}
+                onSave={(s) => {
+                  saveSyncSettings(s);
+                  nextSyncRef.current = s.interval_minutes * 60;
+                  setNextSyncIn(nextSyncRef.current);
+                }}
+                onClose={() => setShowSyncSettings(false)}
+              />
+            )}
+          </div>
+
+          {/* الفلاتر */}
+          <Button variant="outline" size="sm" className="gap-2 shrink-0"
+            onClick={() => setShowFilters(!showFilters)}>
             <Filter className="w-4 h-4" />فلترة
             {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           </Button>
         </div>
       </div>
 
+      {/* ── شريط حالة المزامنة التلقائية ── */}
+      {syncSettings.auto_sync_enabled && syncSettings.interval_minutes > 0 && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--brand-primary)]/5 border border-[var(--brand-primary)]/20">
+          <div className="w-2 h-2 rounded-full bg-[var(--brand-primary)] animate-pulse" />
+          <p className="text-xs text-[var(--brand-primary)]">
+            التحديث التلقائي مفعّل · {activeInterval?.label}
+          </p>
+          <button
+            onClick={() => saveSyncSettings({ ...syncSettings, auto_sync_enabled: false })}
+            className="mr-auto text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] underline"
+          >
+            إيقاف
+          </button>
+        </div>
+      )}
+
       {/* ── تحذير / خطأ ── */}
       {error && (
         <div className="flex items-center gap-2 p-3 rounded-xl bg-yellow-500/5 border border-yellow-500/20">
           <AlertCircle className="w-4 h-4 text-yellow-400 shrink-0" />
           <p className="text-sm text-yellow-400">{error}</p>
-          {error.includes('غير متصل') && (
-            <a href="/accounts" className="mr-auto text-xs font-bold text-[var(--brand-primary)] underline">
-              ربط الحساب
-            </a>
-          )}
         </div>
       )}
 
       {/* ── Stats ── */}
       <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
-        <StatCard icon={Users}       label="إجمالي المجموعات"     value={stats.total}                     color="text-[var(--brand-primary)]" />
-        <StatCard icon={UserCheck}   label="إجمالي الأعضاء"       value={stats.totalMem.toLocaleString()}  color="text-blue-400" />
-        <StatCard icon={CheckCircle2} label="يستطيع النشر"        value={stats.canPublish}                 color="text-green-400" />
-        <StatCard icon={Crown}       label="أنت مشرف"             value={stats.asAdmin}                    color="text-yellow-400" />
-        <StatCard icon={Lock}        label="مقيدة جزئياً"         value={stats.restricted}                 color="text-orange-400" />
-        <StatCard icon={Zap}         label="معدل النشاط"          value={`${stats.avgAct}%`}               color="text-purple-400" />
+        <StatCard icon={Users}        label="إجمالي المجموعات"    value={stats.total}                    color="text-[var(--brand-primary)]" />
+        <StatCard icon={UserCheck}    label="إجمالي الأعضاء"      value={stats.totalMem.toLocaleString()} color="text-blue-400" />
+        <StatCard icon={CheckCircle2} label="يستطيع النشر"        value={stats.canPublish}                color="text-green-400" />
+        <StatCard icon={Crown}        label="أنت مشرف"            value={stats.asAdmin}                   color="text-yellow-400" />
+        <StatCard icon={Lock}         label="مقيدة جزئياً"        value={stats.restricted}                color="text-orange-400" />
+        <StatCard icon={Zap}          label="معدل النشاط"         value={`${stats.avgAct}%`}              color="text-purple-400" />
       </div>
 
       {/* ── Search + Filters ── */}
@@ -925,20 +1160,16 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
             </button>
           )}
         </div>
-
         {showFilters && (
           <div className="flex gap-2 flex-wrap">
             {FILTERS.map(f => (
-              <button
-                key={f.id}
-                onClick={() => setFilter(f.id)}
+              <button key={f.id} onClick={() => setFilter(f.id)}
                 className={cn(
                   'px-3 py-1.5 rounded-xl text-xs font-medium transition-colors',
                   filter === f.id
                     ? 'bg-[var(--brand-primary)] text-white shadow-[var(--shadow-glow)]'
                     : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-default)]'
-                )}
-              >
+                )}>
                 {f.label}
               </button>
             ))}
@@ -948,12 +1179,13 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
 
       {/* ── Groups Grid ── */}
       <div className="flex-1 overflow-y-auto">
-        {loading ? (
+        {loading && groups.length === 0 ? (
+          /* سكلتون — فقط عند التحميل الأول */
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {[...Array(6)].map((_, i) => <GroupSkeleton key={i} />)}
           </div>
         ) : groups.length === 0 && !error ? (
-          /* حالة: لا توجد مجموعات مزامنة بعد */
+          /* حالة فارغة — المجموعات لم تُزامَن بعد */
           <div className="h-full flex items-center justify-center">
             <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
               <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
@@ -979,11 +1211,20 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {filtered.map(g => (
-              <GroupCard key={g.group_jid} group={g} onClick={() => setSelectedGroup(g)} />
-            ))}
-          </div>
+          <>
+            {/* تحميل خلفي خفي */}
+            {loading && (
+              <div className="flex items-center gap-2 mb-3 p-2 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-default)]">
+                <RefreshCw className="w-3 h-3 text-[var(--brand-primary)] animate-spin" />
+                <span className="text-xs text-[var(--text-muted)]">جاري تحديث البيانات في الخلفية...</span>
+              </div>
+            )}
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {filtered.map(g => (
+                <GroupCard key={g.group_jid} group={g} onClick={() => setSelectedGroup(g)} />
+              ))}
+            </div>
+          </>
         )}
       </div>
 
@@ -991,6 +1232,7 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
       {groups.length > 0 && (
         <div className="text-xs text-[var(--text-muted)] text-center pb-1">
           عرض {filtered.length} من {groups.length} مجموعة حقيقية
+          {loading && <span className="mr-2 text-[var(--brand-primary)]">· يجري التحديث...</span>}
         </div>
       )}
 
@@ -1005,4 +1247,3 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     </div>
   );
 }
-
