@@ -69,6 +69,7 @@ router.delete('/accounts/:id',          auth, subCheck, AccountController.delete
 
 const GroupController = require('./controllers/GroupController');
 router.get('/accounts/:accountId/groups',                  auth, subCheck, GroupController.getGroups.bind(GroupController));
+router.post('/accounts/:accountId/groups/sync',            auth, subCheck, GroupController.syncGroups.bind(GroupController));
 router.get('/accounts/:accountId/groups/:groupId/members', auth, subCheck, GroupController.getGroupMembers.bind(GroupController));
 
 // ══════════════════════════════════════════════════════
