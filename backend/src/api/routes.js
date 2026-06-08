@@ -95,17 +95,30 @@ router.get('/accounts/:accountId/campaigns/:campaignId/stats',  auth, subCheck, 
 router.get('/accounts/:accountId/campaigns',                    auth, subCheck, CampaignController.listCampaigns.bind(CampaignController));
 
 // ══════════════════════════════════════════════════════
-//  LINKS — FIX: use actual method names
+//  LINKS — الجزء الثالث: نظام مراقبة الروابط المتقدم
 // ══════════════════════════════════════════════════════
 const LinkController = require('./controllers/LinkController');
+// قراءة الروابط والإحصائيات
 router.get('/accounts/:accountId/links',                      auth, subCheck, LinkController.getLinks.bind(LinkController));
 router.get('/accounts/:accountId/links/stats',                auth, subCheck, LinkController.getStats.bind(LinkController));
 router.get('/accounts/:accountId/links/categories',           auth, subCheck, LinkController.getCategories.bind(LinkController));
+router.get('/accounts/:accountId/links/export/csv',           auth, subCheck, LinkController.exportCSV.bind(LinkController));
+
+// حذف / تصنيف
+router.delete('/accounts/:accountId/links/:linkId',           auth, subCheck, LinkController.deleteLink.bind(LinkController));
+router.patch('/accounts/:accountId/links/:linkId/spam',       auth, subCheck, LinkController.markSpam.bind(LinkController));
 router.post('/accounts/:accountId/links/categories',          auth, subCheck, async (req, res) => res.status(501).json({ success: false, error: 'Not implemented' }));
 router.patch('/accounts/:accountId/links/:linkId/categorize', auth, subCheck, async (req, res) => res.status(501).json({ success: false, error: 'Not implemented' }));
+
+// انضمام تلقائي — نقطة الاتصال الجديدة (الجزء الثالث)
+router.post('/accounts/:accountId/links/auto-join/bulk',      auth, subCheck, LinkController.bulkAutoJoin.bind(LinkController));
+router.get('/accounts/:accountId/links/auto-join/queue',      auth, subCheck, LinkController.getJoinQueue.bind(LinkController));
+router.delete('/accounts/:accountId/links/auto-join/queue',   auth, subCheck, LinkController.clearJoinQueue.bind(LinkController));
+// رابط توافقي قديم
 router.post('/accounts/:accountId/links/:linkId/auto-join',   auth, subCheck, LinkController.autoJoinLinks.bind(LinkController));
-router.get('/accounts/:accountId/links/auto-join/queue',      auth, subCheck, async (req, res) => res.json({ success: true, queue: [] }));
-router.delete('/accounts/:accountId/links/:linkId',           auth, subCheck, LinkController.deleteLink.bind(LinkController));
+
+// محرك المراقبة
+router.get('/accounts/:accountId/links/monitor/status',       auth, subCheck, LinkController.getMonitorStatus.bind(LinkController));
 
 // Link Settings
 const LinkSettingsController = require('./controllers/LinkSettingsController');
