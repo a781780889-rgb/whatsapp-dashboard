@@ -84,6 +84,19 @@ router.put('/accounts/:accountId/groups/sync-settings',          auth, subCheck,
 router.get('/accounts/:accountId/groups/:groupId/members',       auth, subCheck, GroupController.getGroupMembers.bind(GroupController));
 
 // ══════════════════════════════════════════════════════
+//  الجزء الخامس — نشر لأعضاء / تصدير / استثناءات
+// ══════════════════════════════════════════════════════
+router.post('/accounts/:accountId/groups/members/preview',       auth, subCheck, GroupController.getMembersForPublish.bind(GroupController));
+router.post('/accounts/:accountId/groups/members/publish',       auth, subCheck, GroupController.publishToMembers.bind(GroupController));
+router.post('/accounts/:accountId/groups/members/export-multi',  auth, subCheck, GroupController.exportMultipleGroupsMembers.bind(GroupController));
+router.get('/accounts/:accountId/groups/:groupId/members/export',auth, subCheck, GroupController.exportMembers.bind(GroupController));
+router.get('/accounts/:accountId/groups/saved-members',          auth, subCheck, GroupController.getSavedMembers.bind(GroupController));
+router.get('/accounts/:accountId/groups/exclusions',             auth, subCheck, GroupController.getExclusions.bind(GroupController));
+router.post('/accounts/:accountId/groups/exclusions',            auth, subCheck, GroupController.addExclusions.bind(GroupController));
+router.delete('/accounts/:accountId/groups/exclusions',          auth, subCheck, GroupController.clearExclusions.bind(GroupController));
+router.delete('/accounts/:accountId/groups/exclusions/:exclusionId', auth, subCheck, GroupController.deleteExclusion.bind(GroupController));
+
+// ══════════════════════════════════════════════════════
 //  CAMPAIGNS
 // ══════════════════════════════════════════════════════
 const CampaignController = require('./controllers/CampaignController');
