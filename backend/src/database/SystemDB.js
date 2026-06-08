@@ -140,19 +140,47 @@ class SystemDB {
         // ── WA Accounts ────────────────────────────────────────────────────
         await query(`
             CREATE TABLE IF NOT EXISTS accounts (
-                id           TEXT PRIMARY KEY,
-                user_id      TEXT,
-                phone_number TEXT,
-                name         TEXT,
-                status       TEXT DEFAULT 'disconnected',
-                health_status TEXT DEFAULT 'normal',
+                id                  TEXT PRIMARY KEY,
+                user_id             TEXT,
+                phone_number        TEXT,
+                name                TEXT,
+                status              TEXT DEFAULT 'disconnected',
+                health_status       TEXT DEFAULT 'normal',
                 messages_sent_today INTEGER DEFAULT 0,
-                last_message_at TIMESTAMP,
-                warmup_phase BOOLEAN DEFAULT TRUE,
-                created_at   TIMESTAMP DEFAULT NOW(),
+                last_message_at     TIMESTAMP,
+                warmup_phase        BOOLEAN DEFAULT TRUE,
+                role                TEXT DEFAULT 'stopped',
+                task_status         TEXT DEFAULT 'idle',
+                last_activity_at    TIMESTAMP,
+                updated_at          TIMESTAMP DEFAULT NOW(),
+                created_at          TIMESTAMP DEFAULT NOW(),
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
         `);
+
+        // ── Migration: إضافة أعمدة الأدوار للحسابات القديمة ────────────────
+        const existingCols = await query(`
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'accounts' AND table_schema = 'public'
+        `).catch(() => ({ rows: [] }));
+        const colNames = (existingCols.rows || []).map(r => r.column_name);
+
+        if (!colNames.includes('role')) {
+            await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'stopped'`);
+            console.log('[SystemDB] Migration: added accounts.role column');
+        }
+        if (!colNames.includes('task_status')) {
+            await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS task_status TEXT DEFAULT 'idle'`);
+            console.log('[SystemDB] Migration: added accounts.task_status column');
+        }
+        if (!colNames.includes('last_activity_at')) {
+            await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP`);
+            console.log('[SystemDB] Migration: added accounts.last_activity_at column');
+        }
+        if (!colNames.includes('updated_at')) {
+            await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
+            console.log('[SystemDB] Migration: added accounts.updated_at column');
+        }
 
         // ── WhatsApp Sessions ──────────────────────────────────────────────
         // Section 7.2 Option A + 16.3 قرار #1:
