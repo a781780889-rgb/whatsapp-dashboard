@@ -44,7 +44,20 @@ function AppInner() {
   // ── Account state lifted here to satisfy AppLayout + AccountsView ──────────
   const [accounts, setAccounts] = useState<any[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  // ── FIX: Persist selectedAccountId to localStorage so page refresh doesn't
+  //         cause the null → real-id transition that triggers hooks violations.
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(() => {
+    return localStorage.getItem('wa_selected_account') || null;
+  });
+
+  const handleAccountChange = useCallback((id: string | null) => {
+    if (id) {
+      localStorage.setItem('wa_selected_account', id);
+    } else {
+      localStorage.removeItem('wa_selected_account');
+    }
+    setSelectedAccountId(id);
+  }, []);
 
   // ── FIX 1: Race condition — cancel stale verify fetches with cleanup flag ──
   useEffect(() => {
@@ -75,8 +88,15 @@ function AppInner() {
       if (data.success) {
         const list: any[] = data.accounts ?? [];
         setAccounts(list);
-        // Auto-select first account if none chosen yet
-        setSelectedAccountId(prev => prev ?? (list.length > 0 ? list[0].id : null));
+        // Restore saved account OR auto-select first account
+        setSelectedAccountId(prev => {
+          const saved = localStorage.getItem('wa_selected_account');
+          if (saved && list.some((a: any) => a.id === saved)) return saved;
+          if (prev && list.some((a: any) => a.id === prev)) return prev;
+          const first = list.length > 0 ? list[0].id : null;
+          if (first) localStorage.setItem('wa_selected_account', first);
+          return first;
+        });
       }
     } catch {
       // network error — silent
@@ -87,6 +107,19 @@ function AppInner() {
 
   useEffect(() => {
     if (token && currentUser) fetchAccounts();
+  }, [token, currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Account status polling every 30s — keeps TopBar indicator live ────────
+  useEffect(() => {
+    if (!token || !currentUser) return;
+    const id = setInterval(() => {
+      // Silent refresh: update account statuses without showing loading spinner
+      authFetch(`${API}/accounts`)
+        .then(r => r.json())
+        .then(d => { if (d.success) setAccounts(d.accounts ?? []); })
+        .catch(() => {});
+    }, 30_000);
+    return () => clearInterval(id);
   }, [token, currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleLogin(accessToken: string, refreshToken: string, user: any) {
@@ -106,6 +139,7 @@ function AppInner() {
       }).catch(() => {});
     }
     clearTokens();
+    localStorage.removeItem('wa_selected_account');
     setToken(null);
     setCurrentUser(null);
     setAccounts([]);
@@ -148,7 +182,7 @@ function AppInner() {
       onLogout={handleLogout}
       accounts={accounts}
       selectedAccountId={selectedAccountId}
-      onAccountChange={setSelectedAccountId}
+      onAccountChange={handleAccountChange}
     >
       <ErrorBoundary>
         <Routes>
@@ -160,7 +194,7 @@ function AppInner() {
               loading={accountsLoading}
               fetchAccounts={fetchAccounts}
               selectedAccountId={selectedAccountId}
-              setSelectedAccountId={setSelectedAccountId}
+              setSelectedAccountId={handleAccountChange}
             />
           } />
           <Route path="/campaigns"      element={<CampaignsView      accountId={selectedAccountId} />} />
@@ -204,3 +238,4 @@ export default function App() {
     </ToastProvider>
   );
 }
+
