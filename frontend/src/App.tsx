@@ -13,6 +13,7 @@ import LinkDashboardView    from './views/LinkDashboardView';
 import ScheduleDashboardView from './views/ScheduleDashboardView';
 import AdLibraryView        from './views/AdLibraryView';
 import DirectPublishView    from './views/DirectPublishView';
+import ProtectionView      from './views/ProtectionView';
 // Admin views
 import UsersView            from './views/UsersView';
 import SubscriptionsView    from './views/SubscriptionsView';
@@ -209,6 +210,7 @@ function AppInner() {
           <Route path="/schedules"      element={<ScheduleDashboardView accountId={selectedAccountId} />} />
           <Route path="/ad-library"     element={<AdLibraryView        accountId={selectedAccountId} />} />
           <Route path="/direct-publish" element={<DirectPublishView    accountId={selectedAccountId} accounts={accounts} />} />
+          <Route path="/protection"    element={<ProtectionView />} />
 
           {/* Admin-only routes */}
           <Route path="/admin/stats"   element={
