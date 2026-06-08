@@ -39,12 +39,23 @@ class UserController {
                        s.plan_type, s.expires_at, s.status as sub_status,
                        l.license_key, l.status as lic_status
                 FROM users u
-                LEFT JOIN subscriptions s ON s.user_id=u.id
-                    AND s.status='active'
-                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                LEFT JOIN licenses l ON l.user_id=u.id AND l.status='active'
+                LEFT JOIN LATERAL (
+                    SELECT plan_type, expires_at, status
+                    FROM subscriptions
+                    WHERE user_id = u.id
+                      AND status = 'active'
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) s ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT license_key, status
+                    FROM licenses
+                    WHERE user_id = u.id AND status = 'active'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) l ON TRUE
                 ${where}
-                GROUP BY u.id
                 ORDER BY u.created_at DESC
                 LIMIT $1 OFFSET $2`,
                 [...params, Number(limit), offset]);
