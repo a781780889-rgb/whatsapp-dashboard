@@ -65,10 +65,16 @@ function AppInner() {
     let cancelled = false;
 
     fetch(`${API}/auth/verify`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
+      .then(r => {
+        if (cancelled) return null;
+        // FIX: فقط 401 يعني التوكن منتهي → logout
+        // أي خطأ آخر (500, network) → لا نحذف الجلسة، فقط نُعلّم offline
+        if (r.status === 401) { handleLogout(); return null; }
+        return r.json();
+      })
       .then(d => {
-        if (cancelled) return;                       // ← stale response, ignore
-        if (!d.success) { handleLogout(); return; }
+        if (!d || cancelled) return;
+        if (!d.success) { setIsConnected(false); return; } // server error, keep session
         const merged = { ...currentUser, ...d.user };
         setCurrentUser(merged);
         localStorage.setItem(USER_KEY, JSON.stringify(merged));
