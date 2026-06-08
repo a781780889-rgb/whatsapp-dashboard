@@ -12,7 +12,10 @@ import {
   RefreshCw, AlertCircle, WifiOff, CheckCircle2,
   Video, Paperclip, Megaphone, Lock, Unlock, Settings,
   Timer, RotateCcw, Wifi, ChevronRight, Play, Pause,
-  Archive, LayoutGrid, CheckSquare, XSquare, MinusSquare
+  Archive, LayoutGrid, CheckSquare, XSquare, MinusSquare,
+  UserMinus, UserX, Upload, Table, ListFilter, Plus, Trash2,
+  DatabaseZap, FileSpreadsheet, SendHorizonal, Eye as EyeIcon,
+  AlertTriangle, Info
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { API, authFetch } from '@/utils/api';
@@ -73,6 +76,33 @@ interface SyncSettings {
   auto_sync_enabled: boolean;
   last_auto_sync:    string | null;
 }
+
+/* ─────────────── الجزء الخامس — أنواع جديدة ─────────────── */
+interface AdItem {
+  id:      string;
+  name:    string;
+  content: string;
+}
+
+interface ExclusionItem {
+  id:      string;
+  phone:   string;
+  note:    string;
+  created_at: string;
+}
+
+interface MemberPublishConfig {
+  group_jids:        string[];
+  account_ids:       string[];
+  ad_library_id:     string;
+  custom_content:    string;
+  send_time:         string;
+  interval_seconds:  number;
+  exclude_admins:    boolean;
+  excluded_numbers:  string[];
+}
+
+type ExportFormat = 'csv' | 'excel' | 'txt' | 'db';
 
 /* ─────────────────────────────────────────────────────────────────────────────
    ★ كاش عالمي — يحافظ على البيانات عند مغادرة القسم والعودة إليه
@@ -386,6 +416,9 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
   const [error,   setError  ] = useState<string|null>(null);
   const [search,  setSearch ] = useState('');
   const [filter,  setFilter ] = useState<'all'|'admin'|'member'>('all');
+  const [saving,  setSaving ] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string|null>(null);
+  const [showSaveMenu, setShowSaveMenu] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -415,6 +448,73 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
     return true;
   }), [members, filter, search]);
 
+  /* ── تصدير الأعضاء ── */
+  const handleExport = async (format: ExportFormat) => {
+    setSaving(true);
+    setSaveMsg(null);
+    setShowSaveMenu(false);
+    try {
+      if (format === 'db') {
+        // حفظ في قاعدة البيانات عبر endpoint
+        const res  = await authFetch(
+          `${API}/accounts/${accountId}/groups/${encodeURIComponent(group.group_jid)}/members/export?format=json`
+        );
+        const data = await res.json();
+        if (data.success) {
+          setSaveMsg(`✅ تم حفظ ${data.count} عضو في قاعدة البيانات`);
+        } else {
+          setSaveMsg(`❌ ${data.error}`);
+        }
+        return;
+      }
+
+      if (format === 'excel') {
+        // جلب البيانات ثم بناء CSV/Excel في المتصفح
+        const res  = await authFetch(
+          `${API}/accounts/${accountId}/groups/${encodeURIComponent(group.group_jid)}/members/export?format=json`
+        );
+        const data = await res.json();
+        if (!data.success) { setSaveMsg(`❌ ${data.error}`); return; }
+
+        // بناء CSV مع BOM لـ Excel
+        const header = 'الرقم,الدور,اسم المجموعة,تاريخ الاستخراج\n';
+        const rows   = data.members.map((m: any) =>
+          `${m.phone},${m.role},"${m.group_name}",${m.extracted_at}`
+        ).join('\n');
+        const blob = new Blob(['\ufeff' + header + rows], { type: 'text/csv;charset=utf-8' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `members_${group.name}_${Date.now()}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setSaveMsg(`✅ تم تصدير ${data.count} عضو`);
+        return;
+      }
+
+      // CSV / TXT — تحميل مباشر من السيرفر
+      const exportUrl = `${API}/accounts/${accountId}/groups/${encodeURIComponent(group.group_jid)}/members/export?format=${format}`;
+      const token     = localStorage.getItem('auth_token') || '';
+      const res       = await fetch(exportUrl, { headers: { Authorization: `Bearer ${token}` } });
+
+      if (!res.ok) { setSaveMsg('❌ فشل التصدير'); return; }
+
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const ext  = format === 'txt' ? 'txt' : 'csv';
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `members_${group.name}_${Date.now()}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setSaveMsg(`✅ تم تصدير الأعضاء`);
+    } catch (e: any) {
+      setSaveMsg(`❌ ${e.message || 'خطأ'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) return (
     <div className="flex flex-col gap-2">
       {[...Array(5)].map((_, i) => <div key={i} className="h-12 bg-[var(--bg-elevated)] rounded-xl animate-pulse" />)}
@@ -429,10 +529,64 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="relative">
-        <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
-        <input className="input pr-9 w-full" placeholder="بحث برقم الهاتف..." value={search} onChange={e => setSearch(e.target.value)} />
+      {/* ── شريط الأدوات ── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1">
+          <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
+          <input className="input pr-9 w-full" placeholder="بحث برقم الهاتف..." value={search} onChange={e => setSearch(e.target.value)} />
+        </div>
+
+        {/* زر حفظ الأعضاء */}
+        <div className="relative">
+          <Button
+            size="sm"
+            onClick={() => setShowSaveMenu(!showSaveMenu)}
+            disabled={saving || members.length === 0}
+            className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white border-0"
+          >
+            {saving
+              ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              : <Download className="w-3.5 h-3.5" />
+            }
+            حفظ جميع الأعضاء
+            <ChevronDown className={cn('w-3 h-3 transition-transform', showSaveMenu && 'rotate-180')} />
+          </Button>
+
+          {showSaveMenu && (
+            <div className="absolute top-full left-0 mt-1.5 w-52 bg-[var(--bg-card)] border border-[var(--border-default)] rounded-2xl shadow-2xl z-50 p-2" dir="rtl">
+              <p className="text-[10px] font-semibold text-[var(--text-muted)] px-2 pb-1.5 pt-0.5 uppercase tracking-wider">اختر صيغة الحفظ</p>
+              {[
+                { fmt: 'csv'   as ExportFormat, icon: FileText,        label: 'CSV',             desc: 'جدول بيانات عام'     },
+                { fmt: 'excel' as ExportFormat, icon: FileSpreadsheet, label: 'Excel',           desc: 'ملف إكسل مع ترميز عربي' },
+                { fmt: 'txt'   as ExportFormat, icon: FileText,        label: 'TXT',             desc: 'أرقام نصية فقط'      },
+                { fmt: 'db'    as ExportFormat, icon: DatabaseZap,     label: 'قاعدة البيانات', desc: 'حفظ في السيرفر'       },
+              ].map(opt => (
+                <button key={opt.fmt} onClick={() => handleExport(opt.fmt)}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-[var(--bg-elevated)] transition-colors text-right">
+                  <opt.icon className="w-4 h-4 text-[var(--brand-primary)] shrink-0" />
+                  <div>
+                    <p className="text-sm font-bold text-[var(--text-primary)]">{opt.label}</p>
+                    <p className="text-[10px] text-[var(--text-muted)]">{opt.desc}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* رسالة الحفظ */}
+      {saveMsg && (
+        <div className={cn(
+          'flex items-center gap-2 p-2.5 rounded-xl text-xs font-medium',
+          saveMsg.startsWith('✅') ? 'bg-green-500/10 border border-green-500/20 text-green-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'
+        )}>
+          {saveMsg}
+          <button onClick={() => setSaveMsg(null)} className="mr-auto"><X className="w-3.5 h-3.5" /></button>
+        </div>
+      )}
+
+      {/* فلاتر */}
       <div className="flex gap-1">
         {[
           { id: 'all',    label: `الجميع (${members.length})` },
@@ -446,7 +600,9 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
           </button>
         ))}
       </div>
-      <div className="flex flex-col gap-1 max-h-72 overflow-y-auto">
+
+      {/* قائمة الأعضاء */}
+      <div className="flex flex-col gap-1 max-h-64 overflow-y-auto">
         {shown.length === 0
           ? <p className="text-sm text-[var(--text-muted)] text-center py-4">لا توجد نتائج</p>
           : shown.map((m, i) => {
@@ -469,6 +625,10 @@ function TabMembers({ group, accountId }: { group: WaGroup; accountId: string })
               );
             })}
       </div>
+
+      <p className="text-[10px] text-[var(--text-muted)] text-center">
+        إجمالي {members.length} عضو · {members.filter(m=>m.admin).length} مشرف
+      </p>
     </div>
   );
 }
@@ -685,6 +845,634 @@ function GroupCard({ group, onClick }: { group: WaGroup; onClick: () => void }) 
         </span>
       </div>
     </div>
+  );
+}
+
+/* ─────────────── مودال إدارة قائمة الاستثناءات ─────────────── */
+function ExclusionManagerModal({
+  accountId,
+  onClose,
+}: {
+  accountId: string;
+  onClose: () => void;
+}) {
+  const [exclusions, setExclusions] = useState<ExclusionItem[]>([]);
+  const [loading,    setLoading   ] = useState(true);
+  const [input,      setInput     ] = useState('');
+  const [note,       setNote      ] = useState('');
+  const [msg,        setMsg       ] = useState<string|null>(null);
+  const [importing,  setImporting ] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res  = await authFetch(`${API}/accounts/${accountId}/groups/exclusions`);
+      const data = await res.json();
+      if (data.success) setExclusions(data.exclusions || []);
+    } catch {} finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [accountId]);
+
+  const handleAdd = async () => {
+    const numbers = input.split(/[\n,،\s]+/).filter(Boolean);
+    if (numbers.length === 0) return;
+    const res  = await authFetch(`${API}/accounts/${accountId}/groups/exclusions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ numbers, note }),
+    });
+    const data = await res.json();
+    setMsg(data.success ? data.message : `❌ ${data.error}`);
+    if (data.success) { setInput(''); setNote(''); load(); }
+  };
+
+  const handleDelete = async (id: string) => {
+    await authFetch(`${API}/accounts/${accountId}/groups/exclusions/${id}`, { method: 'DELETE' });
+    setExclusions(prev => prev.filter(e => e.id !== id));
+  };
+
+  const handleClear = async () => {
+    if (!confirm('هل أنت متأكد من مسح كل الاستثناءات؟')) return;
+    await authFetch(`${API}/accounts/${accountId}/groups/exclusions`, { method: 'DELETE' });
+    setExclusions([]);
+    setMsg('✅ تم مسح القائمة');
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    const text = await file.text();
+    const numbers = text.split(/[\n,،\r]+/).map(s => s.trim()).filter(Boolean);
+    const res  = await authFetch(`${API}/accounts/${accountId}/groups/exclusions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ numbers, note: `استيراد من ملف: ${file.name}` }),
+    });
+    const data = await res.json();
+    setMsg(data.success ? `✅ استُورد ${numbers.length} رقم` : `❌ ${data.error}`);
+    if (data.success) load();
+    setImporting(false);
+    e.target.value = '';
+  };
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="max-w-md flex flex-col max-h-[85vh]" dir="rtl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <UserMinus className="w-5 h-5 text-red-400" />
+            إدارة قائمة الاستثناءات
+          </DialogTitle>
+        </DialogHeader>
+
+        {/* إضافة يدوية */}
+        <div className="flex flex-col gap-2 p-3 bg-[var(--bg-elevated)] rounded-2xl">
+          <p className="text-xs font-semibold text-[var(--text-secondary)]">إضافة أرقام (مفصولة بفاصلة أو سطر جديد)</p>
+          <textarea
+            className="input w-full min-h-20 resize-none text-sm font-mono"
+            placeholder="+966501234567&#10;966502345678&#10;05xxxxxxxx"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+          />
+          <input
+            className="input w-full text-sm"
+            placeholder="ملاحظة (اختياري)"
+            value={note}
+            onChange={e => setNote(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <Button size="sm" onClick={handleAdd} className="flex-1 gap-1.5">
+              <Plus className="w-3.5 h-3.5" />إضافة
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()} disabled={importing} className="gap-1.5">
+              <Upload className="w-3.5 h-3.5" />
+              {importing ? 'جاري...' : 'استيراد ملف'}
+            </Button>
+            <input ref={fileRef} type="file" accept=".txt,.csv" className="hidden" onChange={handleImportFile} />
+          </div>
+        </div>
+
+        {msg && (
+          <div className={cn('p-2.5 rounded-xl text-xs font-medium flex items-center gap-2',
+            msg.startsWith('✅') ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400')}>
+            {msg}
+            <button onClick={() => setMsg(null)} className="mr-auto"><X className="w-3 h-3" /></button>
+          </div>
+        )}
+
+        {/* القائمة */}
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-semibold text-[var(--text-secondary)]">
+            الأرقام المستثناة ({exclusions.length})
+          </p>
+          {exclusions.length > 0 && (
+            <button onClick={handleClear} className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1">
+              <Trash2 className="w-3 h-3" />مسح الكل
+            </button>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto flex flex-col gap-1">
+          {loading ? (
+            [...Array(3)].map((_, i) => <div key={i} className="h-10 bg-[var(--bg-elevated)] rounded-xl animate-pulse" />)
+          ) : exclusions.length === 0 ? (
+            <div className="text-center py-6 text-[var(--text-muted)]">
+              <UserX className="w-8 h-8 mx-auto mb-2 opacity-40" />
+              <p className="text-sm">لا توجد أرقام مستثناة</p>
+            </div>
+          ) : (
+            exclusions.map(ex => (
+              <div key={ex.id} className="flex items-center gap-3 p-2.5 bg-[var(--bg-elevated)] rounded-xl">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-mono text-[var(--text-primary)]">+{ex.phone}</p>
+                  {ex.note && <p className="text-[10px] text-[var(--text-muted)] truncate">{ex.note}</p>}
+                </div>
+                <button onClick={() => handleDelete(ex.id)} className="p-1 rounded hover:bg-red-500/10">
+                  <X className="w-3.5 h-3.5 text-red-400" />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ─────────────── مودال النشر إلى أعضاء المجموعات ─────────────── */
+function MemberPublishModal({
+  accountId,
+  groups,
+  onClose,
+}: {
+  accountId: string;
+  groups:    WaGroup[];
+  onClose:   () => void;
+}) {
+  const [step, setStep] = useState<1|2|3>(1); // 1=إعداد, 2=معاينة, 3=نتيجة
+  const [sending, setSending] = useState(false);
+  const [result,  setResult ] = useState<any>(null);
+  const [showExManager, setShowExManager] = useState(false);
+
+  // الإعدادات
+  const [selectedGroups,   setSelectedGroups  ] = useState<string[]>([]);
+  const [excludeAdmins,    setExcludeAdmins   ] = useState(false);
+  const [customContent,    setCustomContent   ] = useState('');
+  const [adId,             setAdId            ] = useState('');
+  const [ads,              setAds             ] = useState<AdItem[]>([]);
+  const [intervalSec,      setIntervalSec     ] = useState(3);
+  const [sendTime,         setSendTime        ] = useState('');
+  const [exclusionCount,   setExclusionCount  ] = useState(0);
+
+  // معاينة الأعضاء
+  const [previewLoading,   setPreviewLoading  ] = useState(false);
+  const [previewTargets,   setPreviewTargets  ] = useState<any[]>([]);
+  const [previewError,     setPreviewError    ] = useState<string|null>(null);
+
+  // جلب الإعلانات
+  useEffect(() => {
+    authFetch(`${API}/accounts/${accountId}/ad-library`)
+      .then(r => r.json())
+      .then(d => { if (d.success) setAds(d.ads || []); })
+      .catch(() => {});
+  }, [accountId]);
+
+  // جلب عدد الاستثناءات
+  useEffect(() => {
+    authFetch(`${API}/accounts/${accountId}/groups/exclusions`)
+      .then(r => r.json())
+      .then(d => { if (d.success) setExclusionCount(d.exclusions?.length || 0); })
+      .catch(() => {});
+  }, [accountId, showExManager]);
+
+  const publishableGroups = useMemo(() =>
+    groups.filter(g => g.publish_status !== 'red'),
+    [groups]
+  );
+
+  const toggleGroup = (jid: string) => {
+    setSelectedGroups(prev =>
+      prev.includes(jid) ? prev.filter(j => j !== jid) : [...prev, jid]
+    );
+  };
+
+  const selectAll = () => setSelectedGroups(publishableGroups.map(g => g.group_jid));
+  const clearAll  = () => setSelectedGroups([]);
+
+  const handlePreview = async () => {
+    if (selectedGroups.length === 0) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const res  = await authFetch(`${API}/accounts/${accountId}/groups/members/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group_jids:       selectedGroups,
+          exclude_admins:   excludeAdmins,
+          excluded_numbers: [],
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPreviewTargets(data.targets || []);
+        setStep(2);
+      } else {
+        setPreviewError(data.error || 'فشل جلب المعاينة');
+      }
+    } catch (e: any) {
+      setPreviewError(e.message || 'خطأ في الاتصال');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleSend = async () => {
+    if (!customContent && !adId) return;
+    setSending(true);
+    try {
+      const res  = await authFetch(`${API}/accounts/${accountId}/groups/members/publish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group_jids:       selectedGroups,
+          account_ids:      [accountId],
+          ad_library_id:    adId || undefined,
+          custom_content:   customContent,
+          send_time:        sendTime || undefined,
+          interval_seconds: intervalSec,
+          exclude_admins:   excludeAdmins,
+          excluded_numbers: [],
+        }),
+      });
+      const data = await res.json();
+      setResult(data);
+      setStep(3);
+    } catch (e: any) {
+      setResult({ success: false, error: e.message });
+      setStep(3);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  /* ── حساب التقدير الزمني ── */
+  const estimatedMinutes = Math.ceil((previewTargets.length * intervalSec) / 60);
+
+  return (
+    <>
+      <Dialog open onOpenChange={onClose}>
+        <DialogContent className="max-w-2xl flex flex-col max-h-[92vh]" dir="rtl">
+          <DialogHeader className="pb-1">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <div className="w-8 h-8 rounded-xl bg-[var(--brand-primary)]/10 flex items-center justify-center shrink-0">
+                <SendHorizonal className="w-4 h-4 text-[var(--brand-primary)]" />
+              </div>
+              النشر إلى أعضاء المجموعات
+            </DialogTitle>
+            {/* شريط الخطوات */}
+            <div className="flex items-center gap-2 pt-2">
+              {[
+                { n: 1, label: 'الإعداد'   },
+                { n: 2, label: 'معاينة'    },
+                { n: 3, label: 'النتيجة'   },
+              ].map((s, i) => (
+                <React.Fragment key={s.n}>
+                  <div className={cn(
+                    'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all',
+                    step === s.n
+                      ? 'bg-[var(--brand-primary)] text-white'
+                      : step > s.n
+                        ? 'bg-green-500/20 text-green-400'
+                        : 'bg-[var(--bg-elevated)] text-[var(--text-muted)]'
+                  )}>
+                    {step > s.n ? <CheckCircle2 className="w-3 h-3" /> : <span>{s.n}</span>}
+                    {s.label}
+                  </div>
+                  {i < 2 && <div className="flex-1 h-px bg-[var(--border-default)]" />}
+                </React.Fragment>
+              ))}
+            </div>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto">
+
+            {/* ══════ الخطوة 1: الإعداد ══════ */}
+            {step === 1 && (
+              <div className="flex flex-col gap-4 pt-2">
+
+                {/* اختيار المجموعات */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-1.5">
+                      <Users className="w-4 h-4 text-[var(--brand-primary)]" />
+                      المجموعات المستهدفة
+                      {selectedGroups.length > 0 && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]">
+                          {selectedGroups.length} محددة
+                        </span>
+                      )}
+                    </p>
+                    <div className="flex gap-1.5">
+                      <button onClick={selectAll}  className="text-xs text-[var(--brand-primary)] hover:underline">تحديد الكل</button>
+                      <span className="text-[var(--text-muted)]">·</span>
+                      <button onClick={clearAll}   className="text-xs text-[var(--text-muted)] hover:underline">إلغاء</button>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1 max-h-40 overflow-y-auto border border-[var(--border-default)] rounded-2xl p-2">
+                    {publishableGroups.length === 0 ? (
+                      <p className="text-sm text-[var(--text-muted)] text-center py-3">لا توجد مجموعات قابلة للنشر</p>
+                    ) : (
+                      publishableGroups.map(g => (
+                        <label key={g.group_jid}
+                          className="flex items-center gap-3 p-2 rounded-xl hover:bg-[var(--bg-elevated)] cursor-pointer transition-colors">
+                          <input type="checkbox"
+                            checked={selectedGroups.includes(g.group_jid)}
+                            onChange={() => toggleGroup(g.group_jid)}
+                            className="w-4 h-4 accent-[var(--brand-primary)] rounded"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-[var(--text-primary)] truncate">{g.name}</p>
+                            <p className="text-xs text-[var(--text-muted)]">{g.members_count.toLocaleString()} عضو</p>
+                          </div>
+                          <span className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded',
+                            g.publish_status === 'green'
+                              ? 'bg-green-500/10 text-green-400'
+                              : 'bg-yellow-500/10 text-yellow-400'
+                          )}>
+                            {g.publish_status === 'green' ? '🟢' : '🟡'}
+                          </span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* الإعلان / المحتوى */}
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-1.5">
+                    <Megaphone className="w-4 h-4 text-[var(--brand-primary)]" />
+                    الإعلان أو النص
+                  </p>
+                  {ads.length > 0 && (
+                    <select
+                      className="input w-full text-sm"
+                      value={adId}
+                      onChange={e => { setAdId(e.target.value); if (e.target.value) setCustomContent(''); }}
+                    >
+                      <option value="">— اختر إعلاناً من المكتبة —</option>
+                      {ads.map(ad => (
+                        <option key={ad.id} value={ad.id}>{ad.name}</option>
+                      ))}
+                    </select>
+                  )}
+                  {!adId && (
+                    <textarea
+                      className="input w-full min-h-24 resize-none text-sm"
+                      placeholder="اكتب نص الرسالة هنا..."
+                      value={customContent}
+                      onChange={e => setCustomContent(e.target.value)}
+                    />
+                  )}
+                </div>
+
+                {/* الإعدادات المتقدمة */}
+                <div className="grid grid-cols-2 gap-3">
+                  {/* وقت الإرسال */}
+                  <div className="flex flex-col gap-1.5">
+                    <p className="text-xs font-semibold text-[var(--text-secondary)] flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5" />وقت الإرسال
+                    </p>
+                    <input
+                      type="datetime-local"
+                      className="input text-sm"
+                      value={sendTime}
+                      onChange={e => setSendTime(e.target.value)}
+                    />
+                    <p className="text-[10px] text-[var(--text-muted)]">اتركه فارغاً للإرسال الفوري</p>
+                  </div>
+
+                  {/* الفاصل الزمني */}
+                  <div className="flex flex-col gap-1.5">
+                    <p className="text-xs font-semibold text-[var(--text-secondary)] flex items-center gap-1">
+                      <Timer className="w-3.5 h-3.5" />الفاصل بين الرسائل
+                    </p>
+                    <div className="flex gap-1 flex-wrap">
+                      {[2, 3, 5, 10, 15, 30].map(sec => (
+                        <button key={sec}
+                          onClick={() => setIntervalSec(sec)}
+                          className={cn('px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border',
+                            intervalSec === sec
+                              ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]'
+                              : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] border-[var(--border-default)]'
+                          )}
+                        >
+                          {sec < 60 ? `${sec}ث` : `${sec/60}د`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* خيارات الاستثناء */}
+                <div className="flex flex-col gap-2 p-3 bg-[var(--bg-elevated)] rounded-2xl border border-[var(--border-default)]">
+                  <p className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-1.5">
+                    <UserMinus className="w-4 h-4 text-orange-400" />
+                    خيارات الاستثناء
+                  </p>
+
+                  {/* استثناء المشرفين */}
+                  <div className="flex items-center justify-between py-2 border-b border-[var(--border-default)]">
+                    <div>
+                      <p className="text-sm font-medium text-[var(--text-primary)]">استثناء المشرفين</p>
+                      <p className="text-xs text-[var(--text-muted)]">تجاهل مشرفي المجموعة عند الإرسال</p>
+                    </div>
+                    <button
+                      onClick={() => setExcludeAdmins(!excludeAdmins)}
+                      className={cn('w-11 h-6 rounded-full transition-all relative shrink-0',
+                        excludeAdmins ? 'bg-orange-500' : 'bg-[var(--bg-overlay)]'
+                      )}
+                    >
+                      <div className={cn('absolute top-1 w-4 h-4 bg-white rounded-full transition-all shadow-sm',
+                        excludeAdmins ? 'right-1' : 'left-1'
+                      )} />
+                    </button>
+                  </div>
+
+                  {/* إدارة قائمة الاستثناءات */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-[var(--text-primary)]">قائمة الاستثناءات المخصصة</p>
+                      <p className="text-xs text-[var(--text-muted)]">
+                        {exclusionCount > 0 ? `${exclusionCount} رقم مستثنى` : 'لا توجد أرقام مستثناة'}
+                      </p>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => setShowExManager(true)} className="gap-1.5 text-xs">
+                      <Settings className="w-3.5 h-3.5" />إدارة
+                    </Button>
+                  </div>
+                </div>
+
+                {previewError && (
+                  <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/5 border border-red-500/20">
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                    <p className="text-sm text-red-400">{previewError}</p>
+                  </div>
+                )}
+
+                <Button
+                  onClick={handlePreview}
+                  disabled={selectedGroups.length === 0 || previewLoading}
+                  className="w-full gap-2"
+                >
+                  {previewLoading
+                    ? <><RefreshCw className="w-4 h-4 animate-spin" />جاري تحميل المعاينة...</>
+                    : <><EyeIcon className="w-4 h-4" />معاينة الأعضاء المستهدفين</>
+                  }
+                </Button>
+              </div>
+            )}
+
+            {/* ══════ الخطوة 2: المعاينة ══════ */}
+            {step === 2 && (
+              <div className="flex flex-col gap-4 pt-2">
+                {/* ملخص */}
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { label: 'إجمالي المستهدفين', value: previewTargets.length.toLocaleString(), color: 'text-[var(--brand-primary)]' },
+                    { label: 'وقت الإرسال التقديري', value: estimatedMinutes > 60 ? `${Math.floor(estimatedMinutes/60)}س ${estimatedMinutes%60}د` : `${estimatedMinutes} دقيقة`, color: 'text-blue-400' },
+                    { label: 'الفاصل الزمني', value: `${intervalSec} ثانية`, color: 'text-green-400' },
+                  ].map((s, i) => (
+                    <div key={i} className="bg-[var(--bg-elevated)] rounded-xl p-3 text-center border border-[var(--border-default)]">
+                      <p className={cn('text-lg font-bold', s.color)}>{s.value}</p>
+                      <p className="text-[10px] text-[var(--text-muted)] mt-0.5">{s.label}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* تحذير للأعداد الكبيرة */}
+                {previewTargets.length > 100 && (
+                  <div className="flex items-start gap-2 p-3 rounded-xl bg-yellow-500/5 border border-yellow-500/20">
+                    <AlertTriangle className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="text-sm font-bold text-yellow-400">تنبيه: عدد كبير من المستهدفين</p>
+                      <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                        سيستغرق الإرسال حوالي {estimatedMinutes} دقيقة. تأكد أن الحساب سيبقى متصلاً طوال هذه المدة.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* قائمة المستهدفين */}
+                <div className="flex flex-col gap-1">
+                  <p className="text-xs font-semibold text-[var(--text-secondary)]">عينة من المستهدفين</p>
+                  <div className="flex flex-col gap-1 max-h-48 overflow-y-auto border border-[var(--border-default)] rounded-2xl p-2">
+                    {previewTargets.slice(0, 50).map((t: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-[var(--bg-elevated)]">
+                        <div className="w-6 h-6 rounded-full bg-[var(--bg-elevated)] flex items-center justify-center shrink-0">
+                          <Phone className="w-3 h-3 text-[var(--text-muted)]" />
+                        </div>
+                        <span className="text-xs font-mono text-[var(--text-primary)]">+{t.phone}</span>
+                        {t.is_admin && (
+                          <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]">مشرف</span>
+                        )}
+                      </div>
+                    ))}
+                    {previewTargets.length > 50 && (
+                      <p className="text-xs text-[var(--text-muted)] text-center py-2">
+                        ... و {(previewTargets.length - 50).toLocaleString()} آخرين
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* ملخص المحتوى */}
+                {(customContent || adId) && (
+                  <div className="p-3 bg-[var(--bg-elevated)] rounded-2xl border border-[var(--border-default)]">
+                    <p className="text-xs font-semibold text-[var(--text-secondary)] mb-1">محتوى الرسالة</p>
+                    <p className="text-sm text-[var(--text-primary)] line-clamp-3">
+                      {customContent || (ads.find(a => a.id === adId)?.name || 'إعلان من المكتبة')}
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setStep(1)} className="flex-1 gap-2">
+                    <ChevronRight className="w-4 h-4" />العودة للإعداد
+                  </Button>
+                  <Button
+                    onClick={handleSend}
+                    disabled={sending || (!customContent && !adId)}
+                    className="flex-1 gap-2"
+                  >
+                    {sending
+                      ? <><RefreshCw className="w-4 h-4 animate-spin" />جاري الإرسال...</>
+                      : sendTime
+                        ? <><Calendar className="w-4 h-4" />جدولة الإرسال</>
+                        : <><Send className="w-4 h-4" />إرسال الآن ({previewTargets.length})</>
+                    }
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* ══════ الخطوة 3: النتيجة ══════ */}
+            {step === 3 && result && (
+              <div className="flex flex-col gap-4 pt-2">
+                <div className={cn(
+                  'p-5 rounded-2xl text-center border-2',
+                  result.success
+                    ? 'bg-green-500/5 border-green-500/20'
+                    : 'bg-red-500/5 border-red-500/20'
+                )}>
+                  <div className={cn(
+                    'w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-3',
+                    result.success ? 'bg-green-500/10' : 'bg-red-500/10'
+                  )}>
+                    {result.success
+                      ? <CheckCircle2 className="w-7 h-7 text-green-400" />
+                      : <AlertCircle  className="w-7 h-7 text-red-400" />
+                    }
+                  </div>
+                  <p className={cn('text-lg font-bold', result.success ? 'text-green-400' : 'text-red-400')}>
+                    {result.success ? (result.scheduled ? 'تم جدولة الإرسال ✅' : 'تم الإرسال ✅') : 'فشل الإرسال ❌'}
+                  </p>
+                  <p className="text-sm text-[var(--text-secondary)] mt-2">{result.message || result.error}</p>
+                </div>
+
+                {result.success && !result.scheduled && (
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      { label: 'المُرسَل',   value: result.sent   || 0, color: 'text-green-400' },
+                      { label: 'الفاشل',    value: result.failed || 0, color: 'text-red-400'   },
+                      { label: 'الإجمالي',  value: result.total  || 0, color: 'text-[var(--brand-primary)]' },
+                    ].map((s, i) => (
+                      <div key={i} className="bg-[var(--bg-elevated)] rounded-xl p-3 text-center">
+                        <p className={cn('text-xl font-bold', s.color)}>{s.value}</p>
+                        <p className="text-[10px] text-[var(--text-muted)]">{s.label}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <Button onClick={onClose} className="w-full">إغلاق</Button>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* مودال إدارة الاستثناءات */}
+      {showExManager && (
+        <ExclusionManagerModal
+          accountId={accountId}
+          onClose={() => setShowExManager(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -1020,6 +1808,8 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
   const [showSyncSettings, setShowSyncSettings] = useState(false);
   const [nextSyncIn,    setNextSyncIn   ] = useState(0);
   const [viewMode,      setViewMode     ] = useState<'grid'|'categories'>('grid');
+  // الجزء الخامس
+  const [showMemberPublish, setShowMemberPublish] = useState(false);
 
   // إعدادات المزامنة — مخزّنة في localStorage
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => {
@@ -1297,6 +2087,17 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
             {syncing ? 'جارٍ المزامنة...' : '🔄 مزامنة'}
           </Button>
 
+          {/* ★ زر النشر إلى أعضاء المجموعات — الجزء الخامس */}
+          <Button
+            onClick={() => setShowMemberPublish(true)}
+            disabled={groups.length === 0}
+            size="sm"
+            className="gap-2 shrink-0 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white border-0 shadow-lg shadow-violet-500/20"
+          >
+            <SendHorizonal className="w-4 h-4" />
+            النشر إلى أعضاء المجموعات
+          </Button>
+
           {/* إعدادات المزامنة التلقائية */}
           <div className="relative">
             <Button
@@ -1436,62 +2237,4 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
               <div className="h-full flex items-center justify-center">
                 <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
                   <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
-                  <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات محفوظة</h3>
-                  <p className="text-sm text-[var(--text-secondary)] mt-2 mb-4">
-                    اضغط «🔄 مزامنة» لجلب مجموعاتك مباشرة من الحساب المتصل.
-                    <br/>
-                    <span className="text-[var(--text-muted)] text-xs mt-1 block">
-                      تأكد أن الحساب متصل أولاً من صفحة الحسابات.
-                    </span>
-                  </p>
-                  <Button onClick={handleSync} disabled={syncing} className="gap-2">
-                    <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
-                    {syncing ? 'جارٍ الجلب من واتساب...' : '🔄 مزامنة الآن'}
-                  </Button>
-                </div>
-              </div>
-            ) : filtered.length === 0 ? (
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center p-8">
-                  <Users className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-3" />
-                  <p className="text-[var(--text-secondary)]">لا توجد مجموعات تطابق البحث</p>
-                </div>
-              </div>
-            ) : (
-              <>
-                {loading && (
-                  <div className="flex items-center gap-2 mb-3 p-2 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-default)]">
-                    <RefreshCw className="w-3 h-3 text-[var(--brand-primary)] animate-spin" />
-                    <span className="text-xs text-[var(--text-muted)]">جاري تحديث البيانات في الخلفية...</span>
-                  </div>
-                )}
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  {filtered.map(g => (
-                    <GroupCard key={g.group_jid} group={g} onClick={() => setSelectedGroup(g)} />
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* ── Count ── */}
-          {groups.length > 0 && (
-            <div className="text-xs text-[var(--text-muted)] text-center pb-1">
-              عرض {filtered.length} من {groups.length} مجموعة حقيقية
-              {loading && <span className="mr-2 text-[var(--brand-primary)]">· يجري التحديث...</span>}
-            </div>
-          )}
-        </>
-      )}
-
-      {/* ── Detail Modal ── */}
-      {selectedGroup && (
-        <GroupModal
-          group={selectedGroup}
-          accountId={accountId}
-          onClose={() => setSelectedGroup(null)}
-        />
-      )}
-    </div>
-  );
-}
+                  <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توج
