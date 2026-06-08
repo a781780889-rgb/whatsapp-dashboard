@@ -795,7 +795,33 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     }
   };
 
+  // ── فلترة المجموعات ──────────────────────────────────────────────────────
+  // ⚠️ يجب أن تكون useMemo قبل أي return مشروط (Rules of Hooks)
+  const filtered = useMemo(() => groups.filter(g => {
+    if (filter === 'green'    && g.publish_status !== 'green')  return false;
+    if (filter === 'yellow'   && g.publish_status !== 'yellow') return false;
+    if (filter === 'red'      && g.publish_status !== 'red')    return false;
+    if (filter === 'admin'    && !g.is_admin)                   return false;
+    if (filter === 'large'    && g.members_count < 200)         return false;
+    if (filter === 'announce' && !g.announce)                   return false;
+    if (search && !g.name.includes(search) && !g.group_jid.includes(search)) return false;
+    return true;
+  }), [groups, filter, search]);
+
+  // ── إحصائيات ──────────────────────────────────────────────────────────────
+  // ⚠️ يجب أن تكون useMemo قبل أي return مشروط (Rules of Hooks)
+  const stats = useMemo(() => {
+    const total      = groups.length;
+    const canPublish = groups.filter(g => g.publish_status !== 'red').length;
+    const asAdmin    = groups.filter(g => g.is_admin).length;
+    const totalMem   = groups.reduce((s, g) => s + g.members_count, 0);
+    const restricted = groups.filter(g => g.publish_status === 'yellow').length;
+    const avgAct     = total ? Math.round(groups.reduce((s, g) => s + g.activity_level, 0) / total) : 0;
+    return { total, canPublish, asAdmin, totalMem, restricted, avgAct };
+  }, [groups]);
+
   // ── تحميل تلقائي عند اختيار حساب ────────────────────────────────────────
+  // ⚠️ useEffect يجب أن يكون قبل أي return مشروط أيضاً
   useEffect(() => {
     if (accountId) {
       setGroups([]);
@@ -806,6 +832,7 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
   }, [accountId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── حالة: لا يوجد حساب مختار ─────────────────────────────────────────────
+  // هذا الـ return المبكر يجب أن يكون بعد جميع الـ hooks
   if (!accountId) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -819,29 +846,6 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
       </div>
     );
   }
-
-  // ── فلترة المجموعات ───────────────────────────────────────────────────────
-  const filtered = useMemo(() => groups.filter(g => {
-    if (filter === 'green'    && g.publish_status !== 'green')  return false;
-    if (filter === 'yellow'   && g.publish_status !== 'yellow') return false;
-    if (filter === 'red'      && g.publish_status !== 'red')    return false;
-    if (filter === 'admin'    && !g.is_admin)                   return false;
-    if (filter === 'large'    && g.members_count < 200)         return false;
-    if (filter === 'announce' && !g.announce)                   return false;
-    if (search && !g.name.includes(search) && !g.group_jid.includes(search)) return false;
-    return true;
-  }), [groups, filter, search]);
-
-  // ── إحصائيات ─────────────────────────────────────────────────────────────
-  const stats = useMemo(() => {
-    const total      = groups.length;
-    const canPublish = groups.filter(g => g.publish_status !== 'red').length;
-    const asAdmin    = groups.filter(g => g.is_admin).length;
-    const totalMem   = groups.reduce((s, g) => s + g.members_count, 0);
-    const restricted = groups.filter(g => g.publish_status === 'yellow').length;
-    const avgAct     = total ? Math.round(groups.reduce((s, g) => s + g.activity_level, 0) / total) : 0;
-    return { total, canPublish, asAdmin, totalMem, restricted, avgAct };
-  }, [groups]);
 
   return (
     <div className="flex flex-col gap-5 h-full">
