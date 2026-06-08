@@ -690,17 +690,51 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     try {
       const url = `${API}/accounts/${accountId}/groups${forceRefresh ? '?refresh=1' : ''}`;
       const res  = await authFetch(url);
+
+      // تحقق أن الرد JSON وليس HTML أو خطأ شبكة
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        setError('خطأ في الاتصال بالخادم — تأكد من تشغيل الـ backend');
+        return;
+      }
+
       const data = await res.json();
 
       if (data.success) {
-        setGroups(data.groups || []);
-        setSyncedAt(data.synced_at || null);
-        if (data.warning) setError(data.warning);
+        // تأكد أن كل مجموعة تحتوي بيانات آمنة قبل الـ render
+        const safeGroups = (data.groups || []).map((g: any) => ({
+          id:              String(g.id              ?? g.group_jid ?? ''),
+          group_jid:       String(g.group_jid       ?? ''),
+          name:            String(g.name            ?? 'مجموعة'),
+          description:     String(g.description     ?? ''),
+          owner:           String(g.owner           ?? ''),
+          members_count:   Number(g.members_count)  || 0,
+          admins_count:    Number(g.admins_count)   || 0,
+          announce:        Boolean(g.announce),
+          restrict:        Boolean(g.restrict),
+          creation_ts:     Number(g.creation_ts)    || 0,
+          avatar_url:      g.avatar_url ? String(g.avatar_url) : null,
+          is_member:       Boolean(g.is_member),
+          is_admin:        Boolean(g.is_admin),
+          publish_status:  (['green','yellow','red'].includes(g.publish_status) ? g.publish_status : 'red') as WaGroup['publish_status'],
+          can_send_text:   Boolean(g.can_send_text),
+          can_send_images: Boolean(g.can_send_images),
+          can_send_video:  Boolean(g.can_send_video),
+          can_send_files:  Boolean(g.can_send_files),
+          can_send_links:  Boolean(g.can_send_links),
+          can_broadcast:   Boolean(g.can_broadcast),
+          activity_level:  Math.min(100, Math.max(0, Number(g.activity_level) || 50)),
+          messages_today:  Number(g.messages_today) || 0,
+          last_sync:       g.last_sync ? String(g.last_sync) : null,
+        }));
+        setGroups(safeGroups);
+        setSyncedAt(data.synced_at ? String(data.synced_at) : null);
+        if (data.warning) setError(String(data.warning));
       } else {
-        setError(data.error || 'فشل جلب المجموعات');
+        setError(String(data.error || 'فشل جلب المجموعات'));
       }
-    } catch {
-      setError('خطأ في الاتصال بالخادم');
+    } catch (e: any) {
+      setError(String(e?.message || 'خطأ في الاتصال بالخادم'));
     } finally {
       setLoading(false);
     }
@@ -714,16 +748,48 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
 
     try {
       const res  = await authFetch(`${API}/accounts/${accountId}/groups/sync`, { method: 'POST' });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        setError('خطأ في الاتصال بالخادم');
+        return;
+      }
+
       const data = await res.json();
 
       if (data.success) {
-        setGroups(data.groups || []);
-        setSyncedAt(data.synced_at || null);
+        const safeGroups = (data.groups || []).map((g: any) => ({
+          id:              String(g.id              ?? g.group_jid ?? ''),
+          group_jid:       String(g.group_jid       ?? ''),
+          name:            String(g.name            ?? 'مجموعة'),
+          description:     String(g.description     ?? ''),
+          owner:           String(g.owner           ?? ''),
+          members_count:   Number(g.members_count)  || 0,
+          admins_count:    Number(g.admins_count)   || 0,
+          announce:        Boolean(g.announce),
+          restrict:        Boolean(g.restrict),
+          creation_ts:     Number(g.creation_ts)    || 0,
+          avatar_url:      g.avatar_url ? String(g.avatar_url) : null,
+          is_member:       Boolean(g.is_member),
+          is_admin:        Boolean(g.is_admin),
+          publish_status:  (['green','yellow','red'].includes(g.publish_status) ? g.publish_status : 'red') as WaGroup['publish_status'],
+          can_send_text:   Boolean(g.can_send_text),
+          can_send_images: Boolean(g.can_send_images),
+          can_send_video:  Boolean(g.can_send_video),
+          can_send_files:  Boolean(g.can_send_files),
+          can_send_links:  Boolean(g.can_send_links),
+          can_broadcast:   Boolean(g.can_broadcast),
+          activity_level:  Math.min(100, Math.max(0, Number(g.activity_level) || 50)),
+          messages_today:  Number(g.messages_today) || 0,
+          last_sync:       g.last_sync ? String(g.last_sync) : null,
+        }));
+        setGroups(safeGroups);
+        setSyncedAt(data.synced_at ? String(data.synced_at) : null);
       } else {
-        setError(data.error || 'فشلت المزامنة');
+        setError(String(data.error || 'فشلت المزامنة'));
       }
-    } catch {
-      setError('خطأ في الاتصال — تأكد أن الخادم يعمل');
+    } catch (e: any) {
+      setError(String(e?.message || 'خطأ في الاتصال — تأكد أن الخادم يعمل'));
     } finally {
       setSyncing(false);
     }
@@ -885,13 +951,17 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
           <div className="h-full flex items-center justify-center">
             <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
               <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
-              <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات</h3>
+              <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات محفوظة</h3>
               <p className="text-sm text-[var(--text-secondary)] mt-2 mb-4">
-                اضغط زر "🔄 مزامنة" لجلب مجموعاتك الحقيقية من واتساب مباشرة.
+                اضغط «🔄 مزامنة» لجلب مجموعاتك مباشرة من الحساب المتصل.
+                <br/>
+                <span className="text-[var(--text-muted)] text-xs mt-1 block">
+                  تأكد أن الحساب متصل أولاً من صفحة الحسابات.
+                </span>
               </p>
               <Button onClick={handleSync} disabled={syncing} className="gap-2">
                 <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
-                {syncing ? 'جارٍ الجلب...' : 'مزامنة الآن'}
+                {syncing ? 'جارٍ الجلب من واتساب...' : '🔄 مزامنة الآن'}
               </Button>
             </div>
           </div>
