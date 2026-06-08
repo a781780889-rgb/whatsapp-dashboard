@@ -77,6 +77,7 @@ router.post('/accounts/:id/test',          auth, subCheck, AccountController.tes
 
 const GroupController = require('./controllers/GroupController');
 router.get('/accounts/:accountId/groups',                        auth, subCheck, GroupController.getGroups.bind(GroupController));
+router.get('/accounts/:accountId/groups/categories',             auth, subCheck, GroupController.getGroupsByCategory.bind(GroupController));
 router.post('/accounts/:accountId/groups/sync',                  auth, subCheck, GroupController.syncGroups.bind(GroupController));
 router.get('/accounts/:accountId/groups/sync-settings',          auth, subCheck, GroupController.getSyncSettings.bind(GroupController));
 router.put('/accounts/:accountId/groups/sync-settings',          auth, subCheck, GroupController.updateSyncSettings.bind(GroupController));
