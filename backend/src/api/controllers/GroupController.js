@@ -519,6 +519,557 @@ class GroupController {
             last_sync:       row.last_sync       || null,
         };
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // الجزء الخامس — نشر لأعضاء المجموعات
+    // ════════════════════════════════════════════════════════════════════════
+
+    // ── جلب أعضاء مجموعات متعددة مع فلترة المشرفين والاستثناءات ──────────
+    async getMembersForPublish(req, res) {
+        try {
+            const { accountId } = req.params;
+            const { group_jids, exclude_admins, excluded_numbers } = req.body;
+
+            if (!group_jids || group_jids.length === 0) {
+                return res.status(400).json({ success: false, error: 'يجب اختيار مجموعة واحدة على الأقل' });
+            }
+
+            const WhatsAppManager = require('../../bot/WhatsAppManager');
+            const sock = WhatsAppManager.getSession(accountId);
+            if (!sock) {
+                return res.status(400).json({ success: false, error: 'الحساب غير متصل بواتساب' });
+            }
+
+            const excludedSet = new Set((excluded_numbers || []).map(n =>
+                n.toString().replace(/[^0-9]/g, '') + '@s.whatsapp.net'
+            ));
+
+            const allTargets = [];
+            const seenJids   = new Set();
+
+            for (const groupJid of group_jids) {
+                try {
+                    const meta = await sock.groupMetadata(groupJid);
+                    if (!meta?.participants) continue;
+
+                    for (const p of meta.participants) {
+                        const pJid = p.id.replace(/:\d+@/, '@');
+                        if (seenJids.has(pJid)) continue;
+                        if (exclude_admins && (p.admin === 'admin' || p.admin === 'superadmin')) continue;
+                        if (excludedSet.has(pJid)) continue;
+                        // لا ترسل لنفسك
+                        const myJid = (sock.user?.id || '').replace(/:\d+@/, '@');
+                        if (pJid === myJid) continue;
+
+                        seenJids.add(pJid);
+                        allTargets.push({
+                            jid:       pJid,
+                            phone:     pJid.split('@')[0],
+                            is_admin:  !!(p.admin),
+                            group_jid: groupJid,
+                        });
+                    }
+                } catch (e) {
+                    console.warn(`[getMembersForPublish] skip ${groupJid}:`, e.message);
+                }
+            }
+
+            res.json({ success: true, targets: allTargets, count: allTargets.length });
+        } catch (err) {
+            console.error('[GroupController] getMembersForPublish Error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── تنفيذ النشر الفعلي لأعضاء المجموعات ──────────────────────────────
+    async publishToMembers(req, res) {
+        try {
+            const { accountId } = req.params;
+            const {
+                group_jids,
+                account_ids,
+                ad_library_id,
+                custom_content,
+                send_time,
+                interval_seconds,
+                exclude_admins,
+                excluded_numbers,
+            } = req.body;
+
+            if (!group_jids || group_jids.length === 0) {
+                return res.status(400).json({ success: false, error: 'يجب اختيار مجموعة واحدة على الأقل' });
+            }
+
+            const WhatsAppManager = require('../../bot/WhatsAppManager');
+            const DatabaseManager = require('../../database/DatabaseManager');
+            const crypto = require('crypto');
+            const path   = require('path');
+            const fs     = require('fs');
+
+            // تحديد الحسابات المستخدمة
+            const useAccountIds = (account_ids && account_ids.length > 0)
+                ? account_ids : [accountId];
+
+            // جلب المحتوى
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            let messageContent = custom_content || '';
+            let mediaPaths = [];
+
+            if (ad_library_id) {
+                const ad = await accountDB.get(`SELECT * FROM ad_library WHERE id = $1`, [ad_library_id]);
+                if (ad) {
+                    messageContent = ad.content || messageContent;
+                    mediaPaths     = JSON.parse(ad.media_paths || '[]');
+                    await accountDB.run(
+                        `UPDATE ad_library SET times_used = times_used + 1, last_used_at = NOW() WHERE id = $1`,
+                        [ad_library_id]
+                    );
+                }
+            }
+
+            if (!messageContent && mediaPaths.length === 0) {
+                return res.status(400).json({ success: false, error: 'يجب إضافة نص أو وسائط للرسالة' });
+            }
+
+            // جلب كل الأعضاء المستهدفين
+            const excludedSet = new Set((excluded_numbers || []).map(n =>
+                n.toString().replace(/[^0-9]/g, '') + '@s.whatsapp.net'
+            ));
+
+            const allTargets = [];
+            const seenJids   = new Set();
+
+            for (const accId of useAccountIds) {
+                const sock = WhatsAppManager.getSession(accId);
+                if (!sock) continue;
+                const myJid = (sock.user?.id || '').replace(/:\d+@/, '@');
+
+                for (const groupJid of group_jids) {
+                    try {
+                        const meta = await sock.groupMetadata(groupJid);
+                        if (!meta?.participants) continue;
+
+                        for (const p of meta.participants) {
+                            const pJid = p.id.replace(/:\d+@/, '@');
+                            if (seenJids.has(pJid)) continue;
+                            if (pJid === myJid) continue;
+                            if (exclude_admins && p.admin) continue;
+                            if (excludedSet.has(pJid)) continue;
+
+                            seenJids.add(pJid);
+                            allTargets.push({ jid: pJid, accountId: accId, sock });
+                        }
+                    } catch (e) {
+                        console.warn(`[publishToMembers] skip group ${groupJid}:`, e.message);
+                    }
+                }
+            }
+
+            if (allTargets.length === 0) {
+                return res.status(400).json({ success: false, error: 'لا يوجد أعضاء مستهدفون' });
+            }
+
+            // إذا كان هناك وقت مجدول — أنشئ مهمة مجدولة
+            if (send_time && new Date(send_time) > new Date()) {
+                const jobId = crypto.randomUUID();
+                const sysDB = await DatabaseManager.getSystemDB();
+                await sysDB.run(`
+                    CREATE TABLE IF NOT EXISTS member_publish_jobs (
+                        id TEXT PRIMARY KEY,
+                        account_id TEXT,
+                        targets TEXT,
+                        message_content TEXT,
+                        media_paths TEXT,
+                        ad_library_id TEXT,
+                        interval_seconds INTEGER DEFAULT 3,
+                        status TEXT DEFAULT 'pending',
+                        scheduled_at TIMESTAMP,
+                        started_at TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        total_count INTEGER DEFAULT 0,
+                        sent_count INTEGER DEFAULT 0,
+                        failed_count INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                `).catch(() => {});
+
+                await sysDB.run(`
+                    INSERT INTO member_publish_jobs
+                    (id, account_id, targets, message_content, media_paths, ad_library_id, interval_seconds, scheduled_at, total_count)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                `, [
+                    jobId, accountId,
+                    JSON.stringify(allTargets.map(t => ({ jid: t.jid, accountId: t.accountId }))),
+                    messageContent,
+                    JSON.stringify(mediaPaths),
+                    ad_library_id || null,
+                    interval_seconds || 3,
+                    send_time,
+                    allTargets.length,
+                ]);
+
+                return res.json({
+                    success: true,
+                    scheduled: true,
+                    job_id: jobId,
+                    count: allTargets.length,
+                    message: `✅ تم جدولة الإرسال لـ ${allTargets.length} عضو في ${new Date(send_time).toLocaleString('ar-SA')}`,
+                });
+            }
+
+            // إرسال فوري
+            const MEDIA_BASE = path.resolve(__dirname, '../../../../');
+            const delay = ms => new Promise(r => setTimeout(r, ms));
+            const intervalMs = (interval_seconds || 3) * 1000;
+
+            const results = [];
+            let sent = 0, failed = 0;
+
+            for (const target of allTargets) {
+                try {
+                    if (mediaPaths.length > 0) {
+                        const mediaPath = path.join(MEDIA_BASE, mediaPaths[0]);
+                        if (fs.existsSync(mediaPath)) {
+                            const buf = fs.readFileSync(mediaPath);
+                            const ext = path.extname(mediaPaths[0]).toLowerCase();
+                            if (['.jpg','.jpeg','.png','.gif','.webp'].includes(ext)) {
+                                await target.sock.sendMessage(target.jid, { image: buf, caption: messageContent });
+                            } else if (['.mp4','.mov','.avi'].includes(ext)) {
+                                await target.sock.sendMessage(target.jid, { video: buf, caption: messageContent });
+                            } else {
+                                await target.sock.sendMessage(target.jid, {
+                                    document: buf, caption: messageContent,
+                                    fileName: path.basename(mediaPaths[0])
+                                });
+                            }
+                        } else {
+                            await target.sock.sendMessage(target.jid, { text: messageContent });
+                        }
+                    } else {
+                        await target.sock.sendMessage(target.jid, { text: messageContent });
+                    }
+                    results.push({ jid: target.jid, status: 'sent' });
+                    sent++;
+                } catch (e) {
+                    results.push({ jid: target.jid, status: 'failed', error: e.message });
+                    failed++;
+                }
+                await delay(intervalMs);
+            }
+
+            // تسجيل في DB
+            const logId = crypto.randomUUID();
+            await accountDB.run(`
+                CREATE TABLE IF NOT EXISTS member_publish_log (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT,
+                    ad_library_id TEXT,
+                    group_jids TEXT,
+                    excluded_numbers TEXT,
+                    exclude_admins BOOLEAN DEFAULT FALSE,
+                    total_targets INTEGER DEFAULT 0,
+                    sent_count INTEGER DEFAULT 0,
+                    failed_count INTEGER DEFAULT 0,
+                    message_content TEXT,
+                    status TEXT DEFAULT 'completed',
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            `).catch(() => {});
+
+            await accountDB.run(`
+                INSERT INTO member_publish_log
+                (id, account_id, ad_library_id, group_jids, excluded_numbers, exclude_admins, total_targets, sent_count, failed_count, message_content, status)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            `, [
+                logId, accountId, ad_library_id || null,
+                JSON.stringify(group_jids),
+                JSON.stringify(excluded_numbers || []),
+                !!exclude_admins,
+                allTargets.length, sent, failed,
+                messageContent,
+                failed === 0 ? 'completed' : 'partial',
+            ]).catch(() => {});
+
+            res.json({
+                success: true,
+                message: `✅ تم الإرسال لـ ${sent} من ${allTargets.length} عضو`,
+                sent, failed, total: allTargets.length, results,
+            });
+
+        } catch (err) {
+            console.error('[GroupController] publishToMembers Error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── إدارة قائمة الاستثناءات ───────────────────────────────────────────
+    async getExclusions(req, res) {
+        try {
+            const { accountId } = req.params;
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureExclusionsTable(accountDB);
+            const rows = await accountDB.all(
+                `SELECT * FROM member_exclusions WHERE account_id = $1 ORDER BY created_at DESC`,
+                [accountId]
+            );
+            res.json({ success: true, exclusions: rows });
+        } catch (err) {
+            console.error('[GroupController] getExclusions Error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    async addExclusions(req, res) {
+        try {
+            const { accountId } = req.params;
+            const { numbers, note } = req.body;
+            if (!numbers || numbers.length === 0) {
+                return res.status(400).json({ success: false, error: 'لا توجد أرقام' });
+            }
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureExclusionsTable(accountDB);
+            const crypto = require('crypto');
+            let added = 0;
+            for (const num of numbers) {
+                const clean = num.toString().replace(/[^0-9]/g, '');
+                if (!clean) continue;
+                await accountDB.run(
+                    `INSERT INTO member_exclusions (id, account_id, phone, note)
+                     VALUES ($1,$2,$3,$4) ON CONFLICT (account_id, phone) DO NOTHING`,
+                    [crypto.randomUUID(), accountId, clean, note || '']
+                ).catch(() => {});
+                added++;
+            }
+            res.json({ success: true, added, message: `✅ تم إضافة ${added} رقم للاستثناء` });
+        } catch (err) {
+            console.error('[GroupController] addExclusions Error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    async deleteExclusion(req, res) {
+        try {
+            const { accountId, exclusionId } = req.params;
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await accountDB.run(
+                `DELETE FROM member_exclusions WHERE id = $1 AND account_id = $2`,
+                [exclusionId, accountId]
+            );
+            res.json({ success: true, message: 'تم حذف الرقم من الاستثناءات' });
+        } catch (err) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    async clearExclusions(req, res) {
+        try {
+            const { accountId } = req.params;
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await accountDB.run(
+                `DELETE FROM member_exclusions WHERE account_id = $1`, [accountId]
+            );
+            res.json({ success: true, message: 'تم مسح قائمة الاستثناءات' });
+        } catch (err) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── تصدير أعضاء مجموعة ────────────────────────────────────────────────
+    async exportMembers(req, res) {
+        try {
+            const { accountId, groupId } = req.params;
+            const format = req.query.format || 'csv'; // csv | txt | json
+            const jid    = decodeURIComponent(groupId);
+
+            const WhatsAppManager = require('../../bot/WhatsAppManager');
+            const sock = WhatsAppManager.getSession(accountId);
+            if (!sock) {
+                return res.status(400).json({ success: false, error: 'الحساب غير متصل بواتساب' });
+            }
+
+            const meta = await sock.groupMetadata(jid);
+            if (!meta) return res.status(404).json({ success: false, error: 'المجموعة غير موجودة' });
+
+            const groupName = meta.subject || 'group';
+            const extractedAt = new Date().toISOString();
+            const members = (meta.participants || []).map(p => ({
+                phone:      p.id.replace(/:\d+@.*/, '').replace(/@.*/, ''),
+                jid:        p.id,
+                role:       p.admin === 'superadmin' ? 'مشرف رئيسي' : p.admin === 'admin' ? 'مشرف' : 'عضو',
+                group_name: groupName,
+                extracted_at: extractedAt,
+            }));
+
+            // حفظ في قاعدة البيانات
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureSavedMembersTable(accountDB);
+            const crypto = require('crypto');
+            for (const m of members) {
+                await accountDB.run(`
+                    INSERT INTO saved_group_members (id, account_id, phone, group_jid, group_name, role, extracted_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    ON CONFLICT (account_id, phone, group_jid) DO UPDATE SET
+                        role = EXCLUDED.role, extracted_at = EXCLUDED.extracted_at
+                `, [crypto.randomUUID(), accountId, m.phone, jid, groupName, m.role, extractedAt]).catch(() => {});
+            }
+
+            if (format === 'json') {
+                return res.json({ success: true, members, count: members.length, group_name: groupName });
+            }
+
+            if (format === 'csv') {
+                const header = 'الرقم,الدور,اسم المجموعة,تاريخ الاستخراج\n';
+                const rows   = members.map(m =>
+                    `${m.phone},${m.role},"${m.group_name}",${m.extracted_at}`
+                ).join('\n');
+                res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+                res.setHeader('Content-Disposition', `attachment; filename="members_${groupName}_${Date.now()}.csv"`);
+                return res.send('\ufeff' + header + rows); // BOM for Excel Arabic
+            }
+
+            if (format === 'txt') {
+                const lines = members.map(m => `+${m.phone}`).join('\n');
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                res.setHeader('Content-Disposition', `attachment; filename="members_${groupName}_${Date.now()}.txt"`);
+                return res.send(lines);
+            }
+
+            // xlsx — إرجاع JSON ليعالجه الفرونت
+            res.json({ success: true, members, count: members.length, group_name: groupName });
+
+        } catch (err) {
+            console.error('[GroupController] exportMembers Error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── تصدير أعضاء مجموعات متعددة ───────────────────────────────────────
+    async exportMultipleGroupsMembers(req, res) {
+        try {
+            const { accountId } = req.params;
+            const { group_jids, format } = req.body;
+            const fmt = format || 'csv';
+
+            if (!group_jids || group_jids.length === 0) {
+                return res.status(400).json({ success: false, error: 'يجب اختيار مجموعة واحدة على الأقل' });
+            }
+
+            const WhatsAppManager = require('../../bot/WhatsAppManager');
+            const sock = WhatsAppManager.getSession(accountId);
+            if (!sock) {
+                return res.status(400).json({ success: false, error: 'الحساب غير متصل بواتساب' });
+            }
+
+            const allMembers = [];
+            const seenPhones = new Set();
+            const extractedAt = new Date().toISOString();
+
+            for (const jid of group_jids) {
+                try {
+                    const meta = await sock.groupMetadata(jid);
+                    if (!meta?.participants) continue;
+                    const groupName = meta.subject || jid;
+
+                    for (const p of meta.participants) {
+                        const phone = p.id.replace(/:\d+@.*/, '').replace(/@.*/, '');
+                        if (seenPhones.has(phone)) continue;
+                        seenPhones.add(phone);
+                        allMembers.push({
+                            phone,
+                            role:       p.admin === 'superadmin' ? 'مشرف رئيسي' : p.admin === 'admin' ? 'مشرف' : 'عضو',
+                            group_name: groupName,
+                            extracted_at: extractedAt,
+                        });
+                    }
+                } catch (e) {
+                    console.warn(`[exportMultiple] skip ${jid}:`, e.message);
+                }
+            }
+
+            // حفظ في قاعدة البيانات
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureSavedMembersTable(accountDB);
+            const crypto = require('crypto');
+            for (const m of allMembers) {
+                const jidForSave = group_jids[0]; // نستخدم الأولى كمرجع
+                await accountDB.run(`
+                    INSERT INTO saved_group_members (id, account_id, phone, group_jid, group_name, role, extracted_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    ON CONFLICT (account_id, phone, group_jid) DO UPDATE SET
+                        role = EXCLUDED.role, extracted_at = EXCLUDED.extracted_at
+                `, [crypto.randomUUID(), accountId, m.phone, jidForSave, m.group_name, m.role, extractedAt]).catch(() => {});
+            }
+
+            if (fmt === 'csv') {
+                const header = 'الرقم,الدور,اسم المجموعة,تاريخ الاستخراج\n';
+                const rows   = allMembers.map(m =>
+                    `${m.phone},${m.role},"${m.group_name}",${m.extracted_at}`
+                ).join('\n');
+                res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+                res.setHeader('Content-Disposition', `attachment; filename="all_members_${Date.now()}.csv"`);
+                return res.send('\ufeff' + header + rows);
+            }
+
+            if (fmt === 'txt') {
+                const lines = allMembers.map(m => `+${m.phone}`).join('\n');
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                res.setHeader('Content-Disposition', `attachment; filename="all_members_${Date.now()}.txt"`);
+                return res.send(lines);
+            }
+
+            res.json({ success: true, members: allMembers, count: allMembers.length });
+
+        } catch (err) {
+            console.error('[GroupController] exportMultipleGroupsMembers Error:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── جلب الأعضاء المحفوظين في قاعدة البيانات ─────────────────────────
+    async getSavedMembers(req, res) {
+        try {
+            const { accountId } = req.params;
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureSavedMembersTable(accountDB);
+            const rows = await accountDB.all(
+                `SELECT * FROM saved_group_members WHERE account_id = $1 ORDER BY extracted_at DESC LIMIT 5000`,
+                [accountId]
+            );
+            res.json({ success: true, members: rows, count: rows.length });
+        } catch (err) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── Helpers للجداول الجديدة ────────────────────────────────────────────
+    async _ensureExclusionsTable(accountDB) {
+        await accountDB.run(`
+            CREATE TABLE IF NOT EXISTS member_exclusions (
+                id         TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                phone      TEXT NOT NULL,
+                note       TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(account_id, phone)
+            )
+        `);
+    }
+
+    async _ensureSavedMembersTable(accountDB) {
+        await accountDB.run(`
+            CREATE TABLE IF NOT EXISTS saved_group_members (
+                id           TEXT PRIMARY KEY,
+                account_id   TEXT NOT NULL,
+                phone        TEXT NOT NULL,
+                group_jid    TEXT NOT NULL,
+                group_name   TEXT DEFAULT '',
+                role         TEXT DEFAULT 'عضو',
+                extracted_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(account_id, phone, group_jid)
+            )
+        `);
+    }
 }
 
 module.exports = new GroupController();
+
