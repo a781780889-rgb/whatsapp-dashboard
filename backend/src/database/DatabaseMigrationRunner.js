@@ -11,6 +11,7 @@ class DatabaseMigrationRunner {
             await this._migrateExtractedLinks(accountDB);
             await this._migrateCampaigns(accountDB);
             await this._migrateAccounts(accountDB);
+            await this._migrateWaGroups(accountDB);  // ← جديد: مجموعات واتساب
             console.log(`[Migration] Account ${accountId} — PostgreSQL migrations applied.`);
         } catch (err) {
             console.error(`[Migration] Account ${accountId} error:`, err.message);
@@ -47,6 +48,72 @@ class DatabaseMigrationRunner {
 
     async _migrateAccounts(accountDB) {
         // Future account-level migrations go here
+    }
+
+    // ── مجموعات واتساب الحقيقية ──────────────────────────────────────────────
+    async _migrateWaGroups(accountDB) {
+        // 1. إنشاء الجدول إذا لم يكن موجوداً (للتثبيتات الجديدة)
+        await accountDB.run(`
+            CREATE TABLE IF NOT EXISTS wa_groups (
+                id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                group_jid       TEXT UNIQUE NOT NULL,
+                name            TEXT DEFAULT '',
+                description     TEXT DEFAULT '',
+                owner           TEXT DEFAULT '',
+                members_count   INTEGER DEFAULT 0,
+                admins_count    INTEGER DEFAULT 0,
+                announce        BOOLEAN DEFAULT FALSE,
+                restrict_mode   BOOLEAN DEFAULT FALSE,
+                creation_ts     BIGINT  DEFAULT 0,
+                avatar_url      TEXT,
+                is_member       BOOLEAN DEFAULT TRUE,
+                is_admin        BOOLEAN DEFAULT FALSE,
+                publish_status  TEXT DEFAULT 'green',
+                can_send_text   BOOLEAN DEFAULT TRUE,
+                can_send_images BOOLEAN DEFAULT TRUE,
+                can_send_video  BOOLEAN DEFAULT TRUE,
+                can_send_files  BOOLEAN DEFAULT TRUE,
+                can_send_links  BOOLEAN DEFAULT TRUE,
+                can_broadcast   BOOLEAN DEFAULT FALSE,
+                activity_level  INTEGER DEFAULT 50,
+                messages_today  INTEGER DEFAULT 0,
+                last_sync       TIMESTAMP DEFAULT NOW(),
+                created_at      TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+
+        // 2. إضافة الأعمدة الناقصة للتثبيتات القديمة (groups القديمة)
+        const migrations = [
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS group_jid       TEXT`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS description     TEXT DEFAULT ''`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS owner           TEXT DEFAULT ''`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS members_count   INTEGER DEFAULT 0`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS admins_count    INTEGER DEFAULT 0`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS announce        BOOLEAN DEFAULT FALSE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS restrict_mode   BOOLEAN DEFAULT FALSE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS creation_ts     BIGINT  DEFAULT 0`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS avatar_url      TEXT`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS is_member       BOOLEAN DEFAULT TRUE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS is_admin        BOOLEAN DEFAULT FALSE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS publish_status  TEXT DEFAULT 'green'`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS can_send_text   BOOLEAN DEFAULT TRUE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS can_send_images BOOLEAN DEFAULT TRUE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS can_send_video  BOOLEAN DEFAULT TRUE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS can_send_files  BOOLEAN DEFAULT TRUE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS can_send_links  BOOLEAN DEFAULT TRUE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS can_broadcast   BOOLEAN DEFAULT FALSE`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS activity_level  INTEGER DEFAULT 50`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS messages_today  INTEGER DEFAULT 0`,
+            `ALTER TABLE wa_groups ADD COLUMN IF NOT EXISTS last_sync       TIMESTAMP DEFAULT NOW()`,
+        ];
+        for (const sql of migrations) {
+            await accountDB.run(sql).catch(() => {});
+        }
+
+        // 3. إنشاء index للأداء
+        await accountDB.run(
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_wa_groups_jid ON wa_groups(group_jid)`
+        ).catch(() => {});
     }
 }
 
