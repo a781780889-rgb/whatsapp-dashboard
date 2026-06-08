@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Library, Send, Calendar,
   Megaphone, Link as LinkIcon, LogOut, ChevronRight,
-  UsersRound, CreditCard, Key, BarChart3, Crown, Shield
+  UsersRound, CreditCard, Key, BarChart3, Crown, Shield, Rocket
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 
@@ -29,11 +29,12 @@ export function Sidebar({ isCollapsed, setIsCollapsed, currentUser, onLogout }: 
     {
       section: 'النشر',
       items: [
-        { to: '/ad-library',     icon: Library,   label: 'مكتبة الإعلانات' },
-        { to: '/direct-publish', icon: Send,       label: 'النشر المباشر'  },
-        { to: '/schedules',      icon: Calendar,   label: 'النشر المجدول'  },
-        { to: '/campaigns',      icon: Megaphone,  label: 'الحملات'        },
-        { to: '/groups',         icon: UsersRound, label: 'المجموعات'      },
+        { to: '/ad-library',        icon: Library,   label: 'مكتبة الإعلانات'   },
+        { to: '/direct-publish',    icon: Send,       label: 'النشر المباشر'     },
+        { to: '/schedules',         icon: Calendar,   label: 'النشر المجدول'     },
+        { to: '/campaigns',         icon: Megaphone,  label: 'الحملات'           },
+        { to: '/private-campaigns', icon: Rocket,     label: 'حملات النشر الخاص' },
+        { to: '/groups',            icon: UsersRound, label: 'المجموعات'         },
       ]
     },
     {
