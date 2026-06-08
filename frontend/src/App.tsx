@@ -8,6 +8,7 @@ import { AppLayout } from './components/layout/AppLayout';
 import DashboardHome        from './views/DashboardHome';
 import AccountsView         from './views/AccountsView';
 import CampaignsView        from './views/CampaignsView';
+import GroupsView           from './views/GroupsView';
 import LinkDashboardView    from './views/LinkDashboardView';
 import ScheduleDashboardView from './views/ScheduleDashboardView';
 import AdLibraryView        from './views/AdLibraryView';
@@ -163,6 +164,7 @@ function AppInner() {
             />
           } />
           <Route path="/campaigns"      element={<CampaignsView      accountId={selectedAccountId} />} />
+          <Route path="/groups"         element={<GroupsView          accountId={selectedAccountId} />} />
           <Route path="/links"          element={<LinkDashboardView    accountId={selectedAccountId} />} />
           <Route path="/schedules"      element={<ScheduleDashboardView accountId={selectedAccountId} />} />
           <Route path="/ad-library"     element={<AdLibraryView        accountId={selectedAccountId} />} />
