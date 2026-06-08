@@ -177,4 +177,20 @@ router.patch('/accounts/:accountId/schedules/:id/status', auth, subCheck, async 
     return ScheduleController.pauseSchedule(req, res);
 });
 
+// ══════════════════════════════════════════════════════
+//  PROTECTION — نظام الحماية المتقدم
+// ══════════════════════════════════════════════════════
+const ProtectionController = require('./controllers/ProtectionController');
+router.get ('/protection/config',                          auth, subCheck, ProtectionController.getConfig.bind(ProtectionController));
+router.put ('/protection/config',                          auth, subCheck, ProtectionController.updateConfig.bind(ProtectionController));
+router.post('/protection/config/reset',                    auth, subCheck, ProtectionController.resetConfig.bind(ProtectionController));
+router.get ('/protection/stats',                           auth, subCheck, ProtectionController.getStats.bind(ProtectionController));
+router.get ('/protection/accounts/state',                  auth, subCheck, ProtectionController.getAccountsState.bind(ProtectionController));
+router.post('/protection/accounts/:accountId/suspend',     auth, subCheck, ProtectionController.suspendAccount.bind(ProtectionController));
+router.post('/protection/accounts/:accountId/resume',      auth, subCheck, ProtectionController.resumeAccount.bind(ProtectionController));
+router.get ('/protection/logs',                            auth, subCheck, ProtectionController.getLogs.bind(ProtectionController));
+router.get ('/protection/logs/summary',                    auth, subCheck, ProtectionController.getLogsSummary.bind(ProtectionController));
+router.delete('/protection/logs',                          auth, subCheck, ProtectionController.clearLogs.bind(ProtectionController));
+
 module.exports = router;
+
