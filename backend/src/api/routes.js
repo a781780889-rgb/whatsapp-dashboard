@@ -59,13 +59,21 @@ router.get('/admin/activity-logs', auth, role('admin'), AdminController.activity
 //  ACCOUNTS
 // ══════════════════════════════════════════════════════
 const AccountController = require('./controllers/AccountController');
-router.post('/accounts',                auth, subCheck, AccountController.createAccount.bind(AccountController));
-router.get('/accounts',                 auth, subCheck, AccountController.listAccounts.bind(AccountController));
-router.get('/accounts/:id',             auth, subCheck, AccountController.getAccountDetails.bind(AccountController));
-router.post('/accounts/:id/connect',    auth, subCheck, AccountController.connectAccount.bind(AccountController));
-router.post('/accounts/:id/reset',      auth, subCheck, AccountController.resetSession.bind(AccountController));
-router.post('/accounts/:id/disconnect', auth, subCheck, AccountController.disconnectAccount.bind(AccountController));
-router.delete('/accounts/:id',          auth, subCheck, AccountController.deleteAccount.bind(AccountController));
+router.post('/accounts',                   auth, subCheck, AccountController.createAccount.bind(AccountController));
+router.get('/accounts',                    auth, subCheck, AccountController.listAccounts.bind(AccountController));
+router.get('/accounts/summary',            auth, subCheck, AccountController.getSummary.bind(AccountController));
+router.get('/accounts/:id',                auth, subCheck, AccountController.getAccountDetails.bind(AccountController));
+router.get('/accounts/:id/stats',          auth, subCheck, AccountController.getAccountStats.bind(AccountController));
+router.get('/accounts/:id/logs',           auth, subCheck, AccountController.getLogs.bind(AccountController));
+router.post('/accounts/:id/connect',       auth, subCheck, AccountController.connectAccount.bind(AccountController));
+router.post('/accounts/:id/reset',         auth, subCheck, AccountController.resetSession.bind(AccountController));
+router.post('/accounts/:id/disconnect',    auth, subCheck, AccountController.disconnectAccount.bind(AccountController));
+router.delete('/accounts/:id',             auth, subCheck, AccountController.deleteAccount.bind(AccountController));
+router.patch('/accounts/:id/role',         auth, subCheck, AccountController.updateRole.bind(AccountController));
+router.post('/accounts/:id/start',         auth, subCheck, AccountController.startTasks.bind(AccountController));
+router.post('/accounts/:id/stop',          auth, subCheck, AccountController.stopTasks.bind(AccountController));
+router.post('/accounts/:id/restart',       auth, subCheck, AccountController.restartTasks.bind(AccountController));
+router.post('/accounts/:id/test',          auth, subCheck, AccountController.testConnection.bind(AccountController));
 
 const GroupController = require('./controllers/GroupController');
 router.get('/accounts/:accountId/groups',                  auth, subCheck, GroupController.getGroups.bind(GroupController));
