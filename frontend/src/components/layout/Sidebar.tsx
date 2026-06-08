@@ -33,6 +33,7 @@ export function Sidebar({ isCollapsed, setIsCollapsed, currentUser, onLogout }: 
         { to: '/direct-publish', icon: Send,       label: 'النشر المباشر'  },
         { to: '/schedules',      icon: Calendar,   label: 'النشر المجدول'  },
         { to: '/campaigns',      icon: Megaphone,  label: 'الحملات'        },
+        { to: '/groups',         icon: UsersRound, label: 'المجموعات'      },
       ]
     },
     {
