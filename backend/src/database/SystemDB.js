@@ -215,6 +215,50 @@ class SystemDB {
             await client.query(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash   ON refresh_tokens(token_hash)`);
             await client.query(`CREATE INDEX IF NOT EXISTS idx_session_data_account  ON whatsapp_session_data(account_id)`);
 
+            // ── Protection Config ──────────────────────────────────────────────────
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS protection_config (
+                    id                    TEXT PRIMARY KEY,
+                    user_id               TEXT REFERENCES users(id) ON DELETE CASCADE,
+                    max_ops_per_hour      INTEGER  DEFAULT 20,
+                    max_ops_per_day       INTEGER  DEFAULT 100,
+                    min_delay_between_ops INTEGER  DEFAULT 30,
+                    max_delay_between_ops INTEGER  DEFAULT 120,
+                    distribution_mode     TEXT     DEFAULT 'round_robin',
+                    error_threshold       INTEGER  DEFAULT 5,
+                    auto_disable_on_error BOOLEAN  DEFAULT TRUE,
+                    retry_enabled         BOOLEAN  DEFAULT TRUE,
+                    max_retries           INTEGER  DEFAULT 3,
+                    retry_base_delay      INTEGER  DEFAULT 60,
+                    retry_max_delay       INTEGER  DEFAULT 1800,
+                    log_retention_days    INTEGER  DEFAULT 30,
+                    is_active             BOOLEAN  DEFAULT TRUE,
+                    created_at            TIMESTAMP DEFAULT NOW(),
+                    updated_at            TIMESTAMP DEFAULT NOW()
+                )
+            `);
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS protection_security_logs (
+                    id          TEXT      PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                    user_id     TEXT      REFERENCES users(id) ON DELETE CASCADE,
+                    account_id  TEXT,
+                    event_type  TEXT      NOT NULL,
+                    message     TEXT      DEFAULT '',
+                    metadata    JSONB     DEFAULT '{}',
+                    created_at  TIMESTAMP DEFAULT NOW()
+                )
+            `);
+            await client.query(`CREATE INDEX IF NOT EXISTS idx_prot_logs_user ON protection_security_logs(user_id, created_at DESC)`);
+            await client.query(`CREATE INDEX IF NOT EXISTS idx_prot_logs_acct ON protection_security_logs(account_id, created_at DESC)`);
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS protection_account_state (
+                    account_id   TEXT      PRIMARY KEY,
+                    is_suspended BOOLEAN   DEFAULT FALSE,
+                    suspended_at TIMESTAMP,
+                    updated_at   TIMESTAMP DEFAULT NOW()
+                )
+            `);
+
             console.log('[SystemDB] System tables initialized (PostgreSQL).');
         } finally {
             client.release();
