@@ -197,6 +197,9 @@ class SystemDB {
                 `ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS ip         TEXT`,
                 `ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS user_agent TEXT`,
                 `ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS revoked    BOOLEAN DEFAULT FALSE`,
+                // refresh_tokens: id قد يكون موجوداً بدون DEFAULT → نُضبطه الآن
+                `ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS id TEXT DEFAULT gen_random_uuid()::text`,
+                `ALTER TABLE refresh_tokens ALTER COLUMN id SET DEFAULT gen_random_uuid()::text`,
             ];
             for (const sql of schemaMigrations) {
                 await client.query(sql).catch(err =>
