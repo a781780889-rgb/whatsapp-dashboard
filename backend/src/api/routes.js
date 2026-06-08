@@ -76,9 +76,11 @@ router.post('/accounts/:id/restart',       auth, subCheck, AccountController.res
 router.post('/accounts/:id/test',          auth, subCheck, AccountController.testConnection.bind(AccountController));
 
 const GroupController = require('./controllers/GroupController');
-router.get('/accounts/:accountId/groups',                  auth, subCheck, GroupController.getGroups.bind(GroupController));
-router.post('/accounts/:accountId/groups/sync',            auth, subCheck, GroupController.syncGroups.bind(GroupController));
-router.get('/accounts/:accountId/groups/:groupId/members', auth, subCheck, GroupController.getGroupMembers.bind(GroupController));
+router.get('/accounts/:accountId/groups',                        auth, subCheck, GroupController.getGroups.bind(GroupController));
+router.post('/accounts/:accountId/groups/sync',                  auth, subCheck, GroupController.syncGroups.bind(GroupController));
+router.get('/accounts/:accountId/groups/sync-settings',          auth, subCheck, GroupController.getSyncSettings.bind(GroupController));
+router.put('/accounts/:accountId/groups/sync-settings',          auth, subCheck, GroupController.updateSyncSettings.bind(GroupController));
+router.get('/accounts/:accountId/groups/:groupId/members',       auth, subCheck, GroupController.getGroupMembers.bind(GroupController));
 
 // ══════════════════════════════════════════════════════
 //  CAMPAIGNS
