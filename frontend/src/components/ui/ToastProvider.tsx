@@ -37,7 +37,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ addToast, removeToast }}>
       {children}
-      <div className="fixed top-4 left-4 z-[100] flex flex-col gap-3 w-full max-w-sm pointer-events-none">
+      {/* FIX: bottom-center أوضح على الموبايل من top-left */}
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-3 w-[calc(100%-2rem)] max-w-sm pointer-events-none">
         {toasts.map(toast => (
           <ToastItem key={toast.id} toast={toast} onRemove={() => removeToast(toast.id)} />
         ))}
@@ -48,9 +49,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
 function ToastItem({ toast, onRemove }: { toast: Toast; onRemove: () => void }) {
   useEffect(() => {
-    const timer = setTimeout(onRemove, 4000);
+    // FIX: رسائل الخطأ تبقى أطول حتى تُرى على الموبايل
+    const duration = toast.type === 'error' ? 7000 : toast.type === 'warning' ? 6000 : 4000;
+    const timer = setTimeout(onRemove, duration);
     return () => clearTimeout(timer);
-  }, [onRemove]);
+  }, [onRemove, toast.type]);
 
   const icons = {
     success: <CheckCircle2 className="w-5 h-5 text-green-500" />,
