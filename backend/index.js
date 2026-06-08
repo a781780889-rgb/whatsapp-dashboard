@@ -194,6 +194,10 @@ async function bootstrap() {
         // 7. Start DatabaseBackupJob
         require('./src/jobs/DatabaseBackupJob').start(24);
 
+        // 8. Start GroupSyncService (مزامنة تلقائية للمجموعات)
+        const GroupSyncService = require('./src/api/services/GroupSyncService');
+        GroupSyncService.start();
+
         // 7. Start server
         server.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
 
@@ -214,6 +218,7 @@ function setupGracefulShutdown() {
             logger.info('HTTP server closed.');
             AccountRoleEngine.stop();              // Stop role engine
             await JobScheduler.stop();           // Wait for current BullMQ jobs
+            require('./src/api/services/GroupSyncService').stop(); // Stop auto-sync
             await DatabaseManager.closeAll();
             logger.info('Shutdown complete.');
             process.exit(0);
