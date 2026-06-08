@@ -366,6 +366,11 @@ class WhatsAppManager {
         );
         return account?.health_status || 'normal';
     }
+
+    // ── Private Campaigns: إرسال نص إلى مجموعة مباشرةً ─────────────────────
+    async sendTextMessage(accountId, groupJid, text) {
+        return this.sendMessageSafe(accountId, groupJid, { text });
+    }
 }
 
 module.exports = new WhatsAppManager();
