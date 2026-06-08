@@ -193,6 +193,10 @@ class SystemDB {
                 `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_phase        BOOLEAN DEFAULT FALSE`,
                 `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS task_status         TEXT DEFAULT 'idle'`,
                 `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS messages_sent_today INTEGER DEFAULT 0`,
+                // refresh_tokens: ip و user_agent أُضيفا لاحقاً — بدونهما يفشل login
+                `ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS ip         TEXT`,
+                `ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS user_agent TEXT`,
+                `ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS revoked    BOOLEAN DEFAULT FALSE`,
             ];
             for (const sql of schemaMigrations) {
                 await client.query(sql).catch(err =>
