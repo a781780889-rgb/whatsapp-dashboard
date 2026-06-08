@@ -11,7 +11,8 @@ const { v4: uuidv4 }  = require('uuid');
 class GroupController {
 
     // ── GET /accounts/:accountId/groups ────────────────────────────────────────
-    // يقرأ من DB (سريع). إذا كانت الـDB فارغة أو ?refresh=1 → يجلب من واتساب.
+    // يقرأ من DB (سريع). فقط عند ?refresh=1 يجلب من واتساب.
+    // لا يجلب تلقائياً عند فراغ الـ cache تجنباً لإبطاء الجلسة وقطعها.
     async getGroups(req, res) {
         try {
             const { accountId } = req.params;
@@ -20,12 +21,8 @@ class GroupController {
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             await this._ensureGroupsTable(accountDB);
 
-            const cached = await accountDB.all(
-                `SELECT * FROM wa_groups WHERE is_member = TRUE ORDER BY members_count DESC`
-            );
-
-            // إذا طُلب تحديث فوري أو لا توجد بيانات → جلب من واتساب
-            if (forceRefresh || cached.length === 0) {
+            // إذا طُلب تحديث فوري فقط → جلب من واتساب
+            if (forceRefresh) {
                 const sock = WhatsAppManager.getSession(accountId);
                 if (sock) {
                     const synced = await this._syncFromWhatsApp(accountId, sock, accountDB);
@@ -37,24 +34,26 @@ class GroupController {
                         synced_at:  new Date().toISOString(),
                     });
                 }
-                // واتساب غير متصل → إرجاع ما في قاعدة البيانات مع تحذير
-                if (cached.length === 0) {
-                    return res.json({
-                        success: true,
-                        groups:  [],
-                        count:   0,
-                        source:  'cache',
-                        warning: 'جلسة واتساب غير متصلة. يرجى الاتصال بالحساب أولاً.',
-                    });
-                }
+                return res.json({
+                    success: true,
+                    groups:  [],
+                    count:   0,
+                    source:  'cache',
+                    warning: 'جلسة واتساب غير متصلة. يرجى الاتصال بالحساب ثم اضغط مزامنة.',
+                });
             }
+
+            // القراءة من الـ cache دائماً بدون أي استدعاء لواتساب
+            const cached = await accountDB.all(
+                `SELECT * FROM wa_groups WHERE is_member = TRUE ORDER BY members_count DESC`
+            );
 
             return res.json({
                 success:   true,
                 groups:    cached.map(r => this._formatGroup(r)),
                 count:     cached.length,
                 source:    'cache',
-                synced_at: cached[0]?.last_sync || null,
+                synced_at: cached[0]?.last_sync ? new Date(cached[0].last_sync).toISOString() : null,
             });
 
         } catch (error) {
@@ -159,11 +158,15 @@ class GroupController {
             else if (isAdmin)   publishStatus = 'yellow';   // مشرف في مجموعة إعلانات
             else                publishStatus = 'red';      // عضو عادي في مجموعة مقيدة
 
-            // ── جلب صورة المجموعة ─────────────────────────────────────────
+            // ── جلب صورة المجموعة (غير blocking — لا تعطّل الـ sync) ────────
             let avatarUrl = null;
             try {
-                avatarUrl = await sock.profilePictureUrl(jid, 'image');
-            } catch (_) { /* المجموعة بدون صورة */ }
+                const avatarPromise = sock.profilePictureUrl(jid, 'image');
+                const timeout = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('timeout')), 3000)
+                );
+                avatarUrl = await Promise.race([avatarPromise, timeout]);
+            } catch (_) { /* بدون صورة — طبيعي */ }
 
             // ── إحصائيات ──────────────────────────────────────────────────
             const membersCount = meta.participants?.length || 0;
