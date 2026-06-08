@@ -205,5 +205,19 @@ router.get ('/protection/logs',                            auth, subCheck, Prote
 router.get ('/protection/logs/summary',                    auth, subCheck, ProtectionController.getLogsSummary.bind(ProtectionController));
 router.delete('/protection/logs',                          auth, subCheck, ProtectionController.clearLogs.bind(ProtectionController));
 
+// ══════════════════════════════════════════════════════
+//  PRIVATE CAMPAIGNS — الجزء السادس: حملات النشر الخاص
+// ══════════════════════════════════════════════════════
+const PrivateCampaignController = require('./controllers/PrivateCampaignController');
+router.get   ('/private-campaigns',                auth, subCheck, PrivateCampaignController.listCampaigns.bind(PrivateCampaignController));
+router.post  ('/private-campaigns',                auth, subCheck, PrivateCampaignController.createCampaign.bind(PrivateCampaignController));
+router.get   ('/private-campaigns/:id',            auth, subCheck, PrivateCampaignController.getCampaign.bind(PrivateCampaignController));
+router.post  ('/private-campaigns/:id/start',      auth, subCheck, PrivateCampaignController.startCampaign.bind(PrivateCampaignController));
+router.post  ('/private-campaigns/:id/pause',      auth, subCheck, PrivateCampaignController.pauseCampaign.bind(PrivateCampaignController));
+router.delete('/private-campaigns/:id',            auth, subCheck, PrivateCampaignController.deleteCampaign.bind(PrivateCampaignController));
+router.get   ('/private-campaigns/:id/logs',       auth, subCheck, PrivateCampaignController.getCampaignLogs.bind(PrivateCampaignController));
+router.get   ('/private-campaigns/:id/stats',      auth, subCheck, PrivateCampaignController.getStats.bind(PrivateCampaignController));
+
 module.exports = router;
+
 
