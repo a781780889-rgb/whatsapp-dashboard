@@ -54,6 +54,7 @@ const DatabaseManager    = require('./src/database/DatabaseManager');
 const SystemDB           = require('./src/database/SystemDB');
 const WhatsAppManager    = require('./src/bot/WhatsAppManager');
 const JobScheduler       = require('./src/scheduler/JobScheduler');
+const AccountRoleEngine  = require('./src/api/services/AccountRoleEngine');
 
 // ── Structured Logging — pino (Section 10.3) ─────────────────────────────────
 const logger = pino({
@@ -186,7 +187,11 @@ async function bootstrap() {
         // 5. Start BullMQ Scheduler (replaces Custom Polling Loop)
         await JobScheduler.start();
 
-        // 6. Start DatabaseBackupJob
+        // 6. Start AccountRoleEngine (24/7 background task engine)
+        AccountRoleEngine.setDependencies(JobScheduler, WhatsAppManager);
+        await AccountRoleEngine.start();
+
+        // 7. Start DatabaseBackupJob
         require('./src/jobs/DatabaseBackupJob').start(24);
 
         // 7. Start server
@@ -207,6 +212,7 @@ function setupGracefulShutdown() {
         logger.info(`[${signal}] Graceful shutdown initiated...`);
         server.close(async () => {
             logger.info('HTTP server closed.');
+            AccountRoleEngine.stop();              // Stop role engine
             await JobScheduler.stop();           // Wait for current BullMQ jobs
             await DatabaseManager.closeAll();
             logger.info('Shutdown complete.');
