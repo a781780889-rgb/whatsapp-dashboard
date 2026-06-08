@@ -11,10 +11,30 @@ import {
   X, Copy, ExternalLink, Zap, Bell, Star, Phone, Image,
   RefreshCw, AlertCircle, WifiOff, CheckCircle2,
   Video, Paperclip, Megaphone, Lock, Unlock, Settings,
-  Timer, RotateCcw, Wifi, ChevronRight, Play, Pause
+  Timer, RotateCcw, Wifi, ChevronRight, Play, Pause,
+  Archive, LayoutGrid, CheckSquare, XSquare, MinusSquare
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { API, authFetch } from '@/utils/api';
+
+
+/* ─────────────── Category Types ─────────────── */
+interface GroupCategory {
+  label: string;
+  count: number;
+  groups: WaGroup[];
+}
+interface GroupCategories {
+  publishable:    GroupCategory;
+  restricted:     GroupCategory;
+  nonPublishable: GroupCategory;
+  archived:       GroupCategory;
+}
+interface CategoryStats {
+  total: number; publishable: number; restricted: number;
+  nonPublishable: number; archived: number;
+  asAdmin: number; totalMembers: number; avgActivity: number;
+}
 
 /* ─────────────── Types ─────────────── */
 interface WaGroup {
@@ -716,6 +736,207 @@ function GroupModal({ group, accountId, onClose }: {
 }
 
 /* ─────────────── Skeleton Loading ─────────────── */
+
+/* ─────────────── Category View (الجزء الثاني) ─────────────── */
+function CategoryRow({ group, onClick }: { group: WaGroup; onClick: () => void }) {
+  const statusConfig = {
+    green:  { icon: CheckSquare, cls: 'text-green-400',  bg: 'bg-green-500/10'  },
+    yellow: { icon: MinusSquare, cls: 'text-yellow-400', bg: 'bg-yellow-500/10' },
+    red:    { icon: XSquare,     cls: 'text-red-400',    bg: 'bg-red-500/10'    },
+  };
+  const cfg = statusConfig[group.publish_status as keyof typeof statusConfig] || statusConfig.red;
+  const StatusIcon = cfg.icon;
+
+  return (
+    <div
+      onClick={onClick}
+      className="flex items-center gap-3 p-3 rounded-xl hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer border border-transparent hover:border-[var(--border-default)]"
+    >
+      <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center shrink-0', cfg.bg)}>
+        <StatusIcon className={cn('w-5 h-5', cfg.cls)} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-bold text-[var(--text-primary)] truncate">{group.name}</p>
+          {group.is_admin && (
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[var(--brand-primary)]/10 text-[var(--brand-primary)] shrink-0">
+              👑
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 mt-0.5">
+          <span className="text-xs text-[var(--text-muted)] flex items-center gap-1">
+            <Users className="w-3 h-3" />{group.members_count.toLocaleString()}
+          </span>
+          {group.announce && (
+            <span className="text-xs text-yellow-400">📢 إعلانات</span>
+          )}
+          {!group.is_member && (
+            <span className="text-xs text-[var(--text-muted)] flex items-center gap-1">
+              <Archive className="w-3 h-3" /> مؤرشفة
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="text-right shrink-0">
+        <p className="text-xs text-[var(--text-muted)]">{group.activity_level}% نشاط</p>
+        <ActivityBar level={group.activity_level} />
+      </div>
+    </div>
+  );
+}
+
+function CategoriesPanel({
+  accountId,
+  onGroupClick,
+}: {
+  accountId: string;
+  onGroupClick: (g: WaGroup) => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [error,   setError  ] = useState<string|null>(null);
+  const [cats,    setCats   ] = useState<GroupCategories | null>(null);
+  const [stats,   setStats  ] = useState<CategoryStats | null>(null);
+  const [activeTab, setActiveTab] = useState<'publishable'|'restricted'|'nonPublishable'|'archived'>('publishable');
+  const [search, setSearch] = useState('');
+
+  const fetchCategories = useCallback(async (refresh = false) => {
+    if (!accountId) return;
+    if (refresh) setSyncing(true); else setLoading(true);
+    setError(null);
+    try {
+      const url = `${API}/accounts/${accountId}/groups/categories${refresh ? '?refresh=1' : ''}`;
+      const res  = await authFetch(url);
+      const data = await res.json();
+      if (data.success) {
+        setCats(data.categories);
+        setStats(data.stats);
+      } else {
+        setError(data.error || 'فشل جلب التصنيفات');
+      }
+    } catch {
+      setError('خطأ في الاتصال بالخادم');
+    } finally {
+      setLoading(false);
+      setSyncing(false);
+    }
+  }, [accountId]);
+
+  useEffect(() => { fetchCategories(); }, [fetchCategories]);
+
+  const TABS = [
+    { id: 'publishable'    as const, label: 'قابلة للنشر',     icon: CheckSquare, color: 'text-green-400',  count: cats?.publishable.count    || 0 },
+    { id: 'restricted'     as const, label: 'مقيدة',            icon: MinusSquare, color: 'text-yellow-400', count: cats?.restricted.count     || 0 },
+    { id: 'nonPublishable' as const, label: 'غير قابلة',        icon: XSquare,     color: 'text-red-400',    count: cats?.nonPublishable.count || 0 },
+    { id: 'archived'       as const, label: 'مؤرشفة',           icon: Archive,     color: 'text-gray-400',   count: cats?.archived.count       || 0 },
+  ];
+
+  const currentGroups = useMemo(() => {
+    if (!cats) return [];
+    const g = cats[activeTab]?.groups || [];
+    if (!search) return g;
+    return g.filter(x => x.name.includes(search) || x.group_jid.includes(search));
+  }, [cats, activeTab, search]);
+
+  if (loading) return (
+    <div className="flex flex-col gap-2">
+      {[...Array(5)].map((_, i) => <div key={i} className="h-16 bg-[var(--bg-elevated)] rounded-xl animate-pulse" />)}
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* إحصائيات التصنيفات */}
+      {stats && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            { label: 'قابلة للنشر',  value: stats.publishable,    color: 'text-green-400',  bg: 'bg-green-500/10'  },
+            { label: 'مقيدة',         value: stats.restricted,     color: 'text-yellow-400', bg: 'bg-yellow-500/10' },
+            { label: 'غير قابلة',     value: stats.nonPublishable, color: 'text-red-400',    bg: 'bg-red-500/10'    },
+            { label: 'مؤرشفة',        value: stats.archived,       color: 'text-gray-400',   bg: 'bg-gray-500/10'   },
+          ].map((s, i) => (
+            <div key={i} className={cn('rounded-xl p-3 text-center border border-[var(--border-default)]', s.bg)}>
+              <p className={cn('text-xl font-bold', s.color)}>{s.value}</p>
+              <p className="text-xs text-[var(--text-muted)] mt-0.5">{s.label}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* أزرار عملية */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <Button size="sm" onClick={() => fetchCategories(true)} disabled={syncing} className="gap-1.5">
+          <RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin')} />
+          {syncing ? 'جاري المزامنة...' : 'مزامنة وتحديث'}
+        </Button>
+        <span className="text-xs text-[var(--text-muted)]">
+          {stats ? `${stats.total} مجموعة إجمالاً · ${stats.totalMembers.toLocaleString()} عضو` : ''}
+        </span>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/5 border border-red-500/20">
+          <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          <p className="text-sm text-red-400">{error}</p>
+        </div>
+      )}
+
+      {/* تبويبات التصنيف */}
+      <div className="flex gap-1 flex-wrap">
+        {TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setActiveTab(t.id)}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors',
+              activeTab === t.id
+                ? 'bg-[var(--brand-primary)] text-white shadow-[var(--shadow-glow)]'
+                : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)]'
+            )}
+          >
+            <t.icon className={cn('w-3.5 h-3.5', activeTab === t.id ? 'text-white' : t.color)} />
+            {t.label}
+            <span className={cn(
+              'px-1.5 py-0.5 rounded text-[9px] font-bold',
+              activeTab === t.id ? 'bg-white/20' : 'bg-[var(--bg-overlay)]'
+            )}>{t.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* بحث */}
+      <div className="relative">
+        <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
+        <input
+          className="input pr-9 w-full"
+          placeholder="بحث..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+      </div>
+
+      {/* قائمة المجموعات */}
+      <div className="flex flex-col divide-y divide-[var(--border-default)] bg-[var(--bg-card)] rounded-2xl border border-[var(--border-default)] overflow-hidden">
+        {currentGroups.length === 0 ? (
+          <div className="p-8 text-center">
+            <Users className="w-10 h-10 text-[var(--text-muted)] mx-auto mb-3" />
+            <p className="text-sm text-[var(--text-muted)]">لا توجد مجموعات في هذه الفئة</p>
+          </div>
+        ) : (
+          currentGroups.map(g => (
+            <div key={g.group_jid} className="px-2">
+              <CategoryRow group={g} onClick={() => onGroupClick(g)} />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/* ─────────────── Skeleton Loading ─────────────── */
 function GroupSkeleton() {
   return (
     <div className="card p-4 animate-pulse">
@@ -798,6 +1019,7 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
   const [selectedGroup, setSelectedGroup] = useState<WaGroup | null>(null);
   const [showSyncSettings, setShowSyncSettings] = useState(false);
   const [nextSyncIn,    setNextSyncIn   ] = useState(0);
+  const [viewMode,      setViewMode     ] = useState<'grid'|'categories'>('grid');
 
   // إعدادات المزامنة — مخزّنة في localStorage
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => {
@@ -1101,12 +1323,32 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
             )}
           </div>
 
-          {/* الفلاتر */}
-          <Button variant="outline" size="sm" className="gap-2 shrink-0"
-            onClick={() => setShowFilters(!showFilters)}>
-            <Filter className="w-4 h-4" />فلترة
-            {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-          </Button>
+          {/* تبديل العرض */}
+          <div className="flex gap-1 bg-[var(--bg-elevated)] rounded-xl p-1 border border-[var(--border-default)]">
+            <button
+              onClick={() => setViewMode('grid')}
+              className={cn('p-1.5 rounded-lg transition-colors', viewMode === 'grid' ? 'bg-[var(--brand-primary)] text-white' : 'text-[var(--text-muted)]')}
+              title="عرض شبكي"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setViewMode('categories')}
+              className={cn('p-1.5 rounded-lg transition-colors', viewMode === 'categories' ? 'bg-[var(--brand-primary)] text-white' : 'text-[var(--text-muted)]')}
+              title="عرض التصنيفات"
+            >
+              <Filter className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* الفلاتر — فقط في العرض الشبكي */}
+          {viewMode === 'grid' && (
+            <Button variant="outline" size="sm" className="gap-2 shrink-0"
+              onClick={() => setShowFilters(!showFilters)}>
+              <Filter className="w-4 h-4" />فلترة
+              {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1144,96 +1386,102 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
         <StatCard icon={Zap}          label="معدل النشاط"         value={`${stats.avgAct}%`}              color="text-purple-400" />
       </div>
 
-      {/* ── Search + Filters ── */}
-      <div className="flex flex-col gap-3">
-        <div className="relative">
-          <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
-          <input
-            className="input pr-10 w-full"
-            placeholder="بحث باسم المجموعة أو المعرّف..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
-          {search && (
-            <button onClick={() => setSearch('')} className="absolute left-3 top-1/2 -translate-y-1/2">
-              <X className="w-4 h-4 text-[var(--text-muted)] hover:text-[var(--text-primary)]" />
-            </button>
-          )}
+      {/* ── عرض التصنيفات ── */}
+      {viewMode === 'categories' ? (
+        <div className="flex-1 overflow-y-auto">
+          <CategoriesPanel accountId={accountId} onGroupClick={setSelectedGroup} />
         </div>
-        {showFilters && (
-          <div className="flex gap-2 flex-wrap">
-            {FILTERS.map(f => (
-              <button key={f.id} onClick={() => setFilter(f.id)}
-                className={cn(
-                  'px-3 py-1.5 rounded-xl text-xs font-medium transition-colors',
-                  filter === f.id
-                    ? 'bg-[var(--brand-primary)] text-white shadow-[var(--shadow-glow)]'
-                    : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-default)]'
-                )}>
-                {f.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── Groups Grid ── */}
-      <div className="flex-1 overflow-y-auto">
-        {loading && groups.length === 0 ? (
-          /* سكلتون — فقط عند التحميل الأول */
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {[...Array(6)].map((_, i) => <GroupSkeleton key={i} />)}
-          </div>
-        ) : groups.length === 0 && !error ? (
-          /* حالة فارغة — المجموعات لم تُزامَن بعد */
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
-              <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
-              <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات محفوظة</h3>
-              <p className="text-sm text-[var(--text-secondary)] mt-2 mb-4">
-                اضغط «🔄 مزامنة» لجلب مجموعاتك مباشرة من الحساب المتصل.
-                <br/>
-                <span className="text-[var(--text-muted)] text-xs mt-1 block">
-                  تأكد أن الحساب متصل أولاً من صفحة الحسابات.
-                </span>
-              </p>
-              <Button onClick={handleSync} disabled={syncing} className="gap-2">
-                <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
-                {syncing ? 'جارٍ الجلب من واتساب...' : '🔄 مزامنة الآن'}
-              </Button>
+      ) : (
+        <>
+          {/* ── Search + Filters ── */}
+          <div className="flex flex-col gap-3">
+            <div className="relative">
+              <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
+              <input
+                className="input pr-10 w-full"
+                placeholder="بحث باسم المجموعة أو المعرّف..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+              {search && (
+                <button onClick={() => setSearch('')} className="absolute left-3 top-1/2 -translate-y-1/2">
+                  <X className="w-4 h-4 text-[var(--text-muted)] hover:text-[var(--text-primary)]" />
+                </button>
+              )}
             </div>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center p-8">
-              <Users className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-3" />
-              <p className="text-[var(--text-secondary)]">لا توجد مجموعات تطابق البحث</p>
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* تحميل خلفي خفي */}
-            {loading && (
-              <div className="flex items-center gap-2 mb-3 p-2 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-default)]">
-                <RefreshCw className="w-3 h-3 text-[var(--brand-primary)] animate-spin" />
-                <span className="text-xs text-[var(--text-muted)]">جاري تحديث البيانات في الخلفية...</span>
+            {showFilters && (
+              <div className="flex gap-2 flex-wrap">
+                {FILTERS.map(f => (
+                  <button key={f.id} onClick={() => setFilter(f.id)}
+                    className={cn(
+                      'px-3 py-1.5 rounded-xl text-xs font-medium transition-colors',
+                      filter === f.id
+                        ? 'bg-[var(--brand-primary)] text-white shadow-[var(--shadow-glow)]'
+                        : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-default)]'
+                    )}>
+                    {f.label}
+                  </button>
+                ))}
               </div>
             )}
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filtered.map(g => (
-                <GroupCard key={g.group_jid} group={g} onClick={() => setSelectedGroup(g)} />
-              ))}
-            </div>
-          </>
-        )}
-      </div>
+          </div>
 
-      {/* ── Count ── */}
-      {groups.length > 0 && (
-        <div className="text-xs text-[var(--text-muted)] text-center pb-1">
-          عرض {filtered.length} من {groups.length} مجموعة حقيقية
-          {loading && <span className="mr-2 text-[var(--brand-primary)]">· يجري التحديث...</span>}
-        </div>
+          {/* ── Groups Grid ── */}
+          <div className="flex-1 overflow-y-auto">
+            {loading && groups.length === 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {[...Array(6)].map((_, i) => <GroupSkeleton key={i} />)}
+              </div>
+            ) : groups.length === 0 && !error ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
+                  <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
+                  <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات محفوظة</h3>
+                  <p className="text-sm text-[var(--text-secondary)] mt-2 mb-4">
+                    اضغط «🔄 مزامنة» لجلب مجموعاتك مباشرة من الحساب المتصل.
+                    <br/>
+                    <span className="text-[var(--text-muted)] text-xs mt-1 block">
+                      تأكد أن الحساب متصل أولاً من صفحة الحسابات.
+                    </span>
+                  </p>
+                  <Button onClick={handleSync} disabled={syncing} className="gap-2">
+                    <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
+                    {syncing ? 'جارٍ الجلب من واتساب...' : '🔄 مزامنة الآن'}
+                  </Button>
+                </div>
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center p-8">
+                  <Users className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-3" />
+                  <p className="text-[var(--text-secondary)]">لا توجد مجموعات تطابق البحث</p>
+                </div>
+              </div>
+            ) : (
+              <>
+                {loading && (
+                  <div className="flex items-center gap-2 mb-3 p-2 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-default)]">
+                    <RefreshCw className="w-3 h-3 text-[var(--brand-primary)] animate-spin" />
+                    <span className="text-xs text-[var(--text-muted)]">جاري تحديث البيانات في الخلفية...</span>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                  {filtered.map(g => (
+                    <GroupCard key={g.group_jid} group={g} onClick={() => setSelectedGroup(g)} />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* ── Count ── */}
+          {groups.length > 0 && (
+            <div className="text-xs text-[var(--text-muted)] text-center pb-1">
+              عرض {filtered.length} من {groups.length} مجموعة حقيقية
+              {loading && <span className="mr-2 text-[var(--brand-primary)]">· يجري التحديث...</span>}
+            </div>
+          )}
+        </>
       )}
 
       {/* ── Detail Modal ── */}
