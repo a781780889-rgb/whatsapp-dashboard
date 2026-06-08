@@ -1,8 +1,7 @@
 'use strict';
 /**
  * GroupController — مجموعات واتساب الحقيقية
- * يجلب المجموعات مباشرة من WhatsApp ويخزنها في قاعدة البيانات
- * مع فحص كامل لصلاحيات النشر لكل مجموعة
+ * النسخة المحدّثة: مزامنة تلقائية + حفظ دائم + إعدادات الفاصل الزمني
  */
 const WhatsAppManager  = require('../../bot/WhatsAppManager');
 const DatabaseManager  = require('../../database/DatabaseManager');
@@ -11,8 +10,6 @@ const { v4: uuidv4 }  = require('uuid');
 class GroupController {
 
     // ── GET /accounts/:accountId/groups ────────────────────────────────────────
-    // يقرأ من DB (سريع). فقط عند ?refresh=1 يجلب من واتساب.
-    // لا يجلب تلقائياً عند فراغ الـ cache تجنباً لإبطاء الجلسة وقطعها.
     async getGroups(req, res) {
         try {
             const { accountId } = req.params;
@@ -20,83 +17,176 @@ class GroupController {
 
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             await this._ensureGroupsTable(accountDB);
+            await this._ensureSyncSettingsTable(accountDB);
 
-            // إذا طُلب تحديث فوري فقط → جلب من واتساب
+            // فرض تحديث من واتساب
             if (forceRefresh) {
                 const sock = WhatsAppManager.getSession(accountId);
                 if (sock) {
                     const synced = await this._syncFromWhatsApp(accountId, sock, accountDB);
+                    await accountDB.run(
+                        `UPDATE group_sync_settings SET last_auto_sync = NOW() WHERE account_id = $1`,
+                        [accountId]
+                    ).catch(() => {});
                     return res.json({
-                        success:    true,
-                        groups:     synced,
-                        count:      synced.length,
-                        source:     'whatsapp',
-                        synced_at:  new Date().toISOString(),
+                        success:   true,
+                        groups:    synced,
+                        count:     synced.length,
+                        source:    'whatsapp',
+                        synced_at: new Date().toISOString(),
                     });
                 }
+                // لا يوجد اتصال — إرجاع الكاش مع تحذير
+                const cached2 = await this._getCachedGroups(accountDB);
                 return res.json({
-                    success: true,
-                    groups:  [],
-                    count:   0,
-                    source:  'cache',
-                    warning: 'جلسة واتساب غير متصلة. يرجى الاتصال بالحساب ثم اضغط مزامنة.',
+                    success:   true,
+                    groups:    cached2,
+                    count:     cached2.length,
+                    source:    'cache',
+                    synced_at: cached2[0]?.last_sync || null,
+                    warning:   'جلسة واتساب غير متصلة — يُعرض الكاش المحفوظ.',
                 });
             }
 
-            // القراءة من الـ cache دائماً بدون أي استدعاء لواتساب
-            const cached = await accountDB.all(
-                `SELECT * FROM wa_groups WHERE is_member = TRUE ORDER BY members_count DESC`
+            // القراءة من الكاش دائماً (سريع — بدون استدعاء واتساب)
+            const cached = await this._getCachedGroups(accountDB);
+            const settings = await accountDB.get(
+                `SELECT * FROM group_sync_settings WHERE account_id = $1`, [accountId]
             );
 
             return res.json({
-                success:   true,
-                groups:    cached.map(r => this._formatGroup(r)),
-                count:     cached.length,
-                source:    'cache',
-                synced_at: cached[0]?.last_sync ? new Date(cached[0].last_sync).toISOString() : null,
+                success:         true,
+                groups:          cached,
+                count:           cached.length,
+                source:          'cache',
+                synced_at:       cached[0]?.last_sync || null,
+                sync_settings:   settings ? {
+                    interval_minutes:  settings.interval_minutes,
+                    auto_sync_enabled: settings.auto_sync_enabled,
+                    last_auto_sync:    settings.last_auto_sync,
+                } : null,
             });
 
         } catch (error) {
             console.error('[GroupController] getGroups Error:', error);
-            res.status(500).json({ success: false, error: error.message || 'Internal Server Error' });
+            res.status(500).json({ success: false, error: error.message });
         }
     }
 
     // ── POST /accounts/:accountId/groups/sync ──────────────────────────────────
-    // مزامنة كاملة وإجبارية من واتساب → قاعدة البيانات
     async syncGroups(req, res) {
         try {
             const { accountId } = req.params;
             const sock = WhatsAppManager.getSession(accountId);
 
             if (!sock) {
+                // إرجاع الكاش مع رسالة الخطأ
+                const accountDB = await DatabaseManager.getAccountDB(accountId);
+                await this._ensureGroupsTable(accountDB);
+                const cached = await this._getCachedGroups(accountDB);
                 return res.status(400).json({
-                    success: false,
-                    error:   'حساب واتساب غير متصل. يجب ربط الحساب أولاً قبل المزامنة.',
+                    success:        false,
+                    error:          'حساب واتساب غير متصل.',
+                    cached_groups:  cached,
+                    cached_count:   cached.length,
                 });
             }
 
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             await this._ensureGroupsTable(accountDB);
+            await this._ensureSyncSettingsTable(accountDB);
 
-            const groups    = await this._syncFromWhatsApp(accountId, sock, accountDB);
-            const stats     = this._buildStats(groups);
+            const groups = await this._syncFromWhatsApp(accountId, sock, accountDB);
+            const stats  = this._buildStats(groups);
+
+            // تحديث وقت آخر مزامنة في الإعدادات
+            await accountDB.run(
+                `UPDATE group_sync_settings SET last_auto_sync = NOW(), updated_at = NOW()
+                 WHERE account_id = $1`, [accountId]
+            ).catch(() => {});
 
             res.json({
-                success:    true,
+                success:   true,
                 groups,
-                count:      groups.length,
+                count:     groups.length,
                 stats,
-                synced_at:  new Date().toISOString(),
-                message:    `✅ تم مزامنة ${groups.length} مجموعة بنجاح`,
+                synced_at: new Date().toISOString(),
+                message:   `✅ تم مزامنة ${groups.length} مجموعة بنجاح`,
             });
 
         } catch (error) {
             console.error('[GroupController] syncGroups Error:', error);
-            res.status(500).json({
-                success: false,
-                error:   error.message || 'فشلت عملية المزامنة',
+            res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── GET /accounts/:accountId/groups/sync-settings ──────────────────────────
+    async getSyncSettings(req, res) {
+        try {
+            const { accountId } = req.params;
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureSyncSettingsTable(accountDB);
+
+            let settings = await accountDB.get(
+                `SELECT * FROM group_sync_settings WHERE account_id = $1`, [accountId]
+            );
+
+            // إنشاء إعدادات افتراضية إن لم تكن موجودة
+            if (!settings) {
+                await accountDB.run(
+                    `INSERT INTO group_sync_settings
+                     (account_id, interval_minutes, auto_sync_enabled)
+                     VALUES ($1, 15, TRUE)
+                     ON CONFLICT (account_id) DO NOTHING`, [accountId]
+                );
+                settings = await accountDB.get(
+                    `SELECT * FROM group_sync_settings WHERE account_id = $1`, [accountId]
+                );
+            }
+
+            res.json({ success: true, settings });
+
+        } catch (error) {
+            console.error('[GroupController] getSyncSettings Error:', error);
+            res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── PUT /accounts/:accountId/groups/sync-settings ──────────────────────────
+    async updateSyncSettings(req, res) {
+        try {
+            const { accountId } = req.params;
+            const { interval_minutes, auto_sync_enabled } = req.body;
+
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureSyncSettingsTable(accountDB);
+
+            await accountDB.run(
+                `INSERT INTO group_sync_settings
+                 (account_id, interval_minutes, auto_sync_enabled, updated_at)
+                 VALUES ($1, $2, $3, NOW())
+                 ON CONFLICT (account_id) DO UPDATE SET
+                     interval_minutes  = EXCLUDED.interval_minutes,
+                     auto_sync_enabled = EXCLUDED.auto_sync_enabled,
+                     updated_at        = NOW()`,
+                [accountId,
+                 parseInt(interval_minutes) || 15,
+                 auto_sync_enabled !== false]
+            );
+
+            const updated = await accountDB.get(
+                `SELECT * FROM group_sync_settings WHERE account_id = $1`, [accountId]
+            );
+
+            res.json({
+                success:  true,
+                settings: updated,
+                message:  '✅ تم حفظ إعدادات المزامنة',
             });
+
+        } catch (error) {
+            console.error('[GroupController] updateSyncSettings Error:', error);
+            res.status(500).json({ success: false, error: error.message });
         }
     }
 
@@ -114,10 +204,17 @@ class GroupController {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // المنطق الأساسي: جلب من واتساب وحفظ في قاعدة البيانات
+    // المنطق الأساسي
     // ─────────────────────────────────────────────────────────────────────────
+
+    async _getCachedGroups(accountDB) {
+        const rows = await accountDB.all(
+            `SELECT * FROM wa_groups WHERE is_member = TRUE ORDER BY members_count DESC`
+        );
+        return rows.map(r => this._formatGroup(r));
+    }
+
     async _syncFromWhatsApp(accountId, sock, accountDB) {
-        // 1. جلب جميع المجموعات من واتساب دفعة واحدة
         const raw   = await sock.groupFetchAllParticipating();
         const myJid = (sock.user?.id || '').replace(/:\d+@/, '@');
 
@@ -128,7 +225,6 @@ class GroupController {
             if (!jid.endsWith('@g.us')) continue;
             activeGroupIds.add(jid);
 
-            // ── تحديد دور الحساب ──────────────────────────────────────────
             const myParticipant = meta.participants?.find(p => {
                 const pBase = p.id.replace(/:\d+@/, '@');
                 const mBase = myJid.replace(/:\d+@/, '@');
@@ -137,28 +233,22 @@ class GroupController {
 
             const isAdmin  = myParticipant?.admin === 'admin' || myParticipant?.admin === 'superadmin';
             const isMember = !!myParticipant;
+            const announce = !!meta.announce;
+            const canPublish = !announce || isAdmin;
 
-            // ── فحص صلاحيات النشر ─────────────────────────────────────────
-            const announce     = !!meta.announce; // true = فقط المشرفون يرسلون
-            const canPublish   = !announce || isAdmin;
-
-            // النشر الفردي
             const canSendText   = isMember && canPublish;
             const canSendImages = isMember && canPublish;
             const canSendVideo  = isMember && canPublish;
             const canSendFiles  = isMember && canPublish;
             const canSendLinks  = isMember && canPublish;
-            // البث الجماعي: يحتاج صلاحية مشرف
             const canBroadcast  = isMember && isAdmin;
 
-            // حالة النشر الإجمالية
             let publishStatus;
-            if (!isMember)     publishStatus = 'red';      // خرج من المجموعة
-            else if (!announce) publishStatus = 'green';    // الجميع يرسلون
-            else if (isAdmin)   publishStatus = 'yellow';   // مشرف في مجموعة إعلانات
-            else                publishStatus = 'red';      // عضو عادي في مجموعة مقيدة
+            if (!isMember)     publishStatus = 'red';
+            else if (!announce) publishStatus = 'green';
+            else if (isAdmin)   publishStatus = 'yellow';
+            else                publishStatus = 'red';
 
-            // ── جلب صورة المجموعة (غير blocking — لا تعطّل الـ sync) ────────
             let avatarUrl = null;
             try {
                 const avatarPromise = sock.profilePictureUrl(jid, 'image');
@@ -166,14 +256,12 @@ class GroupController {
                     setTimeout(() => reject(new Error('timeout')), 3000)
                 );
                 avatarUrl = await Promise.race([avatarPromise, timeout]);
-            } catch (_) { /* بدون صورة — طبيعي */ }
+            } catch (_) {}
 
-            // ── إحصائيات ──────────────────────────────────────────────────
-            const membersCount = meta.participants?.length || 0;
-            const adminsCount  = meta.participants?.filter(p => p.admin).length || 0;
+            const membersCount  = meta.participants?.length || 0;
+            const adminsCount   = meta.participants?.filter(p => p.admin).length || 0;
             const activityLevel = this._estimateActivity(meta);
 
-            // ── UPSERT في قاعدة البيانات ──────────────────────────────────
             await accountDB.run(`
                 INSERT INTO wa_groups (
                     id, group_jid, name, description, owner, members_count, admins_count,
@@ -250,51 +338,38 @@ class GroupController {
             });
         }
 
-        // 2. تحديث المجموعات التي خرج منها الحساب (is_member = false)
+        // تحديث المجموعات التي خرج منها الحساب
         if (activeGroupIds.size > 0) {
             const ids = Array.from(activeGroupIds);
             const ph  = ids.map((_, i) => `$${i + 1}`).join(',');
             await accountDB.run(
-                `UPDATE wa_groups SET is_member = FALSE WHERE group_jid NOT IN (${ph})`,
-                ids
+                `UPDATE wa_groups SET is_member = FALSE WHERE group_jid NOT IN (${ph})`, ids
             ).catch(() => {});
         }
 
         return groups.sort((a, b) => b.members_count - a.members_count);
     }
 
-    // ── تقدير مستوى النشاط من بيانات الـ metadata ────────────────────────────
     _estimateActivity(meta) {
         const memberCount = meta.participants?.length || 1;
         const adminCount  = meta.participants?.filter(p => p.admin).length || 0;
         const isAnnounce  = !!meta.announce;
         const ageInDays   = meta.creation
-            ? (Date.now() / 1000 - meta.creation) / 86400
-            : 365;
+            ? (Date.now() / 1000 - meta.creation) / 86400 : 365;
 
         let score = 50;
-
-        // حجم المجموعة
-        if (memberCount > 500) score += 30;
+        if (memberCount > 500)      score += 30;
         else if (memberCount > 200) score += 20;
         else if (memberCount > 100) score += 12;
         else if (memberCount > 50)  score +=  6;
         else if (memberCount < 10)  score -= 15;
-
-        // نوع المجموعة
-        if (isAnnounce) score -= 20; // مجموعات الإعلانات أقل نشاطاً
-
-        // كثرة المشرفين = إدارة جيدة = نشاط أعلى
-        if (adminCount > 5) score += 8;
-
-        // المجموعات الجديدة عادة أكثر نشاطاً
-        if (ageInDays < 30)  score += 15;
-        else if (ageInDays > 730) score -= 10;
-
+        if (isAnnounce)             score -= 20;
+        if (adminCount > 5)         score +=  8;
+        if (ageInDays < 30)         score += 15;
+        else if (ageInDays > 730)   score -= 10;
         return Math.max(5, Math.min(98, score));
     }
 
-    // ── إنشاء جدول wa_groups إذا لم يكن موجوداً ──────────────────────────────
     async _ensureGroupsTable(accountDB) {
         await accountDB.run(`
             CREATE TABLE IF NOT EXISTS wa_groups (
@@ -326,22 +401,37 @@ class GroupController {
         `);
     }
 
-    // ── بناء إحصائيات إجمالية ──────────────────────────────────────────────────
-    _buildStats(groups) {
-        const total      = groups.length;
-        const canPublish = groups.filter(g => g.publish_status !== 'red').length;
-        const restricted = groups.filter(g => g.publish_status === 'yellow').length;
-        const blocked    = groups.filter(g => g.publish_status === 'red').length;
-        const asAdmin    = groups.filter(g => g.is_admin).length;
-        const members    = groups.reduce((s, g) => s + (g.members_count || 0), 0);
-        const avgActivity = total
-            ? Math.round(groups.reduce((s, g) => s + (g.activity_level || 0), 0) / total)
-            : 0;
+    async _ensureSyncSettingsTable(accountDB) {
+        await accountDB.run(`
+            CREATE TABLE IF NOT EXISTS group_sync_settings (
+                account_id        TEXT PRIMARY KEY,
+                interval_minutes  INTEGER  DEFAULT 15,
+                auto_sync_enabled BOOLEAN  DEFAULT TRUE,
+                last_auto_sync    TIMESTAMP,
+                created_at        TIMESTAMP DEFAULT NOW(),
+                updated_at        TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        // إنشاء صف افتراضي إن لم يكن موجوداً
+        await accountDB.run(`
+            INSERT INTO group_sync_settings (account_id)
+            VALUES ($1)
+            ON CONFLICT (account_id) DO NOTHING
+        `, ['default']).catch(() => {});
+    }
 
+    _buildStats(groups) {
+        const total       = groups.length;
+        const canPublish  = groups.filter(g => g.publish_status !== 'red').length;
+        const restricted  = groups.filter(g => g.publish_status === 'yellow').length;
+        const blocked     = groups.filter(g => g.publish_status === 'red').length;
+        const asAdmin     = groups.filter(g => g.is_admin).length;
+        const members     = groups.reduce((s, g) => s + (g.members_count || 0), 0);
+        const avgActivity = total
+            ? Math.round(groups.reduce((s, g) => s + (g.activity_level || 0), 0) / total) : 0;
         return { total, canPublish, restricted, blocked, asAdmin, members, avgActivity };
     }
 
-    // ── تحويل صف DB إلى نموذج API ─────────────────────────────────────────────
     _formatGroup(row) {
         return {
             id:              row.id,
