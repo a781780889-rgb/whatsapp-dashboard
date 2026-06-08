@@ -1,125 +1,104 @@
 'use strict';
 /**
- * GroupSyncService — مزامنة تلقائية للمجموعات في الخلفية
- * يُشغَّل كـ Singleton عند بدء الخادم ويزامن مجموعات جميع الحسابات
- * المتصلة تلقائياً وفق إعداداتها المحفوظة
+ * GroupJoinerService — خدمة الانضمام التلقائي لمجموعات واتساب
+ * يُستخدم من LinkController لجدولة الانضمام للروابط
  */
-const WhatsAppManager  = require('../../../bot/WhatsAppManager');
-const DatabaseManager  = require('../../../database/DatabaseManager');
+const WhatsAppManager = require('../../bot/WhatsAppManager');  // ✅ مسار صحيح
 
-class GroupSyncService {
+class GroupJoinerService {
     constructor() {
-        this._timer   = null;
-        this._running = false;
-        this._syncing = new Set(); // accounts being synced now — avoid overlap
+        this._queue      = [];      // قائمة الانتظار
+        this._processing = false;   // هل نعالج الآن؟
+        this._results    = [];      // نتائج آخر 50 عملية
     }
 
-    // ── بدء الخدمة ─────────────────────────────────────────────────────────
-    start() {
-        if (this._running) return;
-        this._running = true;
-        // يفحص كل دقيقة هل حان وقت المزامنة لأي حساب
-        this._timer = setInterval(() => this._tick(), 60 * 1000);
-        console.log('[GroupSyncService] Started. Checking every 60s.');
-        // فحص فوري عند البدء
-        setTimeout(() => this._tick(), 5000);
+    // ── جدولة روابط للانضمام ────────────────────────────────────────────────
+    /**
+     * @param {Array<{accountId, link, linkId}>|{accountId, link, linkId}} linksData
+     * @returns {number} عدد الروابط المجدولة
+     */
+    async scheduleAutoJoin(linksData) {
+        if (!Array.isArray(linksData)) linksData = [linksData];
+        const valid = linksData.filter(l => l && l.link && l.accountId);
+        if (valid.length === 0) return 0;
+
+        this._queue.push(...valid);
+        console.log(`[GroupJoinerService] Queued ${valid.length} links. Total queue: ${this._queue.length}`);
+
+        if (!this._processing) {
+            this._processQueue().catch(err =>
+                console.error('[GroupJoinerService] Queue error:', err.message)
+            );
+        }
+        return valid.length;
     }
 
-    stop() {
-        this._running = false;
-        if (this._timer) { clearInterval(this._timer); this._timer = null; }
-        console.log('[GroupSyncService] Stopped.');
+    // ── حالة القائمة ─────────────────────────────────────────────────────────
+    getQueue() {
+        return {
+            pending:  this._queue.length,
+            items:    this._queue.slice(0, 20),
+            results:  this._results.slice(-20),
+        };
     }
 
-    // ── دورة الفحص ─────────────────────────────────────────────────────────
-    async _tick() {
-        if (!this._running) return;
+    // ── معالجة القائمة ───────────────────────────────────────────────────────
+    async _processQueue() {
+        if (this._processing) return;
+        this._processing = true;
+
+        while (this._queue.length > 0) {
+            const item = this._queue.shift();
+            const result = await this._joinGroup(item);
+            this._results.push({ ...item, result, ts: new Date().toISOString() });
+            if (this._results.length > 50) this._results.shift();
+
+            // تأخير عشوائي لتجنب الحظر
+            const delay = 3000 + Math.floor(Math.random() * 7000);
+            await new Promise(r => setTimeout(r, delay));
+        }
+
+        this._processing = false;
+        console.log('[GroupJoinerService] Queue drained.');
+    }
+
+    // ── الانضمام لمجموعة واحدة ───────────────────────────────────────────────
+    async _joinGroup({ accountId, link, linkId }) {
         try {
-            const GroupController = require('../controllers/GroupController');
-            const sessions = Array.from(WhatsAppManager.sessions.keys());
-
-            for (const accountId of sessions) {
-                if (this._syncing.has(accountId)) continue;
-
-                const sock = WhatsAppManager.getSession(accountId);
-                if (!sock) continue;
-
-                try {
-                    const accountDB = await DatabaseManager.getAccountDB(accountId);
-                    await GroupController._ensureSyncSettingsTable(accountDB);
-                    await GroupController._ensureGroupsTable(accountDB);
-
-                    // جلب إعدادات المزامنة
-                    const settings = await accountDB.get(
-                        `SELECT * FROM group_sync_settings WHERE account_id = $1`, [accountId]
-                    );
-
-                    if (!settings || !settings.auto_sync_enabled) continue;
-
-                    const intervalMs = (settings.interval_minutes || 15) * 60 * 1000;
-                    const lastSync   = settings.last_auto_sync
-                        ? new Date(settings.last_auto_sync).getTime() : 0;
-
-                    if (Date.now() - lastSync < intervalMs) continue; // لم يحن الوقت
-
-                    // حان وقت المزامنة
-                    this._syncing.add(accountId);
-                    console.log(`[GroupSyncService] Auto-syncing account ${accountId}...`);
-
-                    GroupController._syncFromWhatsApp(accountId, sock, accountDB)
-                        .then(async () => {
-                            await accountDB.run(
-                                `UPDATE group_sync_settings
-                                 SET last_auto_sync = NOW(), updated_at = NOW()
-                                 WHERE account_id = $1`, [accountId]
-                            );
-                            console.log(`[GroupSyncService] ✅ Done: account ${accountId}`);
-                        })
-                        .catch(err => {
-                            console.error(`[GroupSyncService] ❌ Failed: account ${accountId}:`, err.message);
-                        })
-                        .finally(() => {
-                            this._syncing.delete(accountId);
-                        });
-
-                } catch (err) {
-                    console.error(`[GroupSyncService] Error for account ${accountId}:`, err.message);
-                    this._syncing.delete(accountId);
-                }
+            const sock = WhatsAppManager.getSession(accountId);
+            if (!sock) {
+                console.warn(`[GroupJoinerService] No session for account ${accountId}`);
+                return { success: false, error: 'الحساب غير متصل' };
             }
+
+            const code = this._extractInviteCode(link);
+            if (!code) {
+                return { success: false, error: 'رابط دعوة غير صالح' };
+            }
+
+            const groupId = await sock.groupAcceptInvite(code);
+            console.log(`[GroupJoinerService] ✅ Joined group ${groupId} via account ${accountId}`);
+            return { success: true, groupId };
+
         } catch (err) {
-            console.error('[GroupSyncService] Tick error:', err.message);
+            console.error(`[GroupJoinerService] ❌ Failed to join ${link}:`, err.message);
+            return { success: false, error: err.message };
         }
     }
 
-    // ── مزامنة فورية بالطلب (من API) ──────────────────────────────────────
-    async triggerSync(accountId) {
-        if (this._syncing.has(accountId)) {
-            return { success: false, error: 'مزامنة جارية بالفعل' };
+    // ── استخراج كود الدعوة من الرابط ─────────────────────────────────────────
+    _extractInviteCode(link) {
+        if (!link) return null;
+        const patterns = [
+            /chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/,
+            /whatsapp\.com\/invite\/([A-Za-z0-9_-]+)/,
+        ];
+        for (const p of patterns) {
+            const m = link.match(p);
+            if (m?.[1]) return m[1];
         }
-        const sock = WhatsAppManager.getSession(accountId);
-        if (!sock) return { success: false, error: 'الحساب غير متصل' };
-
-        try {
-            const GroupController = require('../controllers/GroupController');
-            const accountDB       = await DatabaseManager.getAccountDB(accountId);
-            await GroupController._ensureGroupsTable(accountDB);
-
-            this._syncing.add(accountId);
-            const groups = await GroupController._syncFromWhatsApp(accountId, sock, accountDB);
-
-            await accountDB.run(
-                `UPDATE group_sync_settings SET last_auto_sync = NOW() WHERE account_id = $1`,
-                [accountId]
-            ).catch(() => {});
-
-            return { success: true, groups, count: groups.length };
-        } catch (err) {
-            return { success: false, error: err.message };
-        } finally {
-            this._syncing.delete(accountId);
-        }
+        return null;
     }
 }
 
-module.exports = new GroupSyncService();
+module.exports = new GroupJoinerService();
