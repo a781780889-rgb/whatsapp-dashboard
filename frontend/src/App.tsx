@@ -13,6 +13,7 @@ import LinkDashboardView    from './views/LinkDashboardView';
 import ScheduleDashboardView from './views/ScheduleDashboardView';
 import AdLibraryView        from './views/AdLibraryView';
 import DirectPublishView    from './views/DirectPublishView';
+import PrivateCampaignsView from './views/PrivateCampaignsView';
 import ProtectionView      from './views/ProtectionView';
 // Admin views
 import UsersView            from './views/UsersView';
@@ -205,6 +206,9 @@ function AppInner() {
             />
           } />
           <Route path="/campaigns"      element={<CampaignsView      accountId={selectedAccountId} />} />
+          <Route path="/private-campaigns" element={
+            <PrivateCampaignsView accountId={selectedAccountId} accounts={accounts} />
+          } />
           <Route path="/groups"         element={<GroupsView          accountId={selectedAccountId} />} />
           <Route path="/links"          element={<LinkDashboardView    accountId={selectedAccountId} />} />
           <Route path="/schedules"      element={<ScheduleDashboardView accountId={selectedAccountId} />} />
