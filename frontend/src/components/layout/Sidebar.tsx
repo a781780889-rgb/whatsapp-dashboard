@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Library, Send, Calendar,
   Megaphone, Link as LinkIcon, LogOut, ChevronRight,
-  UsersRound, CreditCard, Key, BarChart3, Crown, Shield, Rocket
+  UsersRound, CreditCard, Key, BarChart3, Crown, Shield, Rocket, Brain
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 
@@ -42,6 +42,13 @@ export function Sidebar({ isCollapsed, setIsCollapsed, currentUser, onLogout }: 
       items: [
         { to: '/links',      icon: LinkIcon, label: 'مراقبة الروابط' },
         { to: '/protection', icon: Shield,   label: 'نظام الحماية'   },
+      ]
+    },
+  
+    {
+      section: 'الذكاء الاصطناعي',
+      items: [
+        { to: '/ai-automation', icon: Brain, label: 'مركز الذكاء والأتمتة' },
       ]
     },
   ];
