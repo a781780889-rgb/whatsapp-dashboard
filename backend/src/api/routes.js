@@ -150,6 +150,7 @@ router.post('/accounts/:accountId/broadcast/schedules',           auth, subCheck
 router.put('/accounts/:accountId/broadcast/schedules/:id',        auth, subCheck, async (req, res) => res.status(501).json({ success: false, error: 'Not implemented' }));
 router.delete('/accounts/:accountId/broadcast/schedules/:id',     auth, subCheck, BroadcastController.delete.bind(BroadcastController));
 router.post('/accounts/:accountId/broadcast/schedules/:id/pause', auth, subCheck, BroadcastController.pause.bind(BroadcastController));
+router.post('/accounts/:accountId/broadcast/schedules/:id/start', auth, subCheck, BroadcastController.start.bind(BroadcastController));
 router.post('/accounts/:accountId/broadcast/direct',              auth, subCheck, BroadcastController.directPublish.bind(BroadcastController));
 router.get('/accounts/:accountId/broadcast/log',                  auth, subCheck, BroadcastController.getDirectPublishLog.bind(BroadcastController));
 
