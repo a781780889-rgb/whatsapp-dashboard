@@ -183,6 +183,29 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               <input className="input" type="number" defaultValue={500} />
               <p className="text-xs text-[var(--text-muted)]">لحماية الحساب من الحظر.</p>
             </div>
+
+            {/* ━━ خيارات الإرسال الإضافية ━━ */}
+            <div className="flex flex-col gap-3">
+              <h4 className="text-sm font-semibold text-[var(--text-primary)] border-b border-[var(--border-default)] pb-2">خيارات الإرسال</h4>
+              
+              {/* إرسال للأعضاء خاص */}
+              <label className="flex items-center justify-between p-3 border border-[var(--border-default)] rounded-xl bg-[var(--bg-elevated)] cursor-pointer hover:border-[var(--brand-primary)] transition-colors">
+                <div>
+                  <p className="font-medium text-[var(--text-primary)] text-sm">إرسال للأعضاء (خاص)</p>
+                  <p className="text-xs text-[var(--text-muted)] mt-0.5">بالإضافة للمجموعة، يُرسل رسالة خاصة لكل عضو</p>
+                </div>
+                <input type="checkbox" id="send_to_members_sched" className="w-4 h-4 rounded border-[var(--border-strong)] text-[var(--brand-primary)]" />
+              </label>
+
+              {/* استبعاد المشرفين */}
+              <label className="flex items-center justify-between p-3 border border-[var(--border-default)] rounded-xl bg-[var(--bg-elevated)] cursor-pointer hover:border-orange-400 transition-colors">
+                <div>
+                  <p className="font-medium text-[var(--text-primary)] text-sm">استبعاد المشرفين</p>
+                  <p className="text-xs text-[var(--text-muted)] mt-0.5">لا يُرسل للمشرفين عند الإرسال الخاص للأعضاء</p>
+                </div>
+                <input type="checkbox" id="exclude_admins_sched" defaultChecked className="w-4 h-4 rounded border-[var(--border-strong)] text-orange-500" />
+              </label>
+            </div>
             
             <div className="pt-4 border-t border-[var(--border-default)] flex justify-end gap-2">
               <Button variant="outline" onClick={() => setIsModalOpen(false)}>إلغاء</Button>
