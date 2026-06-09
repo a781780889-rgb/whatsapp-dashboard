@@ -33,7 +33,11 @@ class BroadcastController {
     async create(req, res) {
         try {
             const { accountId } = req.params;
-            const { name, target_group_jids, ad_library_ids, rotation_mode, active_days, publish_times, max_per_day } = req.body;
+            const {
+                name, target_group_jids, ad_library_ids,
+                rotation_mode, active_days, publish_times, max_per_day,
+                send_to_members = false, exclude_admins = true
+            } = req.body;
 
             if (!name) return res.status(400).json({ success: false, error: 'اسم الجدولة مطلوب' });
             if (!ad_library_ids || ad_library_ids.length === 0) return res.status(400).json({ success: false, error: 'يجب اختيار إعلان واحد على الأقل' });
@@ -43,15 +47,18 @@ class BroadcastController {
             const id = crypto.randomUUID();
 
             await accountDB.run(
-                `INSERT INTO broadcast_schedules (id, name, account_id, target_group_jids, ad_library_ids, rotation_mode, active_days, publish_times, max_per_day, status)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'paused')`,
+                `INSERT INTO broadcast_schedules 
+                 (id, name, account_id, target_group_jids, ad_library_ids, rotation_mode, active_days, publish_times, max_per_day, status, send_to_members, exclude_admins)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'paused', $10, $11)`,
                 [id, name, accountId,
                     JSON.stringify(target_group_jids || []),
                     JSON.stringify(ad_library_ids || []),
                     rotation_mode || 'sequential',
                     JSON.stringify(active_days || [0,1,2,3,4,5,6]),
                     JSON.stringify(publish_times || []),
-                    max_per_day || 3]
+                    max_per_day || 3,
+                    send_to_members ? true : false,
+                    exclude_admins ? true : false]
             );
 
             res.status(201).json({ success: true, broadcastId: id, message: 'تم إنشاء الجدولة بنجاح' });
@@ -100,11 +107,47 @@ class BroadcastController {
         }
     }
 
-    // Direct Publish — instant send
+    // ── Helper: build message content from ad ─────────────────────────────────
+    _buildMessageContent(ad) {
+        return {
+            text: ad.content || '',
+            mediaPaths: JSON.parse(ad.media_paths || '[]'),
+        };
+    }
+
+    // ── Helper: send one message to a JID ─────────────────────────────────────
+    async _sendOne(session, jid, messageContent) {
+        const MEDIA_BASE = path.resolve(__dirname, '../../../../');
+        const { text, mediaPaths } = messageContent;
+        if (mediaPaths && mediaPaths.length > 0) {
+            const mediaPath = path.join(MEDIA_BASE, mediaPaths[0]);
+            if (fs.existsSync(mediaPath)) {
+                const mediaBuffer = fs.readFileSync(mediaPath);
+                const ext = path.extname(mediaPaths[0]).toLowerCase();
+                if (['.jpg','.jpeg','.png','.gif','.webp'].includes(ext)) {
+                    await session.sendMessage(jid, { image: mediaBuffer, caption: text });
+                } else if (['.mp4','.mov','.avi'].includes(ext)) {
+                    await session.sendMessage(jid, { video: mediaBuffer, caption: text });
+                } else {
+                    await session.sendMessage(jid, { document: mediaBuffer, caption: text, fileName: path.basename(mediaPaths[0]) });
+                }
+                return;
+            }
+        }
+        await session.sendMessage(jid, { text: text || '' });
+    }
+
+    // ── Direct Publish — instant send ─────────────────────────────────────────
     async directPublish(req, res) {
         try {
             const { accountId } = req.params;
-            const { target_group_jids, ad_library_id, custom_content } = req.body;
+            const {
+                target_group_jids,
+                ad_library_id,
+                custom_content,
+                send_to_members = false,
+                exclude_admins = true,
+            } = req.body;
 
             if (!target_group_jids || target_group_jids.length === 0) {
                 return res.status(400).json({ success: false, error: 'يجب اختيار مجموعة واحدة على الأقل' });
@@ -117,15 +160,12 @@ class BroadcastController {
 
             const accountDB = await DatabaseManager.getAccountDB(accountId);
 
-            let messageContent = custom_content || '';
-            let mediaPaths = [];
+            let messageContent = { text: custom_content || '', mediaPaths: [] };
 
             if (ad_library_id) {
                 const ad = await accountDB.get(`SELECT * FROM ad_library WHERE id = $1`, [ad_library_id]);
                 if (ad) {
-                    messageContent = ad.content || messageContent;
-                    mediaPaths = JSON.parse(ad.media_paths || '[]');
-                    // Increment usage count
+                    messageContent = this._buildMessageContent(ad);
                     await accountDB.run(
                         `UPDATE ad_library SET times_used = times_used + 1, last_used_at = NOW() WHERE id = $1`,
                         [ad_library_id]
@@ -133,57 +173,73 @@ class BroadcastController {
                 }
             }
 
-            if (!messageContent && mediaPaths.length === 0) {
+            if (!messageContent.text && messageContent.mediaPaths.length === 0) {
                 return res.status(400).json({ success: false, error: 'يجب إضافة نص أو وسائط للرسالة' });
             }
 
             const results = [];
-            const MEDIA_BASE = path.resolve(__dirname, '../../../../');
+            let membersSentTotal = 0;
 
             for (const jid of target_group_jids) {
+                // 1️⃣ إرسال للمجموعة
                 try {
-                    if (mediaPaths.length > 0) {
-                        // Send first media with caption
-                        const mediaPath = path.join(MEDIA_BASE, mediaPaths[0]);
-                        if (fs.existsSync(mediaPath)) {
-                            const mediaBuffer = fs.readFileSync(mediaPath);
-                            const ext = path.extname(mediaPaths[0]).toLowerCase();
-                            const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext);
-                            if (isImage) {
-                                await session.sendMessage(jid, { image: mediaBuffer, caption: messageContent });
-                            } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
-                                await session.sendMessage(jid, { video: mediaBuffer, caption: messageContent });
-                            } else {
-                                await session.sendMessage(jid, { document: mediaBuffer, caption: messageContent, fileName: path.basename(mediaPaths[0]) });
-                            }
-                        } else {
-                            await session.sendMessage(jid, { text: messageContent });
-                        }
-                    } else {
-                        await session.sendMessage(jid, { text: messageContent });
-                    }
-                    results.push({ jid, status: 'sent' });
+                    await this._sendOne(session, jid, messageContent);
+                    results.push({ jid, type: 'group', status: 'sent' });
                 } catch (sendErr) {
-                    results.push({ jid, status: 'failed', error: sendErr.message });
+                    results.push({ jid, type: 'group', status: 'failed', error: sendErr.message });
                 }
-
-                // Small delay between sends (1 second)
                 await new Promise(r => setTimeout(r, 1000));
+
+                // 2️⃣ إرسال للأعضاء خاص (باستثناء المشرفين إذا كان الخيار مفعلاً)
+                if (send_to_members) {
+                    try {
+                        const membersInfo = await WhatsAppManager.getGroupMembers(accountId, jid);
+                        // members = non-admins always; add admins only if exclude_admins is false
+                        const targets = exclude_admins
+                            ? membersInfo.target_jids            // أعضاء فقط (بدون مشرفين)
+                            : [...membersInfo.target_jids, ...membersInfo.admins];
+
+                        for (const memberJid of targets) {
+                            try {
+                                await this._sendOne(session, memberJid, messageContent);
+                                membersSentTotal++;
+                                results.push({ jid: memberJid, type: 'private', status: 'sent', fromGroup: jid });
+                            } catch (e) {
+                                results.push({ jid: memberJid, type: 'private', status: 'failed', fromGroup: jid, error: e.message });
+                            }
+                            // تأخير بين الرسائل الخاصة لتجنب الحظر
+                            await new Promise(r => setTimeout(r, 1500));
+                        }
+                    } catch (membersErr) {
+                        console.error(`[Broadcast] Failed to get members for ${jid}:`, membersErr.message);
+                        results.push({ jid, type: 'members_fetch', status: 'failed', error: membersErr.message });
+                    }
+                }
             }
 
-            // Log to DB
+            // تسجيل في قاعدة البيانات
             const logId = crypto.randomUUID();
-            const sentCount = results.filter(r => r.status === 'sent').length;
+            const groupSentCount = results.filter(r => r.type === 'group' && r.status === 'sent').length;
             await accountDB.run(
-                `INSERT INTO direct_publish_log (id, account_id, ad_library_id, target_group_jids, custom_content, status)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-                [logId, accountId, ad_library_id || null, JSON.stringify(target_group_jids), custom_content || '', sentCount === target_group_jids.length ? 'sent' : 'partial']
+                `INSERT INTO direct_publish_log 
+                 (id, account_id, ad_library_id, target_group_jids, custom_content, status, send_to_members, exclude_admins, members_sent)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                [
+                    logId, accountId, ad_library_id || null,
+                    JSON.stringify(target_group_jids), custom_content || '',
+                    groupSentCount === target_group_jids.length ? 'sent' : 'partial',
+                    send_to_members ? true : false,
+                    exclude_admins ? true : false,
+                    membersSentTotal,
+                ]
             );
 
             res.json({
                 success: true,
-                message: `تم الإرسال لـ ${sentCount} من ${target_group_jids.length} مجموعة`,
-                results
+                message: send_to_members
+                    ? `تم الإرسال لـ ${groupSentCount} مجموعة + ${membersSentTotal} عضو (خاص)`
+                    : `تم الإرسال لـ ${groupSentCount} من ${target_group_jids.length} مجموعة`,
+                results,
             });
         } catch (err) {
             console.error('DirectPublish error:', err);
