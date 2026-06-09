@@ -119,6 +119,9 @@ class JobScheduler {
             case 'send_scheduled_message':
                 await this._sendScheduledMessage(job.data, session, accountDB, accountId, WhatsAppManager);
                 break;
+            case 'send_broadcast_message':
+                await this._sendBroadcastMessage(job.data, session, accountDB, accountId, WhatsAppManager);
+                break;
             case 'join_group':
                 await this._joinGroup(job.data, session, accountDB, accountId);
                 break;
@@ -215,6 +218,80 @@ class JobScheduler {
             );
             throw err;
         }
+    }
+
+    // ── Send Broadcast Message (Group + Optional Private Members) ────────────
+    async _sendBroadcastMessage(data, session, accountDB, accountId, WhatsAppManager) {
+        const { scheduleId, groupJid, adId, send_to_members, exclude_admins } = data;
+        const fs   = require('fs');
+        const path = require('path');
+        const MEDIA_BASE = path.resolve(__dirname, '../../../');
+
+        const schedule = await accountDB.get(
+            `SELECT status FROM broadcast_schedules WHERE id = $1`, [scheduleId]
+        );
+        if (!schedule || schedule.status === 'paused') {
+            console.log(`[BroadcastJob] Skipping — schedule ${scheduleId} is paused/missing.`);
+            return;
+        }
+
+        const ad = adId ? await accountDB.get(`SELECT * FROM ad_library WHERE id = $1`, [adId]) : null;
+        const text = ad?.content || '';
+        const mediaPaths = JSON.parse(ad?.media_paths || '[]');
+
+        const _send = async (jid) => {
+            if (mediaPaths.length > 0) {
+                const mediaPath = path.join(MEDIA_BASE, mediaPaths[0]);
+                if (fs.existsSync(mediaPath)) {
+                    const buf = fs.readFileSync(mediaPath);
+                    const ext = path.extname(mediaPaths[0]).toLowerCase();
+                    if (['.jpg','.jpeg','.png','.gif','.webp'].includes(ext)) {
+                        return session.sendMessage(jid, { image: buf, caption: text });
+                    } else if (['.mp4','.mov','.avi'].includes(ext)) {
+                        return session.sendMessage(jid, { video: buf, caption: text });
+                    }
+                    return session.sendMessage(jid, { document: buf, caption: text, fileName: path.basename(mediaPaths[0]) });
+                }
+            }
+            return session.sendMessage(jid, { text });
+        };
+
+        // 1️⃣ إرسال للمجموعة
+        await _send(groupJid);
+        console.log(`[BroadcastJob] Sent to group ${groupJid}`);
+
+        // 2️⃣ إرسال للأعضاء خاص
+        if (send_to_members) {
+            try {
+                const membersInfo = await WhatsAppManager.getGroupMembers(accountId, groupJid);
+                const targets = exclude_admins
+                    ? membersInfo.target_jids
+                    : [...membersInfo.target_jids, ...membersInfo.admins];
+
+                let sentCount = 0;
+                for (const memberJid of targets) {
+                    try {
+                        await _send(memberJid);
+                        sentCount++;
+                    } catch (e) {
+                        console.error(`[BroadcastJob] Failed to send private to ${memberJid}:`, e.message);
+                    }
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+                console.log(`[BroadcastJob] Sent private to ${sentCount}/${targets.length} members of ${groupJid}`);
+            } catch (e) {
+                console.error(`[BroadcastJob] Could not fetch members for ${groupJid}:`, e.message);
+            }
+        }
+
+        if (ad) {
+            await accountDB.run(
+                `UPDATE ad_library SET times_used = times_used + 1, last_used_at = NOW() WHERE id = $1`, [adId]
+            );
+        }
+        await accountDB.run(
+            `UPDATE broadcast_schedules SET last_run_at = NOW(), executions_done = executions_done + 1 WHERE id = $1`, [scheduleId]
+        );
     }
 
     // ── Pause Campaign ────────────────────────────────────────────────────────
