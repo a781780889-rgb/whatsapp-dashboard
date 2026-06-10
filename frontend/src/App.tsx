@@ -38,7 +38,7 @@ function ProtectedRoute({ children, adminOnly = false, currentUser }:
 }
 
 function AppInner() {
-  const AUTO_USER = { id: 'auto-admin', username: 'admin', role: 'superadmin', full_name: 'Admin' };
+  const AUTO_USER = { id: 'auto-admin', username: 'admin', role: 'super_admin', full_name: 'Admin' };
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY) || 'no-auth');
   const [currentUser, setCurrentUser] = useState<any>(() => {
     try { return JSON.parse(localStorage.getItem(USER_KEY) || 'null') || AUTO_USER; } catch { return AUTO_USER; }
