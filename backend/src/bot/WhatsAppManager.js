@@ -403,6 +403,134 @@ class WhatsAppManager {
 
     getSession(accountId) { return this.sessions.get(accountId); }
 
+    // ── Pairing Code Session — ربط عبر رمز الإقران ──────────────────────────
+    async initPairingSession(accountId, phoneNumber) {
+        // إذا كانت هناك جلسة نشطة، أنهها أولاً
+        const old = this.sessions.get(accountId);
+        if (old) {
+            try { old.end(undefined); } catch {}
+            this.sessions.delete(accountId);
+            this.initPromises.delete(accountId);
+        }
+
+        // مسح بيانات الجلسة القديمة لضمان جلسة نظيفة
+        await SystemDB.deleteAllSessionData(accountId).catch(() => {});
+
+        const initPromise = (async () => {
+            try {
+                const { state, saveCreds } = await this._usePostgresAuthState(accountId);
+
+                let waVersion;
+                try {
+                    const { version } = await fetchLatestWaWebVersion();
+                    waVersion = version;
+                } catch {
+                    waVersion = [2, 3000, 1015901307];
+                }
+
+                const sock = makeWASocket({
+                    auth:   state,
+                    version: waVersion,
+                    logger: this.logger,
+                    printQRInTerminal: false,
+                    keepAliveIntervalMs: 25_000,
+                    connectTimeoutMs:    60_000,
+                    browser: Browsers.ubuntu('Chrome'),
+                    syncFullHistory:  false,
+                    markOnlineOnConnect: false,
+                    retryRequestDelayMs: 500,
+                    maxRetries: 5,
+                });
+
+                sock.ev.on('creds.update', saveCreds);
+
+                // ── طلب Pairing Code بعد فتح المقبس مباشرة ──────────────────
+                let pairingRequested = false;
+                sock.ev.on('connection.update', async (update) => {
+                    const { connection, lastDisconnect, qr } = update;
+
+                    // عند الاتصال: اطلب الـ Pairing Code
+                    if (connection === 'open' && !pairingRequested) {
+                        pairingRequested = true;
+                        try {
+                            const code = await sock.requestPairingCode(phoneNumber);
+                            const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
+                            console.log(`[Account ${accountId}] Pairing Code: ${formatted}`);
+                            if (this.io) {
+                                this.io.to(`account_${accountId}`).emit('pairing_code', {
+                                    code: formatted,
+                                    phone: phoneNumber
+                                });
+                            }
+                        } catch (err) {
+                            console.error(`[Account ${accountId}] requestPairingCode error:`, err.message);
+                            if (this.io) {
+                                this.io.to(`account_${accountId}`).emit('pairing_error', {
+                                    error: 'فشل إنشاء Pairing Code: ' + err.message
+                                });
+                            }
+                        }
+                        return;
+                    }
+
+                    // إذا ظهر QR بدل Pairing → لا نتوقع هذا لكن نعالجه
+                    if (qr) {
+                        console.log(`[Account ${accountId}] Unexpected QR during pairing session.`);
+                    }
+
+                    // انقطاع
+                    if (connection === 'close') {
+                        const statusCode = new Boom.Boom(lastDisconnect?.error)?.output?.statusCode;
+                        this.sessions.delete(accountId);
+
+                        if (CLEAR_SESSION_CODES.has(statusCode)) {
+                            await this._clearSession(accountId, statusCode);
+                            return;
+                        }
+
+                        const attempts = (this.reconnectAttempts.get(accountId) || 0) + 1;
+                        this.reconnectAttempts.set(accountId, attempts);
+                        const delay = Math.min(attempts * 3000, 30000);
+                        console.log(`[Account ${accountId}][Pairing] Reconnecting in ${delay}ms...`);
+                        setTimeout(() => this.initSession(accountId), delay);
+                        return;
+                    }
+
+                    // متصل بنجاح
+                    if (connection === 'open') {
+                        this.reconnectAttempts.delete(accountId);
+                        this.restartAttempts.delete(accountId);
+                        this.sessions.set(accountId, sock);
+
+                        await SystemDB.run(
+                            `UPDATE accounts SET status = 'connected', connection_type = 'pairing_code',
+                             phone_number = $1, updated_at = NOW() WHERE id = $2`,
+                            [phoneNumber, accountId]
+                        );
+
+                        if (this.io) {
+                            this.io.to(`account_${accountId}`).emit('account_status', {
+                                accountId, status: 'connected'
+                            });
+                        }
+                        console.log(`[Account ${accountId}] Connected via Pairing Code ✓`);
+                    }
+                });
+
+                this.sessions.set(accountId, sock);
+                this.initPromises.set(accountId, initPromise);
+                return sock;
+            } catch (err) {
+                this.initPromises.delete(accountId);
+                console.error(`[Account ${accountId}][Pairing] initPairingSession error:`, err.message);
+                throw err;
+            }
+        })();
+
+        this.initPromises.set(accountId, initPromise);
+        return await initPromise;
+    }
+
     // ── Force Reset (من API) ─────────────────────────────────────────────────
     async forceResetSession(accountId) {
         await this._clearSession(accountId, 'force_reset');
