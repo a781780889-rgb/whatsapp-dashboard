@@ -289,7 +289,7 @@ class AccountController {
         }
     }
 
-    // ── ربط الحساب بواتساب ────────────────────────────────────────────────────
+    // ── ربط الحساب بواتساب (QR Code) ─────────────────────────────────────────
     async connectAccount(req, res) {
         try {
             const { id } = req.params;
@@ -297,6 +297,11 @@ class AccountController {
                 `SELECT id FROM accounts WHERE id = $1`, [id]
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+            // تحديث نوع الاتصال
+            await DatabaseManager.systemDB.run(
+                `UPDATE accounts SET connection_type = 'qr_code' WHERE id = $1`, [id]
+            );
 
             WhatsAppManager.initSession(id).catch(err =>
                 console.error(`[Account ${id}] initSession error:`, err.message)
@@ -308,6 +313,56 @@ class AccountController {
             });
         } catch (error) {
             console.error('Connect Account Error:', error);
+            return res.status(500).json({ success: false, error: 'Internal Server Error' });
+        }
+    }
+
+    // ── ربط الحساب بـ Pairing Code ────────────────────────────────────────────
+    async connectWithPairing(req, res) {
+        try {
+            const { id } = req.params;
+            const { phone_number } = req.body;
+
+            if (!phone_number) {
+                return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
+            }
+
+            // تنظيف رقم الهاتف: أرقام فقط بدون + أو مسافات
+            const cleanPhone = phone_number.replace(/\D/g, '');
+            if (cleanPhone.length < 10 || cleanPhone.length > 15) {
+                return res.status(400).json({ success: false, error: 'رقم الهاتف غير صحيح (10-15 رقماً)' });
+            }
+
+            const account = await DatabaseManager.systemDB.get(
+                `SELECT id FROM accounts WHERE id = $1`, [id]
+            );
+            if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+            // التحقق من عدم وجود جلسة نشطة مكررة
+            const existing = WhatsAppManager.getSession(id);
+            if (existing) {
+                try { existing.end(undefined); } catch {}
+                WhatsAppManager.sessions.delete(id);
+                WhatsAppManager.initPromises.delete(id);
+            }
+
+            // تحديث نوع الاتصال ورقم الهاتف
+            await DatabaseManager.systemDB.run(
+                `UPDATE accounts SET connection_type = 'pairing_code', phone_number = $1 WHERE id = $2`,
+                [cleanPhone, id]
+            );
+
+            // تشغيل جلسة Pairing في الخلفية
+            WhatsAppManager.initPairingSession(id, cleanPhone).catch(err =>
+                console.error(`[Account ${id}] initPairingSession error:`, err.message)
+            );
+
+            return res.json({
+                success: true,
+                message: 'جارٍ إنشاء Pairing Code، سيظهر خلال ثوانٍ...'
+            });
+        } catch (error) {
+            console.error('Connect Pairing Error:', error);
             return res.status(500).json({ success: false, error: 'Internal Server Error' });
         }
     }
