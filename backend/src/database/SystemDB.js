@@ -1,423 +1,257 @@
 'use strict';
 /**
- * AccountDB — PostgreSQL Schema-per-Tenant
- * Section 5.3 / 5.4 من وثيقة التحليل:
- * استراتيجية Schema-per-Tenant في PostgreSQL بدلاً من ملفات SQLite منفصلة.
- * كل حساب = Schema مستقل: account_{sanitized_id}
- * يحقق: عزل البيانات + Backup مشترك + يعمل مع Railway Multi-Process.
+ * SystemDB — PostgreSQL System-Level Database Singleton
+ *
+ * يُدير الجداول العامة للنظام (public schema):
+ *   - accounts        : حسابات واتساب
+ *   - users           : مستخدمو اللوحة
+ *   - subscriptions   : الاشتراكات
+ *   - licenses        : التراخيص
+ *   - audit_log       : سجل العمليات
+ *   - login_attempts  : محاولات تسجيل الدخول
+ *   - refresh_tokens  : رموز التحديث
+ *   - session_data    : بيانات جلسات واتساب
  */
-const { getPool } = require('../lib/postgres');
+const { query, queryOne, queryAll } = require('../lib/postgres');
+const bcrypt  = require('bcryptjs');
+const crypto  = require('crypto');
 
-class AccountDB {
-    constructor(accountId) {
-        this.accountId = accountId;
-        // Sanitize UUID for PostgreSQL schema name (hyphens → underscores)
-        this.schema = `"account_${accountId.replace(/-/g, '_')}"`;
-    }
-
-    /**
-     * Execute a query within this account's schema.
-     * Sets search_path to isolate tenant data automatically.
-     */
-    async _exec(fn) {
-        const client = await getPool().connect();
-        try {
-            await client.query(`SET search_path TO ${this.schema}, public`);
-            return await fn(client);
-        } finally {
-            // Reset search_path before returning client to pool
-            try { await client.query(`SET search_path TO public`); } catch {}
-            client.release();
-        }
-    }
+class SystemDB {
 
     async init() {
-        const client = await getPool().connect();
+        await query(`
+            CREATE TABLE IF NOT EXISTS accounts (
+                id                  TEXT PRIMARY KEY,
+                user_id             TEXT,
+                phone_number        TEXT,
+                name                TEXT NOT NULL,
+                status              TEXT DEFAULT 'disconnected',
+                health_status       TEXT DEFAULT 'unknown',
+                role                TEXT DEFAULT 'stopped',
+                task_status         TEXT DEFAULT 'idle',
+                messages_sent_today INTEGER DEFAULT 0,
+                last_activity_at    TIMESTAMP,
+                created_at          TIMESTAMP DEFAULT NOW(),
+                updated_at          TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id          TEXT PRIMARY KEY,
+                username    TEXT UNIQUE NOT NULL,
+                password    TEXT NOT NULL,
+                full_name   TEXT,
+                email       TEXT,
+                role        TEXT DEFAULT 'user',
+                status      TEXT DEFAULT 'active',
+                mfa_enabled BOOLEAN DEFAULT FALSE,
+                mfa_secret  TEXT,
+                last_login  TIMESTAMP,
+                created_at  TIMESTAMP DEFAULT NOW(),
+                updated_at  TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                plan_type   TEXT DEFAULT 'basic',
+                expires_at  TIMESTAMP,
+                status      TEXT DEFAULT 'active',
+                created_by  TEXT,
+                created_at  TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id)`);
+        await query(`
+            CREATE TABLE IF NOT EXISTS licenses (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                license_key TEXT UNIQUE NOT NULL,
+                status      TEXT DEFAULT 'active',
+                issued_by   TEXT,
+                note        TEXT,
+                created_at  TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`CREATE INDEX IF NOT EXISTS idx_lic_user ON licenses(user_id)`);
+        await query(`
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                user_id    TEXT,
+                username   TEXT,
+                action     TEXT,
+                details    TEXT,
+                ip         TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)`);
+        await query(`CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC)`);
+        await query(`
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                username   TEXT NOT NULL,
+                ip         TEXT,
+                success    BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`CREATE INDEX IF NOT EXISTS idx_attempts_user ON login_attempts(username, created_at DESC)`);
+        await query(`
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                user_id     TEXT NOT NULL,
+                token_hash  TEXT UNIQUE NOT NULL,
+                ip          TEXT,
+                user_agent  TEXT,
+                expires_at  TIMESTAMP NOT NULL,
+                revoked     BOOLEAN DEFAULT FALSE,
+                created_at  TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`CREATE INDEX IF NOT EXISTS idx_rt_user ON refresh_tokens(user_id)`);
+        await query(`CREATE INDEX IF NOT EXISTS idx_rt_hash ON refresh_tokens(token_hash)`);
+        await query(`
+            CREATE TABLE IF NOT EXISTS session_data (
+                account_id TEXT NOT NULL,
+                key        TEXT NOT NULL,
+                value      TEXT,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, key)
+            )
+        `);
+        await query(`CREATE INDEX IF NOT EXISTS idx_sd_account ON session_data(account_id)`);
+        console.log('[SystemDB] All system tables initialized (PostgreSQL).');
+    }
+
+    async seedSuperAdmin() {
+        const existing = await queryOne(`SELECT id FROM users WHERE role = 'superadmin' LIMIT 1`);
+        if (existing) return;
+        const adminUser = process.env.ADMIN_USERNAME || 'admin';
+        const adminPass = process.env.ADMIN_PASSWORD || 'Admin@123456';
+        const hash      = await bcrypt.hash(adminPass, 12);
+        const id        = crypto.randomUUID();
+        await query(
+            `INSERT INTO users (id, username, password, full_name, role, status)
+             VALUES ($1, $2, $3, $4, 'superadmin', 'active')
+             ON CONFLICT (username) DO NOTHING`,
+            [id, adminUser, hash, 'Super Administrator']
+        );
+        console.log(`[SystemDB] Super-admin seeded: ${adminUser}`);
+    }
+
+    async get(sql, params = []) { return queryOne(sql, params); }
+    async all(sql, params = []) { return queryAll(sql, params); }
+    async run(sql, params = []) { return query(sql, params); }
+
+    async log(userId, username, action, details = '', ip = null) {
         try {
-            // 1. Create schema for this tenant
-            await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
-            await client.query(`SET search_path TO ${this.schema}, public`);
-
-            // ── Contacts (Groups) ────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS contacts (
-                    id           TEXT PRIMARY KEY,
-                    phone_number TEXT,
-                    name         TEXT,
-                    created_at   TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Groups ───────────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS groups (
-                    id         TEXT PRIMARY KEY,
-                    group_id   TEXT UNIQUE,
-                    name       TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Messages Log ─────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS messages (
-                    id         TEXT PRIMARY KEY,
-                    remote_jid TEXT,
-                    message_id TEXT,
-                    content    TEXT,
-                    status     TEXT,
-                    direction  TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Campaigns ────────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS campaigns (
-                    id               TEXT PRIMARY KEY,
-                    name             TEXT,
-                    ad_library_id    TEXT,
-                    status           TEXT DEFAULT 'draft',
-                    target_type      TEXT DEFAULT 'lists',
-                    batch_size       INTEGER DEFAULT 50,
-                    interval_seconds INTEGER DEFAULT 10,
-                    daily_limit      INTEGER DEFAULT 1000,
-                    scheduled_at     TIMESTAMP,
-                    created_at       TIMESTAMP DEFAULT NOW(),
-                    updated_at       TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Campaign Targets ─────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS campaign_targets (
-                    id          TEXT PRIMARY KEY,
-                    campaign_id TEXT,
-                    target_jid  TEXT,
-                    status      TEXT DEFAULT 'pending',
-                    error_msg   TEXT,
-                    sent_at     TIMESTAMP,
-                    FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
-                )
-            `);
-
-            // ── Campaign Exclusions ───────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS campaign_exclusions (
-                    id          TEXT PRIMARY KEY,
-                    campaign_id TEXT,
-                    target_jid  TEXT,
-                    reason      TEXT,
-                    created_at  TIMESTAMP DEFAULT NOW(),
-                    FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
-                )
-            `);
-
-            // ── Contact Lists ─────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS contact_lists (
-                    id          TEXT PRIMARY KEY,
-                    name        TEXT,
-                    description TEXT,
-                    type        TEXT DEFAULT 'imported',
-                    created_at  TIMESTAMP DEFAULT NOW(),
-                    updated_at  TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Contacts (in lists) ───────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS list_contacts (
-                    id         TEXT PRIMARY KEY,
-                    list_id    TEXT,
-                    jid        TEXT,
-                    name       TEXT,
-                    category   TEXT,
-                    is_active  BOOLEAN DEFAULT TRUE,
-                    opted_out  BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    FOREIGN KEY(list_id) REFERENCES contact_lists(id)
-                )
-            `);
-
-            // ── Campaign <-> Lists Mapping ────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS campaign_lists (
-                    campaign_id TEXT,
-                    list_id     TEXT,
-                    PRIMARY KEY (campaign_id, list_id),
-                    FOREIGN KEY(campaign_id) REFERENCES campaigns(id),
-                    FOREIGN KEY(list_id) REFERENCES contact_lists(id)
-                )
-            `);
-
-            // ── Campaign Logs ─────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS campaign_logs (
-                    id          TEXT PRIMARY KEY,
-                    campaign_id TEXT,
-                    level       TEXT,
-                    message     TEXT,
-                    created_at  TIMESTAMP DEFAULT NOW(),
-                    FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
-                )
-            `);
-
-            // ── Scheduled Tasks (BullMQ audit log — BullMQ runs jobs in Redis) ──
-            // Section 9.3: BullMQ يُدير التنفيذ الفعلي في Redis.
-            // هذا الجدول للتدقيق والتاريخ فقط.
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS task_audit_log (
-                    id         TEXT PRIMARY KEY,
-                    bull_job_id TEXT,
-                    type       TEXT,
-                    payload    TEXT,
-                    status     TEXT DEFAULT 'queued',
-                    priority   INTEGER DEFAULT 0,
-                    execute_at TIMESTAMP,
-                    completed_at TIMESTAMP,
-                    error_msg  TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Link Categories ───────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS link_categories (
-                    id    TEXT PRIMARY KEY,
-                    name  TEXT UNIQUE,
-                    color TEXT DEFAULT '#ffffff'
-                )
-            `);
-
-            // ── Extracted Links ───────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS extracted_links (
-                    id           TEXT PRIMARY KEY,
-                    url          TEXT,
-                    domain       TEXT,
-                    group_jid    TEXT,
-                    sender_jid   TEXT,
-                    message_id   TEXT,
-                    category_id  TEXT,
-                    ai_rating    INTEGER DEFAULT 0,
-                    ai_summary   TEXT,
-                    is_spam      BOOLEAN DEFAULT FALSE,
-                    country      TEXT,
-                    region       TEXT,
-                    keywords     TEXT,
-                    status       TEXT DEFAULT 'active',
-                    extracted_at TIMESTAMP DEFAULT NOW(),
-                    FOREIGN KEY(category_id) REFERENCES link_categories(id)
-                )
-            `);
-
-            // ── Auto Join Queue ───────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS auto_join_queue (
-                    id                TEXT PRIMARY KEY,
-                    link_id           TEXT,
-                    invite_code       TEXT,
-                    status            TEXT DEFAULT 'pending',
-                    target_account_id TEXT,
-                    scheduled_at      TIMESTAMP,
-                    joined_at         TIMESTAMP,
-                    error_msg         TEXT,
-                    created_at        TIMESTAMP DEFAULT NOW(),
-                    FOREIGN KEY(link_id) REFERENCES extracted_links(id)
-                )
-            `);
-
-            // ── Link Search Settings ──────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS link_search_settings (
-                    id                   TEXT PRIMARY KEY DEFAULT 'default',
-                    allowed_account_ids  TEXT DEFAULT '[]',
-                    allowed_group_jids   TEXT DEFAULT '[]',
-                    deep_search_enabled  BOOLEAN DEFAULT FALSE,
-                    search_by_date_from  TIMESTAMP,
-                    search_by_date_to    TIMESTAMP,
-                    filter_country       TEXT,
-                    filter_domain        TEXT,
-                    filter_region        TEXT,
-                    updated_at           TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Auto Join Settings ────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS auto_join_settings (
-                    id                        TEXT PRIMARY KEY DEFAULT 'default',
-                    allowed_account_ids       TEXT DEFAULT '[]',
-                    max_joins_per_day         INTEGER DEFAULT 10,
-                    delay_between_joins_minutes INTEGER DEFAULT 5,
-                    exclude_banned            BOOLEAN DEFAULT TRUE,
-                    enabled                   BOOLEAN DEFAULT TRUE,
-                    updated_at                TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Ad Library ────────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS ad_library (
-                    id             TEXT PRIMARY KEY,
-                    name           TEXT NOT NULL,
-                    content        TEXT,
-                    media_paths    TEXT DEFAULT '[]',
-                    media_types    TEXT DEFAULT '[]',
-                    links          TEXT DEFAULT '[]',
-                    format_options TEXT DEFAULT '{}',
-                    priority       INTEGER DEFAULT 5,
-                    tags           TEXT,
-                    is_active      BOOLEAN DEFAULT TRUE,
-                    times_used     INTEGER DEFAULT 0,
-                    last_used_at   TIMESTAMP,
-                    created_at     TIMESTAMP DEFAULT NOW(),
-                    updated_at     TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Broadcast Schedules ───────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS broadcast_schedules (
-                    id               TEXT PRIMARY KEY,
-                    name             TEXT NOT NULL,
-                    account_id       TEXT NOT NULL,
-                    target_group_jids TEXT DEFAULT '[]',
-                    ad_library_ids   TEXT DEFAULT '[]',
-                    rotation_mode    TEXT DEFAULT 'sequential',
-                    active_days      TEXT DEFAULT '[0,1,2,3,4,5,6]',
-                    publish_times    TEXT DEFAULT '[]',
-                    max_per_day      INTEGER DEFAULT 3,
-                    status           TEXT DEFAULT 'paused',
-                    send_to_members  BOOLEAN DEFAULT FALSE,
-                    exclude_admins   BOOLEAN DEFAULT TRUE,
-                    last_run_at      TIMESTAMP,
-                    next_run_at      TIMESTAMP,
-                    executions_done  INTEGER DEFAULT 0,
-                    created_at       TIMESTAMP DEFAULT NOW(),
-                    updated_at       TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Direct Publish Log ────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS direct_publish_log (
-                    id               TEXT PRIMARY KEY,
-                    account_id       TEXT,
-                    ad_library_id    TEXT,
-                    target_group_jids TEXT DEFAULT '[]',
-                    custom_content   TEXT,
-                    media_path       TEXT,
-                    status           TEXT DEFAULT 'sent',
-                    sent_at          TIMESTAMP DEFAULT NOW(),
-                    error_msg        TEXT
-                )
-            `);
-
-            // ── Link Logs ─────────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS link_logs (
-                    id         TEXT PRIMARY KEY,
-                    link_id    TEXT,
-                    action     TEXT,
-                    details    TEXT,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    FOREIGN KEY(link_id) REFERENCES extracted_links(id)
-                )
-            `);
-
-            // ── Scheduled Messages ─────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS scheduled_messages (
-                    id               TEXT PRIMARY KEY,
-                    name             TEXT,
-                    content          TEXT,
-                    media_path       TEXT,
-                    media_type       TEXT,
-                    target_type      TEXT DEFAULT 'group',
-                    target_jid       TEXT,
-                    status           TEXT DEFAULT 'pending',
-                    priority         INTEGER DEFAULT 5,
-                    scheduled_at     TIMESTAMP,
-                    repeat_type      TEXT DEFAULT 'none',
-                    repeat_interval  INTEGER DEFAULT 0,
-                    repeat_until     TIMESTAMP,
-                    repeat_count     INTEGER DEFAULT 0,
-                    executions_done  INTEGER DEFAULT 0,
-                    last_executed_at TIMESTAMP,
-                    timezone         TEXT DEFAULT 'Asia/Riyadh',
-                    tags             TEXT,
-                    notes            TEXT,
-                    created_at       TIMESTAMP DEFAULT NOW(),
-                    updated_at       TIMESTAMP DEFAULT NOW()
-                )
-            `);
-
-            // ── Schedule Logs ─────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS schedule_logs (
-                    id          TEXT PRIMARY KEY,
-                    schedule_id TEXT,
-                    level       TEXT,
-                    message     TEXT,
-                    created_at  TIMESTAMP DEFAULT NOW(),
-                    FOREIGN KEY(schedule_id) REFERENCES scheduled_messages(id)
-                )
-            `);
-
-            // ── Settings ───────────────────────────────────────────────────────
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS settings (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            `);
-
-            // ── Schema Migrations (safe upgrade for existing deployments) ─────
-            await client.query(`ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS send_to_members BOOLEAN DEFAULT FALSE`);
-            await client.query(`ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS exclude_admins  BOOLEAN DEFAULT TRUE`);
-            await client.query(`ALTER TABLE direct_publish_log  ADD COLUMN IF NOT EXISTS send_to_members BOOLEAN DEFAULT FALSE`);
-            await client.query(`ALTER TABLE direct_publish_log  ADD COLUMN IF NOT EXISTS exclude_admins  BOOLEAN DEFAULT TRUE`);
-            await client.query(`ALTER TABLE direct_publish_log  ADD COLUMN IF NOT EXISTS members_sent    INTEGER DEFAULT 0`);
-
-            // ── Performance Indexes ────────────────────────────────────────────
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_campaign_targets_status ON campaign_targets(status)`);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_extracted_links_status  ON extracted_links(status)`);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_msgs_status   ON scheduled_messages(status, scheduled_at)`);
-
-            console.log(`[AccountDB] Schema ${this.schema} initialized.`);
-        } finally {
-            try { await client.query(`SET search_path TO public`); } catch {}
-            client.release();
-        }
+            await query(
+                `INSERT INTO audit_log (user_id, username, action, details, ip) VALUES ($1,$2,$3,$4,$5)`,
+                [userId || null, username || null, action, details, ip]
+            );
+        } catch (err) { console.error('[SystemDB] Audit log error:', err.message); }
     }
 
-    // ── Query Helpers ─────────────────────────────────────────────────────────
-    async run(sql, params = []) {
-        return this._exec(async (client) => {
-            const res = await client.query(sql, params);
-            return { changes: res.rowCount };
-        });
+    async recordAttempt(username, ip, success) {
+        await query(
+            `INSERT INTO login_attempts (username, ip, success) VALUES ($1,$2,$3)`,
+            [username, ip, success]
+        );
     }
 
-    async get(sql, params = []) {
-        return this._exec(async (client) => {
-            const res = await client.query(sql, params);
-            return res.rows[0] || null;
-        });
+    async isBlocked(username) {
+        const row = await queryOne(
+            `SELECT COUNT(*) as cnt FROM login_attempts
+             WHERE username=$1 AND success=FALSE AND created_at > NOW() - INTERVAL '15 minutes'`,
+            [username]
+        );
+        return parseInt(row?.cnt || 0, 10) >= 10;
     }
 
-    async all(sql, params = []) {
-        return this._exec(async (client) => {
-            const res = await client.query(sql, params);
-            return res.rows;
-        });
+    async getActiveSubscription(userId) {
+        return queryOne(
+            `SELECT * FROM subscriptions
+             WHERE user_id=$1 AND status='active' AND (expires_at IS NULL OR expires_at > NOW())
+             ORDER BY expires_at DESC NULLS FIRST LIMIT 1`,
+            [userId]
+        );
     }
 
-    async close() {
-        // No-op: pool connections are managed globally
+    async getDaysRemaining(sub) {
+        if (!sub || !sub.expires_at) return null;
+        const ms = new Date(sub.expires_at) - Date.now();
+        return Math.max(0, Math.ceil(ms / 86400000));
+    }
+
+    async saveRefreshToken(userId, tokenHash, ip, userAgent, expiresAt) {
+        await query(
+            `INSERT INTO refresh_tokens (user_id, token_hash, ip, user_agent, expires_at)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [userId, tokenHash, ip, userAgent, expiresAt]
+        );
+    }
+
+    async findRefreshToken(tokenHash) {
+        return queryOne(
+            `SELECT * FROM refresh_tokens WHERE token_hash=$1 AND revoked=FALSE AND expires_at > NOW()`,
+            [tokenHash]
+        );
+    }
+
+    async revokeRefreshToken(tokenHash) {
+        await query(`UPDATE refresh_tokens SET revoked=TRUE WHERE token_hash=$1`, [tokenHash]);
+    }
+
+    async revokeAllUserTokens(userId) {
+        await query(`UPDATE refresh_tokens SET revoked=TRUE WHERE user_id=$1`, [userId]);
+    }
+
+    async saveSessionData(accountId, key, value) {
+        const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+        await query(
+            `INSERT INTO session_data (account_id, key, value, updated_at)
+             VALUES ($1,$2,$3,NOW())
+             ON CONFLICT (account_id, key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
+            [accountId, key, serialized]
+        );
+    }
+
+    async getSessionData(accountId, key) {
+        const row = await queryOne(
+            `SELECT value FROM session_data WHERE account_id=$1 AND key=$2`,
+            [accountId, key]
+        );
+        if (!row) return null;
+        try { return JSON.parse(row.value); } catch { return row.value; }
+    }
+
+    async deleteSessionData(accountId, key) {
+        await query(`DELETE FROM session_data WHERE account_id=$1 AND key=$2`, [accountId, key]);
+    }
+
+    async deleteAllSessionData(accountId) {
+        await query(`DELETE FROM session_data WHERE account_id=$1`, [accountId]);
+    }
+
+    async updateAccountHealth(accountId, healthStatus) {
+        await query(
+            `UPDATE accounts SET health_status=$1, updated_at=NOW() WHERE id=$2`,
+            [healthStatus, accountId]
+        ).catch(err => console.error('[SystemDB] updateAccountHealth:', err.message));
+    }
+
+    async updateMessageStats(accountId) {
+        await query(
+            `UPDATE accounts SET messages_sent_today=messages_sent_today+1, last_activity_at=NOW(), updated_at=NOW() WHERE id=$1`,
+            [accountId]
+        ).catch(err => console.error('[SystemDB] updateMessageStats:', err.message));
+    }
+
+    _generateLicenseKey() {
+        return 'LIC-' + crypto.randomBytes(12).toString('hex').toUpperCase();
     }
 }
 
-module.exports = AccountDB;
+module.exports = new SystemDB();
