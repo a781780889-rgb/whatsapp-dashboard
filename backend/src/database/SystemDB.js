@@ -148,16 +148,17 @@ class SystemDB {
     async log(userId, username, action, details = '', ip = null) {
         try {
             await query(
-                `INSERT INTO audit_log (user_id, username, action, details, ip) VALUES ($1,$2,$3,$4,$5)`,
-                [userId || null, username || null, action, details, ip]
+                `INSERT INTO audit_log (id, user_id, username, action, details, ip) VALUES ($1,$2,$3,$4,$5,$6)`,
+                [crypto.randomUUID(), userId || null, username || null, action, details, ip]
             );
         } catch (err) { console.error('[SystemDB] Audit log error:', err.message); }
     }
 
     async recordAttempt(username, ip, success) {
+        const id = crypto.randomUUID();
         await query(
-            `INSERT INTO login_attempts (username, ip, success) VALUES ($1,$2,$3)`,
-            [username, ip, success]
+            `INSERT INTO login_attempts (id, username, ip, success) VALUES ($1,$2,$3,$4)`,
+            [id, username, ip, success]
         );
     }
 
@@ -191,9 +192,9 @@ class SystemDB {
 
     async saveRefreshToken(userId, tokenHash, ip, userAgent, expiresAt) {
         await query(
-            `INSERT INTO refresh_tokens (user_id, token_hash, ip, user_agent, expires_at)
-             VALUES ($1,$2,$3,$4,$5)`,
-            [userId, tokenHash, ip, userAgent, expiresAt]
+            `INSERT INTO refresh_tokens (id, user_id, token_hash, ip, user_agent, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6)`,
+            [crypto.randomUUID(), userId, tokenHash, ip, userAgent, expiresAt]
         );
     }
 
