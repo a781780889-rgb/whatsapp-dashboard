@@ -43,11 +43,24 @@ class WhatsAppManager {
         this.reconnectAttempts = new Map(); // accountId → number
         this.initPromises      = new Map(); // accountId → Promise
         this.qrSentAt          = new Map(); // accountId → timestamp
+        this.lastQrCode        = new Map(); // accountId → { qr, ts } — cache QR for late-joining clients
         this.io                = null;
         this.logger            = pino({ level: 'silent' });
     }
 
     setIO(io) { this.io = io; }
+
+    // ✅ FIX: Returns cached QR if still fresh (< 45 seconds old)
+    getPendingQr(accountId) {
+        const cached = this.lastQrCode.get(accountId);
+        if (!cached) return null;
+        const age = Date.now() - cached.ts;
+        if (age > 44_000) {
+            this.lastQrCode.delete(accountId); // expired
+            return null;
+        }
+        return cached.qr;
+    }
 
     // ── PostgreSQL Auth State ────────────────────────────────────────────────
     async _usePostgresAuthState(accountId) {
@@ -142,6 +155,7 @@ class WhatsAppManager {
         this.initPromises.delete(accountId);
         this.reconnectAttempts.delete(accountId);
         this.qrSentAt.delete(accountId);
+        this.lastQrCode.delete(accountId); // ✅ FIX: Clear QR cache
 
         await SystemDB.deleteAllSessionData(accountId).catch(console.error);
         await DatabaseManager.systemDB.run(
@@ -202,6 +216,8 @@ class WhatsAppManager {
                     if (qr) {
                         console.log(`[Account ${accountId}] QR Code ready.`);
                         this.qrSentAt.set(accountId, Date.now());
+                        // ✅ FIX: Cache QR so late-joining clients can receive it
+                        this.lastQrCode.set(accountId, { qr, ts: Date.now() });
                         if (this.io) {
                             this.io.to(`account_${accountId}`).emit('qr_code', { qr });
                         }
@@ -271,6 +287,7 @@ class WhatsAppManager {
                         console.log(`[Account ${accountId}] Connected successfully.`);
                         this.reconnectAttempts.delete(accountId);
                         this.qrSentAt.delete(accountId);
+                        this.lastQrCode.delete(accountId); // ✅ FIX: Clear QR cache on success
                         await DatabaseManager.systemDB.run(
                             `UPDATE accounts SET status = 'connected', health_status = 'normal' WHERE id = $1`,
                             [accountId]
