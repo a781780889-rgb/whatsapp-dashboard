@@ -198,8 +198,20 @@ class SystemDB {
     }
 
     async seedSuperAdmin() {
-        const existing = await queryOne(`SELECT id FROM users WHERE role IN ('superadmin','owner') LIMIT 1`);
-        if (existing) return;
+        const existing = await queryOne(`SELECT id FROM users WHERE role IN ('superadmin','super_admin','owner') LIMIT 1`);
+        if (existing) {
+            // ✅ FIX: تأكد من وجود اشتراك للمدير الحالي (قد يكون فات في run سابق)
+            const hasSub = await queryOne(`SELECT id FROM subscriptions WHERE user_id = $1 AND status = 'active' LIMIT 1`, [existing.id]);
+            if (!hasSub) {
+                await query(
+                    `INSERT INTO subscriptions (id, user_id, plan_type, expires_at, status, note, created_by)
+                     VALUES ($1, $2, 'lifetime', NULL, 'active', 'اشتراك دائم - المالك', $2)
+                     ON CONFLICT DO NOTHING`,
+                    [crypto.randomUUID(), existing.id]
+                ).catch(e => console.warn('[SystemDB] Sub insert skipped:', e.message));
+            }
+            return;
+        }
         const adminUser = process.env.ADMIN_USERNAME || 'admin';
         const adminPass = process.env.ADMIN_PASSWORD || 'Admin@123456';
         const hash      = await bcrypt.hash(adminPass, 12);
@@ -210,13 +222,16 @@ class SystemDB {
              ON CONFLICT (username) DO NOTHING`,
             [id, adminUser, hash, 'Super Administrator']
         );
+        // ✅ FIX: اجلب الـ ID الفعلي من قاعدة البيانات بعد INSERT لتفادي FK error عند conflict
+        const actualUser = await queryOne(`SELECT id FROM users WHERE username = $1`, [adminUser]);
+        const actualId   = actualUser?.id || id;
         // إضافة اشتراك دائم تلقائياً للمدير الرئيسي
         await query(
             `INSERT INTO subscriptions (id, user_id, plan_type, expires_at, status, note, created_by)
              VALUES ($1, $2, 'lifetime', NULL, 'active', 'اشتراك دائم - المالك', $2)
              ON CONFLICT DO NOTHING`,
-            [crypto.randomUUID(), id]
-        ).catch(() => {});
+            [crypto.randomUUID(), actualId]
+        ).catch(e => console.warn('[SystemDB] Sub insert skipped:', e.message));
         console.log(`[SystemDB] ✅ تم إنشاء المدير الرئيسي: ${adminUser}`);
     }
 
