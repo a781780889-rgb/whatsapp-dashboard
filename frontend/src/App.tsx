@@ -65,27 +65,26 @@ function AppInner() {
 
   // ── FIX 1: Race condition — cancel stale verify fetches with cleanup flag ──
   useEffect(() => {
-    if (!token) return;
+    // بدون تسجيل دخول — تجاهل التحقق من التوكن
+    if (!token || token === 'no-auth') return;
     let cancelled = false;
 
     fetch(`${API}/auth/verify`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => {
         if (cancelled) return null;
-        // FIX: فقط 401 يعني التوكن منتهي → logout
-        // أي خطأ آخر (500, network) → لا نحذف الجلسة، فقط نُعلّم offline
         if (r.status === 401) { handleLogout(); return null; }
         return r.json();
       })
       .then(d => {
         if (!d || cancelled) return;
-        if (!d.success) { setIsConnected(false); return; } // server error, keep session
+        if (!d.success) { setIsConnected(false); return; }
         const merged = { ...currentUser, ...d.user };
         setCurrentUser(merged);
         localStorage.setItem(USER_KEY, JSON.stringify(merged));
       })
       .catch(() => { if (!cancelled) setIsConnected(false); });
 
-    return () => { cancelled = true; };             // ← cancel on next render
+    return () => { cancelled = true; };
   }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── FIX 2: Fetch accounts so AppLayout/TopBar get the data they need ───────
