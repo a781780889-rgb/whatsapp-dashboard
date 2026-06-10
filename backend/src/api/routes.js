@@ -79,6 +79,7 @@ router.get('/accounts/:id',                auth, subCheck, AccountController.get
 router.get('/accounts/:id/stats',          auth, subCheck, AccountController.getAccountStats.bind(AccountController));
 router.get('/accounts/:id/logs',           auth, subCheck, AccountController.getLogs.bind(AccountController));
 router.post('/accounts/:id/connect',       auth, subCheck, AccountController.connectAccount.bind(AccountController));
+router.post('/accounts/:id/connect-pairing', auth, subCheck, AccountController.connectWithPairing.bind(AccountController));
 router.post('/accounts/:id/reset',         auth, subCheck, AccountController.resetSession.bind(AccountController));
 router.post('/accounts/:id/disconnect',    auth, subCheck, AccountController.disconnectAccount.bind(AccountController));
 router.delete('/accounts/:id',             auth, subCheck, AccountController.deleteAccount.bind(AccountController));
@@ -87,6 +88,19 @@ router.post('/accounts/:id/start',         auth, subCheck, AccountController.sta
 router.post('/accounts/:id/stop',          auth, subCheck, AccountController.stopTasks.bind(AccountController));
 router.post('/accounts/:id/restart',       auth, subCheck, AccountController.restartTasks.bind(AccountController));
 router.post('/accounts/:id/test',          auth, subCheck, AccountController.testConnection.bind(AccountController));
+
+// ── Business API Settings ─────────────────────────────────────────────────────
+const BusinessAPIController = require('./controllers/BusinessAPIController');
+router.get ('/accounts/:id/business-api',       auth, subCheck, BusinessAPIController.getSettings.bind(BusinessAPIController));
+router.post('/accounts/:id/business-api',       auth, subCheck, BusinessAPIController.saveSettings.bind(BusinessAPIController));
+router.post('/accounts/:id/business-api/test',  auth, subCheck, BusinessAPIController.testConnection.bind(BusinessAPIController));
+router.post('/accounts/:id/business-api/send',  auth, subCheck, BusinessAPIController.sendMessage.bind(BusinessAPIController));
+
+// ── WhatsApp Webhook (بدون auth — Meta يرسل مباشرة) ─────────────────────────
+router.get ('/webhook/whatsapp/:accountId', BusinessAPIController.webhookVerify.bind(BusinessAPIController));
+router.post('/webhook/whatsapp/:accountId', BusinessAPIController.webhookReceive.bind(BusinessAPIController));
+
+
 
 const GroupController = require('./controllers/GroupController');
 router.get('/accounts/:accountId/groups',                        auth, subCheck, GroupController.getGroups.bind(GroupController));
