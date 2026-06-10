@@ -38,9 +38,10 @@ function ProtectedRoute({ children, adminOnly = false, currentUser }:
 }
 
 function AppInner() {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
+  const AUTO_USER = { id: 'auto-admin', username: 'admin', role: 'superadmin', full_name: 'Admin' };
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY) || 'no-auth');
   const [currentUser, setCurrentUser] = useState<any>(() => {
-    try { return JSON.parse(localStorage.getItem(USER_KEY) || 'null'); } catch { return null; }
+    try { return JSON.parse(localStorage.getItem(USER_KEY) || 'null') || AUTO_USER; } catch { return AUTO_USER; }
   });
   const [isConnected, setIsConnected] = useState(true);
 
@@ -155,9 +156,10 @@ function AppInner() {
     setSelectedAccountId(null);
   }
 
-  if (!token || !currentUser) {
-    return <LoginPage onLogin={handleLogin} />;
-  }
+  // تم إزالة صفحة تسجيل الدخول — الدخول تلقائي
+  // if (!token || !currentUser) {
+  //   return <LoginPage onLogin={handleLogin} />;
+  // }
 
   /* Subscription expired for regular users */
   const isExpired =
