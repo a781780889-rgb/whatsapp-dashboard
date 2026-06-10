@@ -36,6 +36,8 @@ const TEMP_DISCONNECT_CODES = new Set([
 // ── QR scan window ───────────────────────────────────────────────────────────
 // مدة الانتظار بعد إرسال QR قبل قبول أي reconnect (بالمللي ثانية)
 const QR_SCAN_WINDOW_MS = 30000; // 30 ثانية لإعطاء المستخدم وقت للمسح
+// الحد الأقصى لمحاولات 515 قبل مسح الجلسة
+const MAX_515_RETRIES = 3;
 
 class WhatsAppManager {
     constructor() {
@@ -44,6 +46,7 @@ class WhatsAppManager {
         this.initPromises      = new Map(); // accountId → Promise
         this.qrSentAt          = new Map(); // accountId → timestamp
         this.lastQrCode        = new Map(); // accountId → { qr, ts } — cache QR for late-joining clients
+        this.restartAttempts   = new Map(); // accountId → number — عداد محاولات 515
         this.io                = null;
         this.logger            = pino({ level: 'silent' });
     }
@@ -154,6 +157,7 @@ class WhatsAppManager {
         this.sessions.delete(accountId);
         this.initPromises.delete(accountId);
         this.reconnectAttempts.delete(accountId);
+        this.restartAttempts.delete(accountId);    // ✅ امسح عداد 515
         this.qrSentAt.delete(accountId);
         this.lastQrCode.delete(accountId); // ✅ FIX: Clear QR cache
 
@@ -216,6 +220,7 @@ class WhatsAppManager {
                     if (qr) {
                         console.log(`[Account ${accountId}] QR Code ready.`);
                         this.qrSentAt.set(accountId, Date.now());
+                        this.restartAttempts.delete(accountId); // ✅ QR جديد = جلسة نظيفة → صفّر العداد
                         // ✅ FIX: Cache QR so late-joining clients can receive it
                         this.lastQrCode.set(accountId, { qr, ts: Date.now() });
                         if (this.io) {
@@ -237,12 +242,28 @@ class WhatsAppManager {
                             return;
                         }
 
-                        // 2. restartRequired (515) → أعد الاتصال فوراً بدون مسح
+                        // 2. restartRequired (515) → أعد الاتصال بدون مسح (مع حد أقصى)
                         if (statusCode === DisconnectReason.restartRequired) {
-                            console.log(`[Account ${accountId}] Restart required (515). Reconnecting in 1s…`);
-                            // انتظر حفظ الـ creds أولاً
-                            await saveCreds().catch(() => {});
-                            setTimeout(() => this.initSession(accountId), 1000);
+                            const retries515 = (this.restartAttempts.get(accountId) || 0) + 1;
+                            this.restartAttempts.set(accountId, retries515);
+
+                            // إذا تكرر 515 أكثر من MAX_515_RETRIES → الجلسة تالفة، امسحها
+                            if (retries515 > MAX_515_RETRIES) {
+                                console.warn(`[Account ${accountId}] 515 repeated ${retries515}x — clearing session.`);
+                                this.restartAttempts.delete(accountId);
+                                await this._clearSession(accountId, 515);
+                                return;
+                            }
+
+                            // Backoff: 5s → 10s → 20s (يعطي وقتاً لـ WhatsApp server)
+                            const delay515 = Math.min(retries515 * 5000, 20000);
+                            console.log(`[Account ${accountId}] Restart required (515) — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms…`);
+
+                            // لا تحفظ الـ creds إذا لم يتم المسح بعد (حالة QR) لأن حفظها يسبب 500
+                            if (state.creds?.registered) {
+                                await saveCreds().catch(() => {});
+                            }
+                            setTimeout(() => this.initSession(accountId), delay515);
                             return;
                         }
 
@@ -286,6 +307,7 @@ class WhatsAppManager {
                     if (connection === 'open') {
                         console.log(`[Account ${accountId}] Connected successfully.`);
                         this.reconnectAttempts.delete(accountId);
+                        this.restartAttempts.delete(accountId);   // ✅ امسح عداد 515
                         this.qrSentAt.delete(accountId);
                         this.lastQrCode.delete(accountId); // ✅ FIX: Clear QR cache on success
                         await DatabaseManager.systemDB.run(
