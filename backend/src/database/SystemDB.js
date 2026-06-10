@@ -167,7 +167,11 @@ class SystemDB {
              WHERE username=$1 AND success=FALSE AND created_at > NOW() - INTERVAL '15 minutes'`,
             [username]
         );
-        return parseInt(row?.cnt || 0, 10) >= 10;
+        const cnt = parseInt(row?.cnt || 0, 10);
+        if (cnt < 10) return null; // ✅ null = not blocked
+        // ✅ إرجاع object بدل boolean حتى يعمل AuthController بشكل صحيح
+        const blockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+        return { blocked_until: blockedUntil.toISOString(), attempts: cnt };
     }
 
     async getActiveSubscription(userId) {
