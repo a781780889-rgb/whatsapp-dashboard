@@ -153,7 +153,15 @@ async function setupSocketIOAdapter() {
 }
 
 io.on('connection', (socket) => {
-    socket.on('join_account', (accountId) => socket.join(`account_${accountId}`));
+    socket.on('join_account', (accountId) => {
+        socket.join(`account_${accountId}`);
+        // ✅ FIX: أرسل QR المخزّن فوراً للـ client الجديد إذا كان Baileys
+        //        قد ولّده قبل أن يدخل الـ client الغرفة (Race Condition)
+        const pendingQr = WhatsAppManager.getPendingQr(accountId);
+        if (pendingQr) {
+            socket.emit('qr_code', { qr: pendingQr });
+        }
+    });
 });
 
 // ── Static Frontend ───────────────────────────────────────────────────────────
