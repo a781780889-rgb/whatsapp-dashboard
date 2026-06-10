@@ -194,6 +194,28 @@ class SystemDB {
         `);
         await query(`CREATE INDEX IF NOT EXISTS idx_sd_account ON session_data(account_id)`);
 
+        // ── WhatsApp Connection Methods (الطرق الثلاث) ───────────────────────
+        // عمود نوع الاتصال في جدول الحسابات
+        await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS connection_type TEXT DEFAULT 'qr_code'`).catch(() => {});
+
+        // جدول إعدادات WhatsApp Business API
+        await query(`
+            CREATE TABLE IF NOT EXISTS whatsapp_business_settings (
+                id                    TEXT PRIMARY KEY,
+                account_id            TEXT UNIQUE NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                phone_number_id       TEXT,
+                business_account_id   TEXT,
+                access_token_encrypted TEXT,
+                verify_token          TEXT,
+                webhook_url           TEXT,
+                is_verified           BOOLEAN DEFAULT FALSE,
+                last_tested_at        TIMESTAMP,
+                created_at            TIMESTAMP DEFAULT NOW(),
+                updated_at            TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        await query(`CREATE INDEX IF NOT EXISTS idx_wbs_account ON whatsapp_business_settings(account_id)`).catch(() => {});
+
         console.log('[SystemDB] ✅ جميع الجداول جاهزة (PostgreSQL).');
     }
 
