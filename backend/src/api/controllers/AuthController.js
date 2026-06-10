@@ -17,6 +17,14 @@ const QRCode   = require('qrcode');
 const SystemDB = require('../../database/SystemDB');
 const { getRedis } = require('../../lib/redis');
 
+// ── Role Normalization ───────────────────────────────────────────────────────
+// يوحّد superadmin (بدون underscore) إلى super_admin لضمان توافق الـ Frontend
+function normalizeRole(role) {
+    if (role === 'superadmin') return 'super_admin';
+    if (role === 'owner')      return 'super_admin';
+    return role;
+}
+
 // ── Token Durations ──────────────────────────────────────────────────────────
 const ACCESS_TOKEN_EXPIRES  = process.env.JWT_EXPIRES_IN     || '15m';
 const REFRESH_TOKEN_EXPIRES = process.env.REFRESH_TOKEN_EXPIRES || '7d';
@@ -137,7 +145,8 @@ class AuthController {
             await SystemDB.log(user.id, username, 'LOGIN_SUCCESS', `IP: ${ip}`, ip);
 
             // ── Issue Access Token (15min) + Refresh Token (7 days) ──────────
-            const tokenPayload = { id: user.id, username: user.username, role: user.role };
+            const normalizedRole = normalizeRole(user.role);
+            const tokenPayload = { id: user.id, username: user.username, role: normalizedRole };
             const accessToken  = signAccessToken(tokenPayload);
             const refreshToken = signRefreshToken(tokenPayload);
 
@@ -156,7 +165,7 @@ class AuthController {
                     id: user.id,
                     username: user.username,
                     fullName: user.full_name,
-                    role: user.role,
+                    role: normalizedRole,
                     mfaEnabled: !!user.mfa_enabled,
                     subscriptionStatus,
                     daysRemaining,
@@ -191,7 +200,8 @@ class AuthController {
             const user = await SystemDB.get(`SELECT id, username, role FROM users WHERE id = $1`, [payload.id]);
             if (!user) return res.status(401).json({ success: false, error: 'المستخدم غير موجود.' });
 
-            const newTokenPayload = { id: user.id, username: user.username, role: user.role };
+            const normalizedRefreshRole = normalizeRole(user.role);
+            const newTokenPayload = { id: user.id, username: user.username, role: normalizedRefreshRole };
             const newAccessToken  = signAccessToken(newTokenPayload);
             const newRefreshToken = signRefreshToken(newTokenPayload);
 
@@ -222,6 +232,7 @@ class AuthController {
             success: true,
             user: {
                 ...user,
+                role: normalizeRole(user.role),
                 subscriptionStatus: sub ? 'active' : 'expired',
                 daysRemaining,
                 planType: sub?.plan_type
