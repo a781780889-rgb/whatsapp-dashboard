@@ -10,11 +10,10 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { QRCodeSVG } from 'qrcode.react';
 import { useToast } from '@/components/ui/ToastProvider';
 import { API, authFetch } from '@/utils/api';
 import { cn } from '@/utils/cn';
-import { io } from 'socket.io-client';
+import { ConnectionMethodModal } from '@/components/ConnectionMethodModal';
 
 const SOCKET_URL = API.replace('/api/v1', '');
 
@@ -176,11 +175,11 @@ function AccountCard({
             </p>
           </div>
           <div>
-            <p className="text-[10px] text-[var(--text-muted)]">المهام</p>
-            <p className={cn('text-xs font-bold',
-              isRunning ? 'text-green-400' : 'text-[var(--text-muted)]'
-            )}>
-              {isRunning ? 'تعمل' : 'متوقفة'}
+            <p className="text-[10px] text-[var(--text-muted)]">نوع الربط</p>
+            <p className="text-[10px] font-medium text-[var(--text-muted)] truncate">
+              {account.connection_type === 'business_api' ? '🏢 API'
+               : account.connection_type === 'pairing_code' ? '#️⃣ Pair'
+               : '📱 QR'}
             </p>
           </div>
         </div>
@@ -408,13 +407,11 @@ export default function AccountsView({
   const [search, setSearch]           = useState('');
   const [filterRole, setFilterRole]   = useState('all');
   const [isAddOpen, setIsAddOpen]     = useState(false);
-  const [isQrOpen, setIsQrOpen]       = useState(false);
   const [newName, setNewName]         = useState('');
-  const [qrCode, setQrCode]           = useState<string | null>(null);
-  const [connectingId, setConnectingId] = useState<string | null>(null);
   const [summary, setSummary]         = useState<any>({});
   const [logsModal, setLogsModal]     = useState<{ id: string; name: string } | null>(null);
-  const socketRef = React.useRef<any>(null);
+  // ── نافذة طرق الربط ────────────────────────────────────────────────────────
+  const [connectModal, setConnectModal] = useState<{ id: string; name: string } | null>(null);
   const { addToast } = useToast();
 
   // جلب الملخص
@@ -450,12 +447,13 @@ export default function AccountsView({
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        addToast({ title: 'تم الإنشاء', description: 'تم إنشاء الحساب، يرجى مسح رمز QR', type: 'success' });
+        addToast({ title: 'تم الإنشاء', description: 'اختر طريقة ربط الحساب', type: 'success' });
         setIsAddOpen(false);
         setNewName('');
         fetchAccounts();
         fetchSummary();
-        handleConnect(data.account.id);
+        // افتح نافذة طرق الربط مباشرة
+        setConnectModal({ id: data.account.id, name: data.account.name });
       } else {
         addToast({ title: 'خطأ', description: data.error || 'فشل الإنشاء', type: 'error' });
       }
@@ -464,56 +462,20 @@ export default function AccountsView({
     }
   };
 
-  // ── ربط الحساب بواتساب ────────────────────────────────────────────────────
-  const handleConnect = async (id: string) => {
-    if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
-    setConnectingId(id);
-    setQrCode(null);
-    setIsQrOpen(true);
-    try {
-      await authFetch(`${API}/accounts/${id}/connect`, { method: 'POST' });
-      const socket = io(SOCKET_URL);
-      socketRef.current = socket;
-      socket.emit('join_account', id);
-      socket.on('qr_code', ({ qr }: any) => setQrCode(qr));
-      socket.on('session_cleared', () => setQrCode(null));
-      socket.on('account_status', ({ status }: any) => {
-        if (status === 'connected') {
-          setIsQrOpen(false);
-          addToast({ title: 'متصل ✓', description: 'تم ربط الحساب بنجاح', type: 'success' });
-          fetchAccounts();
-          fetchSummary();
-          socket.disconnect();
-          socketRef.current = null;
-        }
-      });
-    } catch {
-      addToast({ title: 'خطأ', description: 'فشل طلب الاتصال', type: 'error' });
-      setIsQrOpen(false);
-    }
+  // ── فتح نافذة طرق الربط ───────────────────────────────────────────────────
+  const handleConnect = (id: string) => {
+    const account = accounts.find(a => a.id === id);
+    setConnectModal({ id, name: account?.name || id });
   };
 
-  // ── إعادة تهيئة الجلسة ────────────────────────────────────────────────────
+  // ── إعادة تهيئة الجلسة (QR جديد) ─────────────────────────────────────────
   const handleReset = async (id: string) => {
-    setQrCode(null);
     try {
       await authFetch(`${API}/accounts/${id}/reset`, { method: 'POST' });
-      if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
-      setConnectingId(id);
-      setIsQrOpen(true);
-      const socket = io(SOCKET_URL);
-      socketRef.current = socket;
-      socket.emit('join_account', id);
-      socket.on('qr_code', ({ qr }: any) => setQrCode(qr));
-      socket.on('account_status', ({ status }: any) => {
-        if (status === 'connected') {
-          setIsQrOpen(false);
-          fetchAccounts();
-          socket.disconnect();
-          socketRef.current = null;
-        }
-      });
-      addToast({ title: 'جاري الإعادة', description: 'انتظر QR الجديد', type: 'success' });
+      addToast({ title: 'جارٍ الإعادة', description: 'اختر طريقة الربط من جديد', type: 'success' });
+      // افتح نافذة طرق الربط بعد الإعادة
+      const account = accounts.find(a => a.id === id);
+      setConnectModal({ id, name: account?.name || id });
     } catch {
       addToast({ title: 'خطأ', description: 'فشلت إعادة تهيئة الجلسة', type: 'error' });
     }
@@ -734,7 +696,7 @@ export default function AccountsView({
             </div>
             <div className="bg-[var(--bg-elevated)] rounded-lg p-3 text-xs text-[var(--text-muted)] border border-[var(--border-default)]">
               <p className="font-medium text-[var(--text-secondary)] mb-1">بعد الإضافة:</p>
-              <p>• يُفتح رمز QR لربط واتساب</p>
+              <p>• ستختار طريقة الربط بعد الإنشاء (QR / Pairing / Business API)</p>
               <p>• حدد دور الحساب (ناشر / باحث / منضم / مراقب)</p>
               <p>• اضغط تشغيل لبدء المهام التلقائية</p>
             </div>
@@ -749,29 +711,21 @@ export default function AccountsView({
         </DialogContent>
       </Dialog>
 
-      {/* ── نافذة QR ─────────────────────────────────────────────────────── */}
-      <Dialog open={isQrOpen} onOpenChange={setIsQrOpen}>
-        <DialogContent className="sm:max-w-sm text-center flex flex-col items-center p-8">
-          <h2 className="text-xl font-bold mb-1 text-[var(--text-primary)]">ربط واتساب</h2>
-          <p className="text-[var(--text-secondary)] text-sm mb-5">
-            افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز
-          </p>
-          <div className="bg-white p-4 rounded-2xl shadow-xl w-56 h-56 flex items-center justify-center">
-            {qrCode ? (
-              <QRCodeSVG value={qrCode} size={208} />
-            ) : (
-              <div className="flex flex-col items-center text-gray-400 gap-3">
-                <div className="w-8 h-8 border-4 border-t-green-500 border-r-green-500 border-b-transparent border-l-transparent rounded-full animate-spin" />
-                <span className="text-xs">جاري جلب الرمز...</span>
-              </div>
-            )}
-          </div>
-          <div className="mt-4 flex items-center gap-2 text-xs text-[var(--text-muted)] bg-[var(--bg-elevated)] px-3 py-2 rounded-lg border border-[var(--border-default)]">
-            <AlertCircle className="w-3.5 h-3.5 text-yellow-500 shrink-0" />
-            <span>الرمز يتغير كل 45 ثانية، امسح بسرعة.</span>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* ── نافذة طرق الربط (QR / Pairing / Business API) ─────────────── */}
+      {connectModal && (
+        <ConnectionMethodModal
+          accountId={connectModal.id}
+          accountName={connectModal.name}
+          open={!!connectModal}
+          onClose={() => setConnectModal(null)}
+          onConnected={() => {
+            setConnectModal(null);
+            fetchAccounts();
+            fetchSummary();
+          }}
+          showToast={addToast}
+        />
+      )}
 
       {/* ── نافذة السجلات ────────────────────────────────────────────────── */}
       {logsModal && (
