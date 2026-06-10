@@ -1,7 +1,8 @@
 'use strict';
 const {
     makeWASocket, DisconnectReason, Browsers,
-    initAuthCreds, makeCacheableSignalKeyStore, proto
+    initAuthCreds, makeCacheableSignalKeyStore, proto,
+    fetchLatestWaWebVersion,
 } = require('@whiskeysockets/baileys');
 const pino         = require('pino');
 const Boom         = require('@hapi/boom');
@@ -190,8 +191,20 @@ class WhatsAppManager {
             try {
                 const { state, saveCreds } = await this._usePostgresAuthState(accountId);
 
+                // ✅ FIX: جلب أحدث إصدار WhatsApp Web — يمنع رفض الاتصال بـ 515
+                let waVersion;
+                try {
+                    const { version } = await fetchLatestWaWebVersion();
+                    waVersion = version;
+                    console.log(`[Account ${accountId}] WA version: ${version.join('.')}`);
+                } catch {
+                    // fallback إذا فشل الجلب (لا إنترنت مؤقتاً)
+                    waVersion = [2, 3000, 1015901307];
+                }
+
                 const sock = makeWASocket({
                     auth:      state,
+                    version:   waVersion,
                     logger:    this.logger,
                     printQRInTerminal: false,
 
@@ -259,10 +272,17 @@ class WhatsAppManager {
                             const delay515 = Math.min(retries515 * 5000, 20000);
                             console.log(`[Account ${accountId}] Restart required (515) — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms…`);
 
-                            // لا تحفظ الـ creds إذا لم يتم المسح بعد (حالة QR) لأن حفظها يسبب 500
-                            if (state.creds?.registered) {
+                            if (!state.creds?.registered) {
+                                // ✅ FIX CORE: الجلسة لم تُكتمل بعد (QR phase)
+                                // الـ creds الجزئية المحفوظة تسبب 500 عند إعادة الاتصال
+                                // امسحها الآن لضمان بداية نظيفة تماماً
+                                console.log(`[Account ${accountId}] Session not registered — wiping partial auth data before retry.`);
+                                await SystemDB.deleteAllSessionData(accountId).catch(() => {});
+                            } else {
+                                // جلسة مسجّلة → احفظ الـ creds بأمان
                                 await saveCreds().catch(() => {});
                             }
+
                             setTimeout(() => this.initSession(accountId), delay515);
                             return;
                         }
