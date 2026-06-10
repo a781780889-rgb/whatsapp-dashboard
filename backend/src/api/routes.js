@@ -31,13 +31,26 @@ router.delete('/admin/users/:id',       auth, role('admin'), UserController.dele
 router.patch('/admin/users/:id/status', auth, role('admin'), UserController.setStatus.bind(UserController));
 
 // ══════════════════════════════════════════════════════
-//  ADMIN — Subscriptions
+//  ADMIN — Subscriptions (نظام الاشتراكات الكامل)
 // ══════════════════════════════════════════════════════
 const SubController = require('./controllers/SubscriptionController');
-router.get('/admin/subscriptions',        auth, role('admin'), SubController.list.bind(SubController));
-router.post('/admin/subscriptions',       auth, role('admin'), SubController.create.bind(SubController));
-router.delete('/admin/subscriptions/:id', auth, role('admin'), SubController.cancel.bind(SubController));
-router.get('/admin/plans',                auth, role('admin'), SubController.plans.bind(SubController));
+
+// ⚠️ يجب أن تكون المسارات الثابتة قبل المسارات الديناميكية
+router.get   ('/admin/subscriptions/stats',         auth, role('admin'), SubController.stats.bind(SubController));
+router.get   ('/admin/subscriptions/export',        auth, role('admin'), SubController.exportCSV.bind(SubController));
+router.get   ('/admin/plans',                       auth, role('admin'), SubController.plans.bind(SubController));
+
+// CRUD
+router.get   ('/admin/subscriptions',               auth, role('admin'), SubController.list.bind(SubController));
+router.post  ('/admin/subscriptions',               auth, role('admin'), SubController.create.bind(SubController));
+router.delete('/admin/subscriptions/:id',           auth, role('admin'), SubController.cancel.bind(SubController));
+
+// عمليات على اشتراك بعينه
+router.post  ('/admin/subscriptions/:id/extend',    auth, role('admin'), SubController.extend.bind(SubController));
+router.patch ('/admin/subscriptions/:id/freeze',    auth, role('admin'), SubController.freeze.bind(SubController));
+router.patch ('/admin/subscriptions/:id/activate',  auth, role('admin'), SubController.activate.bind(SubController));
+router.delete('/admin/subscriptions/:id/permanent', auth, role('admin'), SubController.deletePermanent.bind(SubController));
+router.get   ('/admin/subscriptions/:id/renewals',  auth, role('admin'), SubController.renewals.bind(SubController));
 
 // ══════════════════════════════════════════════════════
 //  ADMIN — Licenses
