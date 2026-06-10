@@ -36,9 +36,9 @@ const TEMP_DISCONNECT_CODES = new Set([
 
 // ── QR scan window ───────────────────────────────────────────────────────────
 // مدة الانتظار بعد إرسال QR قبل قبول أي reconnect (بالمللي ثانية)
-const QR_SCAN_WINDOW_MS = 30000; // 30 ثانية لإعطاء المستخدم وقت للمسح
+const QR_SCAN_WINDOW_MS = 60_000; // 60 ثانية (Railway يكون بطيئاً أحياناً)
 // الحد الأقصى لمحاولات 515 قبل مسح الجلسة
-const MAX_515_RETRIES = 3;
+const MAX_515_RETRIES = 5; // زيادة من 3 إلى 5 لتحمّل تأخيرات Railway
 
 class WhatsAppManager {
     constructor() {
@@ -209,10 +209,9 @@ class WhatsAppManager {
                     printQRInTerminal: false,
 
                     // ─── إعدادات الاستقرار على Railway ────────────────────────
-                    // أهم سطر: يُرسل ping كل 10 ثوانٍ → يمنع 408 و515
-                    keepAliveIntervalMs: 10_000,
+                    keepAliveIntervalMs: 25_000,  // 25 ثانية (10 ثانية كانت مفرطة)
                     connectTimeoutMs:    60_000,
-                    qrTimeout:           45_000, // 45 ثانية لمسح الـ QR
+                    qrTimeout:           60_000,  // 60 ثانية لمسح الـ QR (كانت 45 قصيرة جداً)
 
                     // browser يشبه Chrome العادي → أقل احتمالية للحظر
                     browser: Browsers.ubuntu('Chrome'),
@@ -221,7 +220,7 @@ class WhatsAppManager {
                     generateHighQualityLinkPreviews: false,
                     markOnlineOnConnect:            false,
                     retryRequestDelayMs:            500,
-                    maxRetries:                     3,
+                    maxRetries:                     5,  // زيادة المحاولات
                 });
 
                 sock.ev.on('creds.update', saveCreds);
@@ -260,26 +259,36 @@ class WhatsAppManager {
                             const retries515 = (this.restartAttempts.get(accountId) || 0) + 1;
                             this.restartAttempts.set(accountId, retries515);
 
-                            // إذا تكرر 515 أكثر من MAX_515_RETRIES → الجلسة تالفة، امسحها
-                            if (retries515 > MAX_515_RETRIES) {
+                            // هل تم مسح QR مؤخراً؟ (خلال آخر 90 ثانية)
+                            const qrTime = this.qrSentAt.get(accountId) || 0;
+                            const timeSinceQR = Date.now() - qrTime;
+                            const QR_JUST_SCANNED_WINDOW_MS = 90_000; // 90 ثانية
+                            const qrWasJustScanned = timeSinceQR < QR_JUST_SCANNED_WINDOW_MS;
+
+                            // إذا تكرر 515 أكثر من MAX_515_RETRIES وليس في نافذة المسح → الجلسة تالفة
+                            if (retries515 > MAX_515_RETRIES && !qrWasJustScanned) {
                                 console.warn(`[Account ${accountId}] 515 repeated ${retries515}x — clearing session.`);
                                 this.restartAttempts.delete(accountId);
                                 await this._clearSession(accountId, 515);
                                 return;
                             }
 
-                            // Backoff: 5s → 10s → 20s (يعطي وقتاً لـ WhatsApp server)
-                            const delay515 = Math.min(retries515 * 5000, 20000);
-                            console.log(`[Account ${accountId}] Restart required (515) — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms…`);
+                            // Backoff: 3s → 5s → 8s (أسرع استجابة بعد مسح QR)
+                            const delay515 = qrWasJustScanned ? 3000 : Math.min(retries515 * 5000, 20000);
+                            console.log(`[Account ${accountId}] Restart required (515) — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms… (QR scanned ${Math.round(timeSinceQR/1000)}s ago)`);
 
-                            if (!state.creds?.registered) {
-                                // ✅ FIX CORE: الجلسة لم تُكتمل بعد (QR phase)
-                                // الـ creds الجزئية المحفوظة تسبب 500 عند إعادة الاتصال
-                                // امسحها الآن لضمان بداية نظيفة تماماً
-                                console.log(`[Account ${accountId}] Session not registered — wiping partial auth data before retry.`);
+                            if (qrWasJustScanned) {
+                                // ✅ FIX CORE: المستخدم مسح QR للتو — 515 طبيعي بعد المسح
+                                // يجب حفظ الـ creds وإعادة الاتصال لاستكمال التسجيل
+                                // لا تمسح الجلسة هنا أبداً!
+                                console.log(`[Account ${accountId}] QR was just scanned — saving creds and reconnecting to complete registration.`);
+                                await saveCreds().catch(() => {});
+                            } else if (!state.creds?.registered) {
+                                // لم يتم مسح QR ولم تكتمل الجلسة → امسح البيانات الجزئية
+                                console.log(`[Account ${accountId}] Session not registered and no recent QR scan — wiping partial auth data.`);
                                 await SystemDB.deleteAllSessionData(accountId).catch(() => {});
                             } else {
-                                // جلسة مسجّلة → احفظ الـ creds بأمان
+                                // جلسة مسجّلة سابقاً → احفظ الـ creds بأمان
                                 await saveCreds().catch(() => {});
                             }
 
