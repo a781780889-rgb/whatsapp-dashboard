@@ -2237,4 +2237,50 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
               <div className="h-full flex items-center justify-center">
                 <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
                   <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
-                  <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توج
+                  <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات</h3>
+                  <p className="text-sm text-[var(--text-secondary)] mt-2">
+                    قم بمزامنة حسابك لعرض المجموعات
+                  </p>
+                  <Button onClick={handleSync} disabled={syncing} className="mt-4 gap-2">
+                    <RefreshCw className={cn("w-4 h-4", syncing && "animate-spin")} />
+                    {syncing ? 'جارٍ المزامنة...' : 'مزامنة الآن'}
+                  </Button>
+                </div>
+              </div>
+            ) : error && groups.length === 0 ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center p-8 rounded-2xl border-2 border-dashed border-red-500/20 max-w-sm">
+                  <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
+                  <h3 className="text-lg font-bold text-[var(--text-primary)]">حدث خطأ</h3>
+                  <p className="text-sm text-[var(--text-secondary)] mt-2">{error}</p>
+                  <Button onClick={handleSync} disabled={syncing} className="mt-4 gap-2" variant="outline">
+                    <RefreshCw className={cn("w-4 h-4", syncing && "animate-spin")} />
+                    إعادة المحاولة
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 pb-4">
+                {groups.map(group => (
+                  <GroupCard
+                    key={group.id}
+                    group={group}
+                    onClick={() => setSelectedGroup(group)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {selectedGroup && (
+        <GroupDetailDialog
+          group={selectedGroup}
+          accountId={accountId}
+          onClose={() => setSelectedGroup(null)}
+        />
+      )}
+    </div>
+  );
+}
