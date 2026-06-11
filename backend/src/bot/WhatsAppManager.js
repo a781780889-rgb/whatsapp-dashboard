@@ -15,6 +15,8 @@ const DiagnosticEngine = require('../api/services/DiagnosticEngine');
 const RuntimeAnalyzer  = require('../api/services/RuntimeAnalyzer');
 const CycleAnalyzer    = require('../api/services/ConnectionCycleAnalyzer');
 const QRAnalyzer       = require('../api/services/QRAnalyzer');
+const PairingCodeAnalyzer = require('../api/services/PairingCodeAnalyzer');
+const BaileysAnalyzer  = require('../api/services/BaileysAnalyzer');
 
 // ── Anti-Ban ─────────────────────────────────────────────────────────────────
 const ANTI_BAN = {
@@ -355,7 +357,6 @@ class WhatsAppManager {
 
                 const sock = makeWASocket({
                     version:            waVersion,
-                    auth:               state,
                     logger:             this.logger,
                     printQRInTerminal:  false,
                     keepAliveIntervalMs: 25_000,
@@ -386,6 +387,8 @@ class WhatsAppManager {
                         RuntimeAnalyzer.onQRGenerated(accountId, Date.now()).catch(() => {});
                         // ── Phase 7: تسجيل QR في محلل QR ─────────────────
                         QRAnalyzer.onQRGenerated(accountId, attemptId).catch(() => {});
+                        // ── Phase 9: تسجيل حدث QR في Baileys ─────────────
+                        BaileysAnalyzer.onConnectionEvent(accountId, 'qr_generated', { qrIndex: 1 }, attemptId).catch(() => {});
 
                         this._emitState(accountId, 'qr_ready');
 
@@ -404,6 +407,9 @@ class WhatsAppManager {
                         // ── Phase 2: تسجيل حدث الانقطاع ──────────────────
                         RuntimeAnalyzer.onDisconnect(accountId, statusCode,
                             this.connStates.get(accountId) || 'connecting').catch(() => {});
+                        // ── Phase 9: تسجيل انقطاع الاتصال في Baileys ─────
+                        BaileysAnalyzer.onConnectionEvent(accountId, 'connection_close',
+                            { statusCode, lastState: this.connStates.get(accountId) }, attemptId).catch(() => {});
 
                         try { require('../api/services/LinkMonitorEngine').markInactive(accountId); } catch {}
 
@@ -530,6 +536,9 @@ class WhatsAppManager {
                         CycleAnalyzer.endCycle(accountId, 'connected').catch(() => {});
                         // ── Phase 7: تسجيل نجاح QR ────────────────────────
                         QRAnalyzer.onQRSuccess(accountId).catch(() => {});
+                        // ── Phase 9: تسجيل نجاح الاتصال في Baileys ────────
+                        BaileysAnalyzer.onConnectionEvent(accountId, 'connection_open',
+                            { isOnline: true }, attemptId).catch(() => {});
 
                         this._emitState(accountId, 'connected');
 
@@ -559,6 +568,8 @@ class WhatsAppManager {
                 // ── رسائل واردة ──────────────────────────────────────────────
                 sock.ev.on('messages.upsert', async (m) => {
                     if (m.type !== 'notify') return;
+                    // ── Phase 9: تسجيل حدث استقبال الرسائل ───────────────
+                    const evKey = await BaileysAnalyzer.onEventStart(accountId, 'messages', 'messages.upsert', attemptId);
                     for (const msg of m.messages) {
                         if (!msg.message) continue;
                         const text = msg.message.conversation
@@ -576,6 +587,8 @@ class WhatsAppManager {
                             }).catch(err => console.error(`[Account ${accountId}] Link extraction failed:`, err));
                         }
                     }
+                    // ── Phase 9: انتهاء معالجة حدث الرسائل ───────────────
+                    BaileysAnalyzer.onEventEnd(accountId, evKey, { count: m.messages.length }).catch(() => {});
                 });
 
                 this.sessions.set(accountId, sock);
@@ -934,3 +947,4 @@ class WhatsAppManager {
 }
 
 module.exports = new WhatsAppManager();
+
