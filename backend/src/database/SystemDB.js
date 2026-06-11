@@ -271,6 +271,46 @@ class SystemDB {
         await query(`CREATE INDEX IF NOT EXISTS idx_diag_created  ON connection_diagnostics(created_at DESC)`).catch(() => {});
         await query(`CREATE INDEX IF NOT EXISTS idx_diag_category ON connection_diagnostics(category)`).catch(() => {});
 
+        // ── Runtime Analysis — Phase 2 ────────────────────────────────────────
+        // جدول محاولات الاتصال: يسجل كل محاولة من البداية للنهاية
+        await query(`
+            CREATE TABLE IF NOT EXISTS connection_attempts (
+                id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id       TEXT NOT NULL,
+                connection_type  TEXT NOT NULL DEFAULT 'qr_code',
+                started_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+                ended_at         TIMESTAMP,
+                duration_ms      INTEGER,
+                outcome          TEXT NOT NULL DEFAULT 'in_progress',
+                failure_stage    TEXT,
+                failure_reason   TEXT,
+                reconnect_attempt INTEGER DEFAULT 0,
+                created_at       TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_attempts_account  ON connection_attempts(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_attempts_started  ON connection_attempts(started_at DESC)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_attempts_outcome  ON connection_attempts(outcome)`).catch(() => {});
+
+        // جدول أحداث الاتصال: timeline تفصيلي لكل محاولة
+        await query(`
+            CREATE TABLE IF NOT EXISTS connection_events (
+                id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id            TEXT NOT NULL,
+                attempt_id            TEXT NOT NULL REFERENCES connection_attempts(id) ON DELETE CASCADE,
+                event_type            TEXT NOT NULL,
+                stage                 TEXT,
+                event_data            TEXT,
+                severity              TEXT DEFAULT 'info',
+                duration_from_start_ms INTEGER,
+                created_at            TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_events_attempt   ON connection_events(attempt_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_events_account   ON connection_events(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_events_severity  ON connection_events(severity)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_events_created   ON connection_events(created_at DESC)`).catch(() => {});
+
         console.log('[SystemDB] ✅ جميع الجداول جاهزة (PostgreSQL).');
     }
 
