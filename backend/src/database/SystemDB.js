@@ -311,6 +311,49 @@ class SystemDB {
         await query(`CREATE INDEX IF NOT EXISTS idx_events_severity  ON connection_events(severity)`).catch(() => {});
         await query(`CREATE INDEX IF NOT EXISTS idx_events_created   ON connection_events(created_at DESC)`).catch(() => {});
 
+        // ── Connection Cycle Analysis — Phase 3 ───────────────────────────────
+        await query(`
+            CREATE TABLE IF NOT EXISTS connection_stage_transitions (
+                id                      TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id              TEXT NOT NULL,
+                attempt_id              TEXT REFERENCES connection_attempts(id) ON DELETE CASCADE,
+                connection_type         TEXT DEFAULT 'qr_code',
+                from_stage              TEXT,
+                to_stage                TEXT NOT NULL,
+                from_stage_duration_ms  INTEGER,
+                transition_at           TIMESTAMP NOT NULL DEFAULT NOW(),
+                is_unexpected           BOOLEAN DEFAULT FALSE,
+                is_terminal             BOOLEAN DEFAULT FALSE,
+                progress_pct            INTEGER DEFAULT 0,
+                extra_data              TEXT
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_cst_account    ON connection_stage_transitions(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_cst_attempt    ON connection_stage_transitions(attempt_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_cst_stage      ON connection_stage_transitions(to_stage)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_cst_time       ON connection_stage_transitions(transition_at DESC)`).catch(() => {});
+
+        // جدول الشذوذات
+        await query(`
+            CREATE TABLE IF NOT EXISTS cycle_anomalies (
+                id                      TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id              TEXT NOT NULL,
+                attempt_id              TEXT REFERENCES connection_attempts(id) ON DELETE CASCADE,
+                anomaly_type            TEXT NOT NULL,
+                stage                   TEXT NOT NULL,
+                duration_ms             INTEGER,
+                threshold_warn_ms       INTEGER,
+                threshold_critical_ms   INTEGER,
+                severity                TEXT DEFAULT 'warning',
+                message                 TEXT,
+                created_at              TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_anomaly_account  ON cycle_anomalies(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_anomaly_attempt  ON cycle_anomalies(attempt_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_anomaly_severity ON cycle_anomalies(severity)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_anomaly_time     ON cycle_anomalies(created_at DESC)`).catch(() => {});
+
         console.log('[SystemDB] ✅ جميع الجداول جاهزة (PostgreSQL).');
     }
 
