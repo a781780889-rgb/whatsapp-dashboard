@@ -309,20 +309,42 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         setConn('error');
       });
 
+      const handleConnected = () => {
+        if (!isMounted.current) return;
+        setConn('connected');
+        socket.disconnect();
+        socketRef.current = null;
+        setTimeout(() => {
+          showToast({ title: '✅ متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
+          onConnected();
+        }, 1000);
+      };
+
       socket.on('account_status', ({ status: s }: any) => {
         if (!isMounted.current) return;
         if (s === 'connected') {
-          setConn('connected');
-          socket.disconnect();
-          socketRef.current = null;
-          setTimeout(() => {
-            showToast({ title: '✅ متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
-            onConnected();
-          }, 1000);
+          handleConnected();
         } else if (s === 'disconnected') {
           setConn('disconnected');
         }
       });
+
+      // ✅ FIX: Polling fallback — كل 3 ثوانٍ نتحقق من الـ state عبر REST
+      // يضمن وصول حدث الاتصال حتى لو فاتت الـ Socket events
+      const pollInterval = setInterval(async () => {
+        if (!isMounted.current) return;
+        try {
+          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`);
+          const d = await r.json();
+          if (d.state === 'connected') {
+            clearInterval(pollInterval);
+            handleConnected();
+          }
+        } catch { /* network error, ignore */ }
+      }, 3000);
+
+      // تنظيف الـ interval عند إغلاق الـ socket
+      socket.on('disconnect', () => clearInterval(pollInterval));
 
     } catch (err: any) {
       if (isMounted.current) {
@@ -532,18 +554,39 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         setConn('error');
       });
 
+      const handlePairingConnected = () => {
+        if (!isMounted.current) return;
+        setConn('connected');
+        if (countdownRef.current) clearInterval(countdownRef.current);
+        socket.disconnect();
+        setTimeout(() => {
+          showToast({ title: '✅ متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
+          onConnected();
+        }, 1200);
+      };
+
       socket.on('account_status', ({ status: s }: any) => {
         if (!isMounted.current) return;
         if (s === 'connected') {
-          setConn('connected');
-          if (countdownRef.current) clearInterval(countdownRef.current);
-          socket.disconnect();
-          setTimeout(() => {
-            showToast({ title: '✅ متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
-            onConnected();
-          }, 1200);
+          handlePairingConnected();
         }
       });
+
+      // ✅ FIX: Polling fallback — يضمن وصول حدث الاتصال حتى لو فاتت الـ Socket events
+      // المشكلة: بعد إدخال الرمز → 515 → initSession → connected قد يفوت الـ frontend
+      const pollInterval = setInterval(async () => {
+        if (!isMounted.current) return;
+        try {
+          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`);
+          const d = await r.json();
+          if (d.state === 'connected') {
+            clearInterval(pollInterval);
+            handlePairingConnected();
+          }
+        } catch { /* network error, ignore */ }
+      }, 3000);
+
+      socket.on('disconnect', () => clearInterval(pollInterval));
 
     } catch {
       setError('فشل الاتصال بالخادم. تحقق من الإنترنت.');
