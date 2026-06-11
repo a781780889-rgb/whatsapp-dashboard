@@ -356,6 +356,7 @@ class WhatsAppManager {
                 QRAnalyzer.onQRGenerating(accountId);
 
                 const sock = makeWASocket({
+                    auth:               state,
                     version:            waVersion,
                     logger:             this.logger,
                     printQRInTerminal:  false,
