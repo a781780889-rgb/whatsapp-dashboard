@@ -375,6 +375,75 @@ class SystemDB {
         await query(`CREATE INDEX IF NOT EXISTS idx_qrlog_outcome  ON qr_flow_log(outcome)`).catch(() => {});
         await query(`CREATE INDEX IF NOT EXISTS idx_qrlog_gen      ON qr_flow_log(generated_at DESC)`).catch(() => {});
 
+        // ── Pairing Code Analysis — Phase 8 ─────────────────────────────────
+        // جدول تتبع كل عملية Pairing Code: أزمنة التأخير الثلاثة + النتيجة
+        await query(`
+            CREATE TABLE IF NOT EXISTS pairing_code_log (
+                id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id          TEXT NOT NULL,
+                attempt_id          TEXT REFERENCES connection_attempts(id) ON DELETE CASCADE,
+                phone_number        TEXT,
+                request_delay_ms    INTEGER,
+                display_delay_ms    INTEGER,
+                entry_delay_ms      INTEGER,
+                code_ready_at       TIMESTAMP,
+                entered_at          TIMESTAMP,
+                connected_at        TIMESTAMP,
+                outcome             TEXT NOT NULL DEFAULT 'pending',
+                error_message       TEXT,
+                created_at          TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_pairlog_account ON pairing_code_log(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_pairlog_attempt ON pairing_code_log(attempt_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_pairlog_outcome ON pairing_code_log(outcome)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_pairlog_created ON pairing_code_log(created_at DESC)`).catch(() => {});
+
+        // ── Baileys Deep Analysis — Phase 9 ─────────────────────────────────
+        // جدول تتبع أحداث Baileys الداخلية: socket events, message events, presence
+        await query(`
+            CREATE TABLE IF NOT EXISTS baileys_event_log (
+                id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id          TEXT NOT NULL,
+                attempt_id          TEXT REFERENCES connection_attempts(id) ON DELETE CASCADE,
+                event_category      TEXT NOT NULL,
+                event_name          TEXT NOT NULL,
+                event_data          JSONB,
+                processing_time_ms  INTEGER,
+                error_message       TEXT,
+                severity            TEXT NOT NULL DEFAULT 'info',
+                created_at          TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_baileys_account  ON baileys_event_log(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_baileys_attempt  ON baileys_event_log(attempt_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_baileys_category ON baileys_event_log(event_category)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_baileys_severity ON baileys_event_log(severity)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_baileys_created  ON baileys_event_log(created_at DESC)`).catch(() => {});
+
+        // ── Baileys Message Flow — Phase 9 ──────────────────────────────────
+        // جدول تتبع تدفق الرسائل: الإرسال، التسليم، القراءة، الأخطاء
+        await query(`
+            CREATE TABLE IF NOT EXISTS baileys_message_flow (
+                id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id          TEXT NOT NULL,
+                message_id          TEXT,
+                jid                 TEXT,
+                direction           TEXT NOT NULL DEFAULT 'outbound',
+                send_delay_ms       INTEGER,
+                delivery_delay_ms   INTEGER,
+                read_delay_ms       INTEGER,
+                status              TEXT NOT NULL DEFAULT 'pending',
+                error_code          TEXT,
+                error_message       TEXT,
+                retry_count         INTEGER DEFAULT 0,
+                created_at          TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_msgflow_account  ON baileys_message_flow(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_msgflow_status   ON baileys_message_flow(status)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_msgflow_created  ON baileys_message_flow(created_at DESC)`).catch(() => {});
+
         console.log('[SystemDB] ✅ جميع الجداول جاهزة (PostgreSQL).');
     }
 
