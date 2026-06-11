@@ -39,10 +39,9 @@ function ProtectedRoute({ children, adminOnly = false, currentUser }:
 }
 
 function AppInner() {
-  const AUTO_USER = { id: 'auto-admin', username: 'admin', role: 'super_admin', full_name: 'Admin' };
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY) || 'no-auth');
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY) || null);
   const [currentUser, setCurrentUser] = useState<any>(() => {
-    try { return JSON.parse(localStorage.getItem(USER_KEY) || 'null') || AUTO_USER; } catch { return AUTO_USER; }
+    try { return JSON.parse(localStorage.getItem(USER_KEY) || 'null') || null; } catch { return null; }
   });
   const [isConnected, setIsConnected] = useState(true);
 
@@ -67,7 +66,7 @@ function AppInner() {
   // ── FIX 1: Race condition — cancel stale verify fetches with cleanup flag ──
   useEffect(() => {
     // بدون تسجيل دخول — تجاهل التحقق من التوكن
-    if (!token || token === 'no-auth') return;
+    if (!token) return;
     let cancelled = false;
 
     fetch(`${API}/auth/verify`, { headers: { Authorization: `Bearer ${token}` } })
@@ -156,10 +155,10 @@ function AppInner() {
     setSelectedAccountId(null);
   }
 
-  // تم إزالة صفحة تسجيل الدخول — الدخول تلقائي
-  // if (!token || !currentUser) {
-  //   return <LoginPage onLogin={handleLogin} />;
-  // }
+  // تسجيل الدخول مطلوب — بيانات: admin / 7817808899
+  if (!token || !currentUser) {
+    return <LoginPage onLogin={handleLogin} />;
+  }
 
   /* Subscription expired for regular users */
   const isExpired =
