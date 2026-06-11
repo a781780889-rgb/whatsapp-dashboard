@@ -409,6 +409,20 @@ class AccountDB {
     async close() {
         // No-op: pool connections are managed globally
     }
+
+    /**
+     * Drop this account's PostgreSQL schema and all its tables (CASCADE).
+     * Called during full account deletion.
+     */
+    async dropSchema() {
+        const client = await getPool().connect();
+        try {
+            await client.query(`DROP SCHEMA IF EXISTS ${this.schema} CASCADE`);
+            console.log(`[AccountDB] Schema ${this.schema} dropped.`);
+        } finally {
+            client.release();
+        }
+    }
 }
 
 module.exports = AccountDB;
