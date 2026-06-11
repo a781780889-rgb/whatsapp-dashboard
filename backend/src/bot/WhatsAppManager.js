@@ -1,4 +1,6 @@
 'use strict';
+const MAX_RECONNECT_ATTEMPTS = parseInt(process.env.MAX_RECONNECT_ATTEMPTS || '10', 10);
+
 const {
     makeWASocket, DisconnectReason, Browsers,
     initAuthCreds, makeCacheableSignalKeyStore, proto,
@@ -169,9 +171,8 @@ class WhatsAppManager {
         try {
             const redis   = getRedis();
             const hourKey = `rate:${accountId}:${Math.floor(Date.now() / 3600000)}`;
-            const account = await SystemDB.get(
-                `SELECT warmup_phase FROM accounts WHERE id = $1`, [accountId]
-            );
+            // ✅ FIX: استخدام getAccountWithWarmup للتحقق الدقيق من Warmup Phase
+            const account = await SystemDB.getAccountWithWarmup(accountId);
             const limit = account?.warmup_phase ? ANTI_BAN.warmupLimit : ANTI_BAN.maxPerHour;
             const count = await redis.incr(hourKey);
             if (count === 1) await redis.expire(hourKey, 3600);
@@ -198,42 +199,76 @@ class WhatsAppManager {
 
     // ── مسح جلسة فاسدة ───────────────────────────────────────────────────────
     async _clearSession(accountId, code) {
-        console.log(`[Account ${accountId}] Clearing bad session (code ${code})…`);
+        console.log(`[Account ${accountId}] Clearing session (code ${code})…`);
 
-        // ألغِ مؤقت Pairing إن وُجد
+        // ✅ FIX: ألغِ مؤقت Pairing إن وُجد
         const pt = this.pairingTimers.get(accountId);
         if (pt) { clearTimeout(pt); this.pairingTimers.delete(accountId); }
 
+        // ✅ FIX: أنهِ Socket بأمان
         const sock = this.sessions.get(accountId);
         if (sock) { try { sock.end(undefined); } catch (_) {} }
 
+        // ✅ FIX: تنظيف جميع Maps المرتبطة بهذا الحساب
         this.sessions.delete(accountId);
         this.initPromises.delete(accountId);
         this.reconnectAttempts.delete(accountId);
         this.restartAttempts.delete(accountId);
         this.qrSentAt.delete(accountId);
         this.lastQrCode.delete(accountId);
+        this.lastPairingCode.delete(accountId);
+        this.connStates.delete(accountId);     // ✅ NEW: تنظيف connStates
 
+        // ✅ FIX: حذف بيانات الجلسة من قاعدة البيانات
         await SystemDB.deleteAllSessionData(accountId).catch(console.error);
         await DatabaseManager.systemDB.run(
-            `UPDATE accounts SET status = 'disconnected' WHERE id = $1`, [accountId]
+            `UPDATE accounts SET status = 'disconnected', updated_at = NOW() WHERE id = $1`,
+            [accountId]
         ).catch(console.error);
 
-        this._emitState(accountId, 'disconnected', { reason: 'bad_session', code });
+        // ✅ FIX: تنظيف مفاتيح Redis الخاصة بهذا الحساب (Rate Limiting)
+        try {
+            const redis   = getRedis();
+            const hourKey = `rate:${accountId}:${Math.floor(Date.now() / 3600000)}`;
+            await redis.del(hourKey).catch(() => {});
+        } catch (_) {}
+
+        // ✅ FIX: تحديد ما إذا كان يجب إعادة الاتصال أم لا
+        // loggedOut (401) / connectionReplaced (440) → لا نُعيد الاتصال أبداً
+        const noReconnectCodes = new Set([
+            DisconnectReason.loggedOut,          // 401 — المستخدم أغلق الجلسة يدوياً
+            DisconnectReason.connectionReplaced, // 440 — جلسة مفتوحة في مكان آخر
+        ]);
+        const shouldReconnect = !noReconnectCodes.has(code) && code !== 'force_reset';
+
+        this._emitState(accountId, 'disconnected', { reason: 'session_cleared', code });
 
         if (this.io) {
-            this.io.to(`account_${accountId}`).emit('session_cleared', { accountId });
-            this.io.emit('account_status', { accountId, status: 'disconnected', reason: 'bad_session' });
-            this.io.emit('notification', {
-                type: 'warning',
-                title: 'جلسة منتهية',
-                message: 'سيظهر رمز QR جديد تلقائياً.',
-                accountId,
-            });
+            this.io.to(`account_${accountId}`).emit('session_cleared', { accountId, code });
+            this.io.emit('account_status', { accountId, status: 'disconnected', reason: 'session_cleared' });
+            if (shouldReconnect) {
+                this.io.emit('notification', {
+                    type: 'warning', title: 'جلسة منتهية',
+                    message: 'سيظهر رمز QR جديد تلقائياً.', accountId,
+                });
+            } else {
+                this.io.emit('notification', {
+                    type: 'error', title: 'تم تسجيل الخروج',
+                    message: code === DisconnectReason.loggedOut
+                        ? 'تم تسجيل الخروج من واتساب. يرجى إعادة الاتصال يدوياً.'
+                        : 'الجلسة منتهية. يرجى إعادة الاتصال.',
+                    accountId,
+                });
+            }
         }
 
-        // إعادة التهيئة بعد 3 ثوانٍ
-        setTimeout(() => this.initSession(accountId), 3000);
+        // ✅ FIX: إعادة التهيئة فقط إذا كان مسموحاً
+        if (shouldReconnect) {
+            console.log(`[Account ${accountId}] Will auto-reconnect in 3s…`);
+            setTimeout(() => this.initSession(accountId), 3000);
+        } else {
+            console.log(`[Account ${accountId}] No auto-reconnect for code ${code}.`);
+        }
     }
 
     // ── جلب إصدار WA ─────────────────────────────────────────────────────────
@@ -370,6 +405,14 @@ class WhatsAppManager {
                                 setTimeout(() => this.initSession(accountId), remaining);
                             } else {
                                 const attempts = this.reconnectAttempts.get(accountId) || 0;
+                                if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+                                    console.error(`[Account ${accountId}] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Stopping.`);
+                                    await DatabaseManager.systemDB.run(
+                                        `UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1`, [accountId]
+                                    ).catch(() => {});
+                                    this.reconnectAttempts.delete(accountId);
+                                    return;
+                                }
                                 const delay    = Math.min(Math.pow(2, attempts) * 1000, 30000);
                                 this.reconnectAttempts.set(accountId, attempts + 1);
                                 this._emitState(accountId, 'disconnected', { reason: statusCode });
@@ -385,6 +428,14 @@ class WhatsAppManager {
 
                         // أي كود آخر
                         const attempts = this.reconnectAttempts.get(accountId) || 0;
+                        if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+                            console.error(`[Account ${accountId}] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Stopping.`);
+                            await DatabaseManager.systemDB.run(
+                                `UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1`, [accountId]
+                            ).catch(() => {});
+                            this.reconnectAttempts.delete(accountId);
+                            return;
+                        }
                         const delay    = Math.min(Math.pow(2, attempts) * 1000, 30000);
                         this.reconnectAttempts.set(accountId, attempts + 1);
                         this._emitState(accountId, 'disconnected', { reason: statusCode });
@@ -678,7 +729,7 @@ class WhatsAppManager {
                     }
                 });
 
-                this.sessions.set(accountId, sock);
+                // ✅ FIX: session stored only when connection===open (line 683); not here
                 return sock;
 
             } catch (err) {
@@ -706,6 +757,48 @@ class WhatsAppManager {
     async forceResetSession(accountId) {
         await this._clearSession(accountId, 'force_reset');
         return true;
+    }
+
+    /**
+     * ✅ NEW: حذف الحساب بالكامل — يُستخدم من AccountController.deleteAccount
+     * يُنظِّف: Sessions, Maps, Redis keys, BullMQ jobs, DB session data
+     */
+    async fullDeleteAccount(accountId) {
+        console.log(`[WhatsAppManager] Full delete for account ${accountId}…`);
+
+        // 1. إلغاء مؤقت Pairing
+        const pt = this.pairingTimers.get(accountId);
+        if (pt) { clearTimeout(pt); this.pairingTimers.delete(accountId); }
+
+        // 2. إغلاق Socket بأمان
+        const sock = this.sessions.get(accountId);
+        if (sock) {
+            try { await sock.logout().catch(() => {}); } catch (_) {}
+            try { sock.end(undefined); } catch (_) {}
+        }
+
+        // 3. تنظيف جميع Maps في الذاكرة
+        this.sessions.delete(accountId);
+        this.initPromises.delete(accountId);
+        this.reconnectAttempts.delete(accountId);
+        this.restartAttempts.delete(accountId);
+        this.qrSentAt.delete(accountId);
+        this.lastQrCode.delete(accountId);
+        this.lastPairingCode.delete(accountId);
+        this.connStates.delete(accountId);
+
+        // 4. تنظيف Redis keys (Rate Limiting لجميع الساعات الأخيرة)
+        try {
+            const redis  = getRedis();
+            const nowHour = Math.floor(Date.now() / 3600000);
+            const keysToDelete = [];
+            for (let i = 0; i < 25; i++) {
+                keysToDelete.push(`rate:${accountId}:${nowHour - i}`);
+            }
+            if (keysToDelete.length) await redis.del(...keysToDelete).catch(() => {});
+        } catch (_) {}
+
+        console.log(`[WhatsAppManager] Account ${accountId} fully cleaned from memory and Redis.`);
     }
 
     async getGroupMembers(accountId, groupJid) {
