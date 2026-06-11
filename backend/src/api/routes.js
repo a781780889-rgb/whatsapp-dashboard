@@ -277,6 +277,51 @@ router.get ('/accounts/:id/cycle/attempts/:attemptId',                  auth, su
 router.get ('/accounts/:id/cycle/attempts/:attemptId/report',           auth, subCheck, CycleController.getCycleReport.bind(CycleController));
 router.get ('/admin/cycle/stats',                                       auth, role('admin'), CycleController.getSystemStats.bind(CycleController));
 
+// ── Phase 4: Database Analysis ────────────────────────────────────────────────
+const DatabaseAnalyzerController = require('./controllers/DatabaseAnalyzerController');
+router.get ('/accounts/:id/db/health',          auth, subCheck,        DatabaseAnalyzerController.getAccountDbHealth.bind(DatabaseAnalyzerController));
+router.get ('/accounts/:id/db/check',           auth, subCheck,        DatabaseAnalyzerController.quickAccountCheck.bind(DatabaseAnalyzerController));
+router.get ('/admin/db/report',                 auth, role('admin'),   DatabaseAnalyzerController.getFullReport.bind(DatabaseAnalyzerController));
+router.get ('/admin/db/contradictions',         auth, role('admin'),   DatabaseAnalyzerController.getContradictions.bind(DatabaseAnalyzerController));
+router.get ('/admin/db/bloat',                  auth, role('admin'),   DatabaseAnalyzerController.getBloatReport.bind(DatabaseAnalyzerController));
+router.get ('/admin/db/performance',            auth, role('admin'),   DatabaseAnalyzerController.getPerformanceReport.bind(DatabaseAnalyzerController));
+router.get ('/admin/db/stats',                  auth, role('admin'),   DatabaseAnalyzerController.getStats.bind(DatabaseAnalyzerController));
+
+// ── Phase 5: Redis Analysis ───────────────────────────────────────────────────
+const RedisAnalyzerController = require('./controllers/RedisAnalyzerController');
+router.get ('/accounts/:id/redis/rate-keys',    auth, subCheck,        RedisAnalyzerController.getAccountRateKeys.bind(RedisAnalyzerController));
+router.get ('/admin/redis/report',              auth, role('admin'),   RedisAnalyzerController.getFullReport.bind(RedisAnalyzerController));
+router.get ('/admin/redis/connection',          auth, role('admin'),   RedisAnalyzerController.getConnectionInfo.bind(RedisAnalyzerController));
+router.get ('/admin/redis/rate-keys',           auth, role('admin'),   RedisAnalyzerController.getAllRateKeys.bind(RedisAnalyzerController));
+router.get ('/admin/redis/jwt-blacklist',       auth, role('admin'),   RedisAnalyzerController.getJWTBlacklist.bind(RedisAnalyzerController));
+router.get ('/admin/redis/bullmq',              auth, role('admin'),   RedisAnalyzerController.getBullMQStatus.bind(RedisAnalyzerController));
+router.get ('/admin/redis/no-ttl',              auth, role('admin'),   RedisAnalyzerController.getNoTTLKeys.bind(RedisAnalyzerController));
+router.get ('/admin/redis/memory',              auth, role('admin'),   RedisAnalyzerController.getMemoryDistribution.bind(RedisAnalyzerController));
+
+// ── Phase 6: Session Deep Analysis ───────────────────────────────────────────
+const SessionAnalyzerController = require('./controllers/SessionAnalyzerController');
+router.get ('/accounts/:id/session/report',        auth, subCheck,      SessionAnalyzerController.getAccountReport.bind(SessionAnalyzerController));
+router.get ('/accounts/:id/session/credentials',   auth, subCheck,      SessionAnalyzerController.getCredentials.bind(SessionAnalyzerController));
+router.get ('/accounts/:id/session/signal-keys',   auth, subCheck,      SessionAnalyzerController.getSignalKeys.bind(SessionAnalyzerController));
+router.get ('/accounts/:id/session/stats',         auth, subCheck,      SessionAnalyzerController.getAccountStats.bind(SessionAnalyzerController));
+router.get ('/admin/session/report',               auth, role('admin'),  SessionAnalyzerController.getSystemReport.bind(SessionAnalyzerController));
+router.get ('/admin/session/stats',                auth, role('admin'),  SessionAnalyzerController.getSystemStats.bind(SessionAnalyzerController));
+router.get ('/admin/session/stale',                auth, role('admin'),  SessionAnalyzerController.getStaleAccounts.bind(SessionAnalyzerController));
+
+// ── المرحلة السابعة — QR Code Analysis ───────────────────────────────────
+const QRAnalyzerController = require('./controllers/QRAnalyzerController');
+
+// Per-Account
+router.get ('/accounts/:id/qr/report',   auth, subCheck,      QRAnalyzerController.getAccountReport.bind(QRAnalyzerController));
+router.get ('/accounts/:id/qr/stats',    auth, subCheck,      QRAnalyzerController.getAccountStats.bind(QRAnalyzerController));
+router.get ('/accounts/:id/qr/history',  auth, subCheck,      QRAnalyzerController.getAccountHistory.bind(QRAnalyzerController));
+router.get ('/accounts/:id/qr/latency',  auth, subCheck,      QRAnalyzerController.getLatency.bind(QRAnalyzerController));
+
+// Admin
+router.get ('/admin/qr/report',          auth, role('admin'),  QRAnalyzerController.getSystemReport.bind(QRAnalyzerController));
+router.get ('/admin/qr/stats',           auth, role('admin'),  QRAnalyzerController.getSystemStats.bind(QRAnalyzerController));
+router.get ('/admin/qr/slow',            auth, role('admin'),  QRAnalyzerController.getSlowAccounts.bind(QRAnalyzerController));
+
 module.exports = router;
 
 
