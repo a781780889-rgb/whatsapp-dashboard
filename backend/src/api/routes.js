@@ -258,6 +258,15 @@ router.post('/accounts/:id/diagnostics/scan',    auth, subCheck, DiagnosticContr
 router.get ('/admin/diagnostics',                auth, role('admin'), DiagnosticController.getAllDiagnostics.bind(DiagnosticController));
 router.get ('/admin/diagnostics/stats',          auth, role('admin'), DiagnosticController.getDiagnosticStats.bind(DiagnosticController));
 
+// ── Phase 2: Runtime Analysis ─────────────────────────────────────────────
+const RuntimeController = require('./controllers/RuntimeController');
+router.get ('/accounts/:id/runtime/report',                             auth, subCheck, RuntimeController.getFullReport.bind(RuntimeController));
+router.get ('/accounts/:id/runtime/attempts',                           auth, subCheck, RuntimeController.getRecentAttempts.bind(RuntimeController));
+router.get ('/accounts/:id/runtime/attempts/:attemptId/timeline',       auth, subCheck, RuntimeController.getAttemptTimeline.bind(RuntimeController));
+router.get ('/accounts/:id/runtime/errors',                             auth, subCheck, RuntimeController.getErrorPatterns.bind(RuntimeController));
+router.get ('/accounts/:id/runtime/stats',                              auth, subCheck, RuntimeController.getConnectionStats.bind(RuntimeController));
+router.get ('/admin/runtime/stats',                                     auth, role('admin'), RuntimeController.getSystemStats.bind(RuntimeController));
+
 module.exports = router;
 
 
