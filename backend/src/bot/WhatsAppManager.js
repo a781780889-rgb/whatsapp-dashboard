@@ -13,6 +13,7 @@ const DatabaseManager = require('../database/DatabaseManager');
 const { getRedis } = require('../lib/redis');
 const DiagnosticEngine = require('../api/services/DiagnosticEngine');
 const RuntimeAnalyzer  = require('../api/services/RuntimeAnalyzer');
+const CycleAnalyzer    = require('../api/services/ConnectionCycleAnalyzer');
 
 // ── Anti-Ban ─────────────────────────────────────────────────────────────────
 const ANTI_BAN = {
@@ -71,6 +72,8 @@ class WhatsAppManager {
         DiagnosticEngine.trackStage(accountId, state, extra);
         // ── Phase 2: تسجيل تغيير الحالة في Runtime Analyzer ──────────────
         RuntimeAnalyzer.onStateChange(accountId, state, extra).catch(() => {});
+        // ── Phase 3: تتبع انتقالات المراحل بدقة ──────────────────────────────
+        CycleAnalyzer.onStageChange(accountId, state, extra).catch(() => {});
         if (this.io) {
             this.io.to(`account_${accountId}`).emit('connection_state', {
                 accountId,
@@ -220,6 +223,8 @@ class WhatsAppManager {
         const clearOutcome = code === 401 ? 'logged_out' : code === 440 ? 'replaced' : 'failed';
         RuntimeAnalyzer.endAttempt(accountId, clearOutcome, this.connStates.get(accountId) || 'unknown',
             `session_cleared_code_${code}`).catch(() => {});
+        // ── Phase 3: إنهاء دورة الاتصال عند مسح الجلسة ─────────────────
+        CycleAnalyzer.endCycle(accountId, 'disconnected', `session_cleared_code_${code}`).catch(() => {});
 
         // ✅ FIX: ألغِ مؤقت Pairing إن وُجد
         const pt = this.pairingTimers.get(accountId);
@@ -312,6 +317,8 @@ class WhatsAppManager {
             // ── Phase 2: بدء تسجيل محاولة الاتصال ─────────────────────────
             const reconnectNum = this.reconnectAttempts.get(accountId) || 0;
             const attemptId    = await RuntimeAnalyzer.startAttempt(accountId, 'qr_code', reconnectNum).catch(() => null);
+            // ── Phase 3: ربط المحاولة بمحلل دورة الاتصال ────────────────────
+            CycleAnalyzer.bindAttempt(accountId, attemptId, 'qr_code');
 
             try {
                 const { state, saveCreds } = await this._usePostgresAuthState(accountId);
@@ -508,6 +515,8 @@ class WhatsAppManager {
                         DiagnosticEngine.diagnoseSuccess(accountId, 'qr_code').catch(() => {});
                         // ── Phase 2: إنهاء المحاولة بنجاح ────────────────
                         RuntimeAnalyzer.endAttempt(accountId, 'connected').catch(() => {});
+                        // ── Phase 3: إنهاء دورة الاتصال بنجاح ───────────────
+                        CycleAnalyzer.endCycle(accountId, 'connected').catch(() => {});
 
                         this._emitState(accountId, 'connected');
 
@@ -611,7 +620,9 @@ class WhatsAppManager {
         const initPromise = (async () => {
             // ── Phase 2: بدء تسجيل محاولة Pairing ────────────────────────
             const reconnectNum = this.reconnectAttempts.get(accountId) || 0;
-            await RuntimeAnalyzer.startAttempt(accountId, 'pairing_code', reconnectNum).catch(() => {});
+            const pairingAttemptId = await RuntimeAnalyzer.startAttempt(accountId, 'pairing_code', reconnectNum).catch(() => null);
+            // ── Phase 3: ربط المحاولة بمحلل دورة الاتصال ────────────────────
+            CycleAnalyzer.bindAttempt(accountId, pairingAttemptId, 'pairing_code');
 
             try {
                 const { state, saveCreds } = await this._usePostgresAuthState(accountId);
