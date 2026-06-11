@@ -355,6 +355,7 @@ class WhatsAppManager {
 
                 const sock = makeWASocket({
                     version:            waVersion,
+                    auth:               state,
                     logger:             this.logger,
                     printQRInTerminal:  false,
                     keepAliveIntervalMs: 25_000,
