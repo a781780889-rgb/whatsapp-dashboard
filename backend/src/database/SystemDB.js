@@ -196,7 +196,41 @@ class SystemDB {
 
         // ── WhatsApp Connection Methods (الطرق الثلاث) ───────────────────────
         // عمود نوع الاتصال في جدول الحسابات
+        // ── Anti-Ban Warmup Columns ────────────────────────────────────────────
+        // ✅ FIX: إضافة أعمدة Warmup Phase المُستخدمة في WhatsAppManager._checkRateLimit
         await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS connection_type TEXT DEFAULT 'qr_code'`).catch(() => {});
+        await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_phase      BOOLEAN DEFAULT TRUE`).catch(() => {});
+        await query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_started_at TIMESTAMP DEFAULT NOW()`).catch(() => {});
+
+        // ── Indexes على accounts ──────────────────────────────────────────────
+        await query(`CREATE INDEX IF NOT EXISTS idx_accounts_user   ON accounts(user_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_accounts_warmup ON accounts(warmup_phase, warmup_started_at)`).catch(() => {});
+
+        // ── FK: accounts.user_id → users.id (ON DELETE SET NULL) ─────────────
+        // ⚠️ يُطبَّق فقط إذا لم يكن القيد موجوداً مسبقاً
+        await query(`
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE constraint_name = 'fk_accounts_user'
+                      AND table_name = 'accounts'
+                ) THEN
+                    -- تنظيف أي orphan records أولاً لتجنب فشل إضافة القيد
+                    UPDATE accounts SET user_id = NULL
+                    WHERE user_id IS NOT NULL
+                      AND user_id NOT IN (SELECT id FROM users);
+
+                    ALTER TABLE accounts
+                    ADD CONSTRAINT fk_accounts_user
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
+                END IF;
+            END
+            $$
+        `).catch((err) => {
+            console.warn('[SystemDB] Could not add FK fk_accounts_user:', err.message);
+        });
 
         // جدول إعدادات WhatsApp Business API
         await query(`
@@ -485,6 +519,40 @@ class SystemDB {
             `UPDATE accounts SET messages_sent_today=messages_sent_today+1, last_activity_at=NOW(), updated_at=NOW() WHERE id=$1`,
             [accountId]
         ).catch(err => console.error('[SystemDB] updateMessageStats:', err.message));
+    }
+
+    /**
+     * ✅ جلب حساب مع التحقق من Warmup Phase
+     * يُحدِّث warmup_phase تلقائياً بعد انتهاء فترة الـ warmupDays
+     */
+    async getAccountWithWarmup(accountId) {
+        const account = await queryOne(
+            `SELECT id, warmup_phase, warmup_started_at FROM accounts WHERE id = $1`,
+            [accountId]
+        );
+        if (!account) return null;
+
+        // إذا كان في Warmup وانتهت المدة → أنهِ الـ Warmup تلقائياً
+        if (account.warmup_phase && account.warmup_started_at) {
+            const warmupDays = parseInt(process.env.WARMUP_DAYS || '7', 10);
+            const elapsed    = Date.now() - new Date(account.warmup_started_at).getTime();
+            if (elapsed >= warmupDays * 86_400_000) {
+                await query(
+                    `UPDATE accounts SET warmup_phase = FALSE, updated_at = NOW() WHERE id = $1`,
+                    [accountId]
+                ).catch(() => {});
+                account.warmup_phase = false;
+            }
+        }
+        return account;
+    }
+
+    /** تصفير عداد الرسائل اليومي لجميع الحسابات */
+    async resetDailyMessageCounters() {
+        const result = await query(
+            `UPDATE accounts SET messages_sent_today = 0, updated_at = NOW()`
+        );
+        return result?.rowCount || 0;
     }
 
     _generateLicenseKey() {
