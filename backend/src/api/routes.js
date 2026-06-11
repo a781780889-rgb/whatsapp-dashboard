@@ -248,6 +248,16 @@ router.delete('/private-campaigns/:id',            auth, subCheck, PrivateCampai
 router.get   ('/private-campaigns/:id/logs',       auth, subCheck, PrivateCampaignController.getCampaignLogs.bind(PrivateCampaignController));
 router.get   ('/private-campaigns/:id/stats',      auth, subCheck, PrivateCampaignController.getStats.bind(PrivateCampaignController));
 
+// ══════════════════════════════════════════════════════
+//  DIAGNOSTICS — نظام التشخيص الاحترافي
+// ══════════════════════════════════════════════════════
+const DiagnosticController = require('./controllers/DiagnosticController');
+router.get ('/accounts/:id/diagnostics',         auth, subCheck, DiagnosticController.getLastDiagnostic.bind(DiagnosticController));
+router.get ('/accounts/:id/diagnostics/history', auth, subCheck, DiagnosticController.getDiagnosticHistory.bind(DiagnosticController));
+router.post('/accounts/:id/diagnostics/scan',    auth, subCheck, DiagnosticController.runFullScan.bind(DiagnosticController));
+router.get ('/admin/diagnostics',                auth, role('admin'), DiagnosticController.getAllDiagnostics.bind(DiagnosticController));
+router.get ('/admin/diagnostics/stats',          auth, role('admin'), DiagnosticController.getDiagnosticStats.bind(DiagnosticController));
+
 module.exports = router;
 
 
