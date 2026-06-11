@@ -14,6 +14,7 @@ const { getRedis } = require('../lib/redis');
 const DiagnosticEngine = require('../api/services/DiagnosticEngine');
 const RuntimeAnalyzer  = require('../api/services/RuntimeAnalyzer');
 const CycleAnalyzer    = require('../api/services/ConnectionCycleAnalyzer');
+const QRAnalyzer       = require('../api/services/QRAnalyzer');
 
 // ── Anti-Ban ─────────────────────────────────────────────────────────────────
 const ANTI_BAN = {
@@ -225,6 +226,8 @@ class WhatsAppManager {
             `session_cleared_code_${code}`).catch(() => {});
         // ── Phase 3: إنهاء دورة الاتصال عند مسح الجلسة ─────────────────
         CycleAnalyzer.endCycle(accountId, 'disconnected', `session_cleared_code_${code}`).catch(() => {});
+        // ── Phase 7: إلغاء أي QR نشط عند مسح الجلسة ────────────────────
+        QRAnalyzer.onQRCancelled(accountId).catch(() => {});
 
         // ✅ FIX: ألغِ مؤقت Pairing إن وُجد
         const pt = this.pairingTimers.get(accountId);
@@ -335,6 +338,8 @@ class WhatsAppManager {
                             fromStage:   'qr_generating',
                             extraDetails: { timeoutMs: QR_GENERATE_TIMEOUT_MS },
                         }).catch(() => {});
+                        // ── Phase 7: تسجيل timeout في محلل QR ────────────
+                        QRAnalyzer.onQRTimeout(accountId).catch(() => {});
                         this._emitState(accountId, 'error', { error: 'انتهت مهلة إنشاء رمز QR. حاول مرة أخرى.' });
                         if (this.io) {
                             this.io.to(`account_${accountId}`).emit('connection_error', {
@@ -345,9 +350,10 @@ class WhatsAppManager {
                 }, QR_GENERATE_TIMEOUT_MS);
 
                 this._emitState(accountId, 'qr_generating');
+                // ── Phase 7: بدء تتبع وقت توليد QR ───────────────────────
+                QRAnalyzer.onQRGenerating(accountId);
 
                 const sock = makeWASocket({
-                    auth:               state,
                     version:            waVersion,
                     logger:             this.logger,
                     printQRInTerminal:  false,
@@ -377,6 +383,8 @@ class WhatsAppManager {
 
                         // ── Phase 2: تسجيل توليد QR ──────────────────────
                         RuntimeAnalyzer.onQRGenerated(accountId, Date.now()).catch(() => {});
+                        // ── Phase 7: تسجيل QR في محلل QR ─────────────────
+                        QRAnalyzer.onQRGenerated(accountId, attemptId).catch(() => {});
 
                         this._emitState(accountId, 'qr_ready');
 
@@ -426,6 +434,8 @@ class WhatsAppManager {
                             if (qrWasJustScanned) {
                                 this._emitState(accountId, 'connecting');
                                 console.log(`[Account ${accountId}] QR was just scanned — saving creds and reconnecting.`);
+                                // ── Phase 7: تسجيل مسح QR ─────────────────
+                                QRAnalyzer.onQRScanned(accountId).catch(() => {});
                                 await saveCreds().catch(() => {});
                             } else if (!state.creds?.registered) {
                                 await SystemDB.deleteAllSessionData(accountId).catch(() => {});
@@ -517,6 +527,8 @@ class WhatsAppManager {
                         RuntimeAnalyzer.endAttempt(accountId, 'connected').catch(() => {});
                         // ── Phase 3: إنهاء دورة الاتصال بنجاح ───────────────
                         CycleAnalyzer.endCycle(accountId, 'connected').catch(() => {});
+                        // ── Phase 7: تسجيل نجاح QR ────────────────────────
+                        QRAnalyzer.onQRSuccess(accountId).catch(() => {});
 
                         this._emitState(accountId, 'connected');
 
