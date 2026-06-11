@@ -11,6 +11,7 @@ const Boom         = require('@hapi/boom');
 const SystemDB     = require('../database/SystemDB');
 const DatabaseManager = require('../database/DatabaseManager');
 const { getRedis } = require('../lib/redis');
+const DiagnosticEngine = require('../api/services/DiagnosticEngine');
 
 // ── Anti-Ban ─────────────────────────────────────────────────────────────────
 const ANTI_BAN = {
@@ -65,6 +66,8 @@ class WhatsAppManager {
     // ── Emit connection state change ─────────────────────────────────────────
     _emitState(accountId, state, extra = {}) {
         this.connStates.set(accountId, state);
+        // ── تتبع المرحلة في نظام التشخيص ─────────────────────────────────
+        DiagnosticEngine.trackStage(accountId, state, extra);
         if (this.io) {
             this.io.to(`account_${accountId}`).emit('connection_state', {
                 accountId,
@@ -201,6 +204,14 @@ class WhatsAppManager {
     async _clearSession(accountId, code) {
         console.log(`[Account ${accountId}] Clearing session (code ${code})…`);
 
+        // ── تشخيص سبب المسح ───────────────────────────────────────────────
+        DiagnosticEngine.diagnose(accountId, {
+            disconnectCode: typeof code === 'number' ? code : undefined,
+            contextKey:     typeof code === 'string' && code !== 'force_reset' ? 'session_corrupted' : undefined,
+            fromStage:      this.connStates.get(accountId) || 'unknown',
+            extraDetails:   { clearCode: code },
+        }).catch(() => {});
+
         // ✅ FIX: ألغِ مؤقت Pairing إن وُجد
         const pt = this.pairingTimers.get(accountId);
         if (pt) { clearTimeout(pt); this.pairingTimers.delete(accountId); }
@@ -298,6 +309,12 @@ class WhatsAppManager {
                 // مؤقت توليد QR (30 ثانية)
                 const qrGenTimer = setTimeout(() => {
                     if (this.getConnectionState(accountId) === 'qr_generating') {
+                        // ── تشخيص: مهلة QR ────────────────────────────────
+                        DiagnosticEngine.diagnose(accountId, {
+                            contextKey:  'qr_timeout',
+                            fromStage:   'qr_generating',
+                            extraDetails: { timeoutMs: QR_GENERATE_TIMEOUT_MS },
+                        }).catch(() => {});
                         this._emitState(accountId, 'error', { error: 'انتهت مهلة إنشاء رمز QR. حاول مرة أخرى.' });
                         if (this.io) {
                             this.io.to(`account_${accountId}`).emit('connection_error', {
@@ -407,6 +424,13 @@ class WhatsAppManager {
                                 const attempts = this.reconnectAttempts.get(accountId) || 0;
                                 if (attempts >= MAX_RECONNECT_ATTEMPTS) {
                                     console.error(`[Account ${accountId}] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Stopping.`);
+                                    // ── تشخيص: انتهاء محاولات إعادة الاتصال ───
+                                    DiagnosticEngine.diagnose(accountId, {
+                                        contextKey:   'max_reconnect',
+                                        disconnectCode: statusCode,
+                                        fromStage:    'connecting',
+                                        extraDetails: { attempts, statusCode },
+                                    }).catch(() => {});
                                     await DatabaseManager.systemDB.run(
                                         `UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1`, [accountId]
                                     ).catch(() => {});
@@ -454,6 +478,9 @@ class WhatsAppManager {
                         this.restartAttempts.delete(accountId);
                         this.qrSentAt.delete(accountId);
                         this.lastQrCode.delete(accountId);
+
+                        // ── تشخيص: اتصال ناجح ──────────────────────────────
+                        DiagnosticEngine.diagnoseSuccess(accountId, 'qr_code').catch(() => {});
 
                         this._emitState(accountId, 'connected');
 
@@ -581,7 +608,12 @@ class WhatsAppManager {
                 // ── مؤقت Pairing Code (45 ثانية) ────────────────────────────
                 const pairingTimer = setTimeout(() => {
                     if (!pairingRequested) {
-                        // لم يأت QR event بعد 45 ثانية — خطأ شبكة
+                        // ── تشخيص: مهلة Pairing ──────────────────────────
+                        DiagnosticEngine.diagnose(accountId, {
+                            contextKey:  'pairing_timeout',
+                            fromStage:   'pairing_generating',
+                            extraDetails: { phoneNumber, timeoutMs: PAIRING_TIMEOUT_MS },
+                        }).catch(() => {});
                         this._emitState(accountId, 'error', {
                             error: 'انتهت المهلة. تأكد من الاتصال بالإنترنت ومن صحة رقم الهاتف.',
                         });
@@ -629,6 +661,12 @@ class WhatsAppManager {
                             }
                         } catch (err) {
                             console.error(`[Account ${accountId}][Pairing] requestPairingCode error:`, err.message);
+                            // ── تشخيص: رفض Pairing ───────────────────────
+                            DiagnosticEngine.diagnose(accountId, {
+                                pairingError: err.message,
+                                fromStage:    'pairing_generating',
+                                extraDetails: { phoneNumber },
+                            }).catch(() => {});
                             this._emitState(accountId, 'error', { error: err.message });
                             if (this.io) {
                                 this.io.to(`account_${accountId}`).emit('pairing_error', {
@@ -699,6 +737,9 @@ class WhatsAppManager {
                         this.reconnectAttempts.delete(accountId);
                         this.restartAttempts.delete(accountId);
                         this.sessions.set(accountId, sock);
+
+                        // ── تشخيص: نجاح Pairing ──────────────────────────
+                        DiagnosticEngine.diagnoseSuccess(accountId, 'pairing_code').catch(() => {});
 
                         this._emitState(accountId, 'connected');
 
