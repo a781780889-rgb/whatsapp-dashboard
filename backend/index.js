@@ -205,7 +205,12 @@ async function bootstrap() {
         WhatsAppManager.setIO(io);
 
         // 4. Init active WhatsApp sessions (using PostgreSQL session storage)
-        const active = await SystemDB.all(`SELECT id FROM accounts WHERE status != 'disconnected'`);
+        // ✅ FIX: استعادة فقط الحسابات المتصلة فعلاً، وإعادة تعيين الحالات العالقة
+        await SystemDB.run(
+            `UPDATE accounts SET status = 'disconnected', updated_at = NOW()
+             WHERE status NOT IN ('connected', 'disconnected')`
+        ).catch(() => {});
+        const active = await SystemDB.all(`SELECT id FROM accounts WHERE status = 'connected'`);
         for (const acc of active) {
             await DatabaseManager.getAccountDB(acc.id);
             await WhatsAppManager.initSession(acc.id);
@@ -213,8 +218,7 @@ async function bootstrap() {
 
         // 4b. Run schema migrations on all active accounts
         try {
-            const DatabaseMigrationRunner = require('./src/database/DatabaseMigrationRunner');
-            const migrationRunner = new DatabaseMigrationRunner();
+            const migrationRunner = require('./src/database/DatabaseMigrationRunner');
             for (const acc of active) {
                 const accountDB = await DatabaseManager.getAccountDB(acc.id);
                 await migrationRunner.run(acc.id, accountDB);
