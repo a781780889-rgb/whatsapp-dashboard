@@ -50,6 +50,7 @@ class WhatsAppManager {
         this.initPromises      = new Map(); // accountId → Promise
         this.qrSentAt          = new Map(); // accountId → timestamp
         this.lastQrCode        = new Map(); // accountId → { qr, ts }
+        this.lastPairingCode   = new Map(); // accountId → { code, ts }
         this.restartAttempts   = new Map(); // accountId → number
         this.connStates        = new Map(); // accountId → state string
         this.pairingTimers     = new Map(); // accountId → timeout handle
@@ -95,6 +96,24 @@ class WhatsAppManager {
         const cached = this.lastQrCode.get(accountId);
         const qr     = cached && (Date.now() - cached.ts < QR_CACHE_TTL_MS) ? cached.qr : null;
         return { state, qr, ts: cached?.ts || null };
+    }
+
+    // ── Get pending pairing code (for late-joining clients) ──────────────────
+    getPendingPairingCode(accountId) {
+        const cached = this.lastPairingCode.get(accountId);
+        if (!cached) return null;
+        if (Date.now() - cached.ts > 60_000) { this.lastPairingCode.delete(accountId); return null; }
+        return cached.code;
+    }
+
+    // ── Full state snapshot for any late-joining socket ──────────────────────
+    getStateSummary(accountId) {
+        const state       = this.getConnectionState(accountId);
+        const qrData      = this.lastQrCode.get(accountId);
+        const pairingData = this.lastPairingCode.get(accountId);
+        const qr   = qrData      && (Date.now() - qrData.ts      < QR_CACHE_TTL_MS) ? qrData.qr      : null;
+        const code = pairingData && (Date.now() - pairingData.ts < 60_000)           ? pairingData.code : null;
+        return { state, qr, code };
     }
 
     // ── PostgreSQL Auth State ─────────────────────────────────────────────────
@@ -398,6 +417,8 @@ class WhatsAppManager {
                         } catch {}
 
                         if (this.io) {
+                            // ✅ FIX: emit to BOTH room (for modal socket) AND global (for dashboard)
+                            this.io.to(`account_${accountId}`).emit('account_status', { accountId, status: 'connected' });
                             this.io.emit('account_status', { accountId, status: 'connected' });
                             this.io.emit('notification', {
                                 type: 'success',
@@ -543,6 +564,9 @@ class WhatsAppManager {
                             const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
 
                             console.log(`[Account ${accountId}][Pairing] ✅ Pairing Code: ${formatted}`);
+
+                            // ✅ FIX: Cache pairing code for late-joining clients (race condition fix)
+                            this.lastPairingCode.set(accountId, { code: formatted, ts: Date.now() });
 
                             this._emitState(accountId, 'pairing_ready', { code: formatted });
 
