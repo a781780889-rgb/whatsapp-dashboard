@@ -211,6 +211,19 @@ async function bootstrap() {
             await WhatsAppManager.initSession(acc.id);
         }
 
+        // 4b. Run schema migrations on all active accounts
+        try {
+            const DatabaseMigrationRunner = require('./src/database/DatabaseMigrationRunner');
+            const migrationRunner = new DatabaseMigrationRunner();
+            for (const acc of active) {
+                const accountDB = await DatabaseManager.getAccountDB(acc.id);
+                await migrationRunner.run(acc.id, accountDB);
+            }
+            logger.info(`[Migration] Migrations applied to ${active.length} account(s).`);
+        } catch (migErr) {
+            logger.error({ err: migErr }, '[Migration] Migration runner failed — continuing bootstrap.');
+        }
+
         // 5. Start BullMQ Scheduler (replaces Custom Polling Loop)
         await JobScheduler.start();
 
