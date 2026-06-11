@@ -57,6 +57,7 @@ router.get   ('/admin/subscriptions/:id/renewals',  auth, role('admin'), SubCont
 // ══════════════════════════════════════════════════════
 const LicenseController = require('./controllers/LicenseController');
 router.get('/admin/licenses',              auth, role('admin'), LicenseController.list.bind(LicenseController));
+router.get('/admin/licenses/:id',          auth, role('admin'), LicenseController.getOne.bind(LicenseController));
 router.post('/admin/licenses',             auth, role('admin'), LicenseController.issue.bind(LicenseController));
 router.patch('/admin/licenses/:id/status', auth, role('admin'), LicenseController.setStatus.bind(LicenseController));
 router.post('/admin/licenses/:id/reissue', auth, role('admin'), LicenseController.reissue.bind(LicenseController));
