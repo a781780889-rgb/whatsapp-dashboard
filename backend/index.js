@@ -155,11 +155,30 @@ async function setupSocketIOAdapter() {
 io.on('connection', (socket) => {
     socket.on('join_account', (accountId) => {
         socket.join(`account_${accountId}`);
-        // ✅ FIX: أرسل QR المخزّن فوراً للـ client الجديد إذا كان Baileys
-        //        قد ولّده قبل أن يدخل الـ client الغرفة (Race Condition)
-        const pendingQr = WhatsAppManager.getPendingQr(accountId);
-        if (pendingQr) {
-            socket.emit('qr_code', { qr: pendingQr });
+
+        // ✅ FIX: Replay full state for late-joining clients (race condition fix)
+        const { state, qr, code } = WhatsAppManager.getStateSummary(accountId);
+
+        // Always send current state so the modal syncs immediately
+        socket.emit('connection_state', {
+            accountId,
+            state,
+            ts: Date.now(),
+        });
+
+        // Replay QR if still valid
+        if (qr) {
+            socket.emit('qr_code', { qr });
+        }
+
+        // Replay pairing code if still valid (< 60s)
+        if (code) {
+            socket.emit('pairing_code', { code });
+        }
+
+        // If already connected, send account_status too
+        if (state === 'connected') {
+            socket.emit('account_status', { accountId, status: 'connected' });
         }
     });
 });
