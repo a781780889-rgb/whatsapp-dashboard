@@ -54,6 +54,8 @@ class JobScheduler {
         });
 
         await this._runSelfHealing();
+        this._startSubscriptionExpiryScheduler();
+        this._startDailyCounterScheduler();
         console.log('[BullMQ] JobScheduler started. Queue:', QUEUE_NAME);
     }
 
@@ -61,6 +63,8 @@ class JobScheduler {
     async stop() {
         if (!this.isRunning) return;
         this.isRunning = false;
+        if (this._subscriptionExpiryTimer) clearInterval(this._subscriptionExpiryTimer);
+        if (this._dailyTimer)              clearInterval(this._dailyTimer);
         if (this.worker) {
             await this.worker.close();
             console.log('[BullMQ] Worker stopped gracefully.');
@@ -292,6 +296,73 @@ class JobScheduler {
         await accountDB.run(
             `UPDATE broadcast_schedules SET last_run_at = NOW(), executions_done = executions_done + 1 WHERE id = $1`, [scheduleId]
         );
+    }
+
+    // ── Subscription Expiry Scheduler (runs every hour) ───────────────────────
+    _startSubscriptionExpiryScheduler() {
+        this._subscriptionExpiryTimer = setInterval(async () => {
+            try {
+                const result = await DatabaseManager.systemDB.run(`
+                    UPDATE subscriptions
+                    SET status = 'expired'
+                    WHERE status = 'active'
+                      AND end_date < NOW()
+                `);
+                const count = result?.rowCount || 0;
+                if (count > 0) {
+                    console.log(`[Scheduler] Expired ${count} subscription(s).`);
+                }
+            } catch (err) {
+                console.error('[Scheduler] Subscription expiry check failed:', err.message);
+            }
+        }, 60 * 60 * 1000); // every hour
+        console.log('[Scheduler] Subscription expiry scheduler started.');
+    }
+
+    // ── Daily Message Counter Reset (runs at midnight) ────────────────────────
+    _startDailyCounterScheduler() {
+        const scheduleNextMidnight = () => {
+            const now = new Date();
+            const nextMidnight = new Date(now);
+            nextMidnight.setHours(24, 0, 0, 0);
+            const msToMidnight = nextMidnight.getTime() - now.getTime();
+
+            setTimeout(async () => {
+                try {
+                    await DatabaseManager.systemDB.resetDailyMessageCounters();
+                    console.log('[Scheduler] Daily message counters reset.');
+                } catch (err) {
+                    console.error('[Scheduler] Daily counter reset failed:', err.message);
+                }
+                // Schedule the next midnight reset
+                this._dailyTimer = setInterval(async () => {
+                    try {
+                        await DatabaseManager.systemDB.resetDailyMessageCounters();
+                        console.log('[Scheduler] Daily message counters reset.');
+                    } catch (err) {
+                        console.error('[Scheduler] Daily counter reset failed:', err.message);
+                    }
+                }, 24 * 60 * 60 * 1000);
+            }, msToMidnight);
+        };
+        scheduleNextMidnight();
+        console.log('[Scheduler] Daily counter scheduler started (runs at midnight).');
+    }
+
+    // ── Remove All BullMQ Jobs for an Account ─────────────────────────────────
+    async removeAccountJobs(accountId) {
+        if (!this.queue) return;
+        try {
+            const [waiting, delayed] = await Promise.all([
+                this.queue.getWaiting(),
+                this.queue.getDelayed(),
+            ]);
+            const toRemove = [...waiting, ...delayed].filter(j => j.data?.accountId === accountId);
+            await Promise.all(toRemove.map(j => j.remove().catch(() => {})));
+            console.log(`[BullMQ] Removed ${toRemove.length} jobs for account ${accountId}.`);
+        } catch (err) {
+            console.error('[BullMQ] removeAccountJobs error:', err.message);
+        }
     }
 
     // ── Pause Campaign ────────────────────────────────────────────────────────
