@@ -250,6 +250,27 @@ class SystemDB {
         `);
         await query(`CREATE INDEX IF NOT EXISTS idx_wbs_account ON whatsapp_business_settings(account_id)`).catch(() => {});
 
+        // ── Connection Diagnostics (نظام التشخيص) ────────────────────────────
+        await query(`
+            CREATE TABLE IF NOT EXISTS connection_diagnostics (
+                id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id       TEXT NOT NULL,
+                diagnostic_type  TEXT NOT NULL,
+                category         TEXT NOT NULL,
+                failure_stage    TEXT,
+                failure_reason   TEXT,
+                technical_details TEXT,
+                root_cause       TEXT,
+                evidence         TEXT,
+                recommended_fix  TEXT,
+                confidence_score INTEGER DEFAULT 0,
+                created_at       TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_diag_account  ON connection_diagnostics(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_diag_created  ON connection_diagnostics(created_at DESC)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_diag_category ON connection_diagnostics(category)`).catch(() => {});
+
         console.log('[SystemDB] ✅ جميع الجداول جاهزة (PostgreSQL).');
     }
 
