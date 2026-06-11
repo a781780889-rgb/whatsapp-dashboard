@@ -238,8 +238,8 @@ async function bootstrap() {
         const GroupSyncService = require('./src/api/services/GroupSyncService');
         GroupSyncService.start();
 
-        // 7. Start server
-        server.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
+        // 7. Server already listening (started before bootstrap for resilience)
+        logger.info(`[Bootstrap] All services initialized successfully.`);
 
         // 8. Graceful Shutdown
         setupGracefulShutdown();
@@ -268,5 +268,12 @@ function setupGracefulShutdown() {
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('SIGINT',  () => shutdown('SIGINT'));
 }
+
+// ── Start HTTP server FIRST (serves static files immediately) ─────────────────
+// يبدأ الخادم قبل إنشاء الـ DB/Redis حتى تظهر الصفحة دائماً
+server.listen(PORT, () => {
+    logger.info(`[Server] Listening on port ${PORT}`);
+    logger.info('[Server] Static frontend available immediately. Bootstrap starting...');
+});
 
 bootstrap();
