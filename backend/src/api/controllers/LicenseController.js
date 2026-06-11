@@ -33,6 +33,21 @@ class LicenseController {
         }
     }
 
+    /** GET /api/v1/admin/licenses/:id — جلب ترخيص بعينه */
+    async getOne(req, res) {
+        try {
+            const lic = await SystemDB.get(`
+                SELECT l.*, u.username, u.full_name
+                FROM licenses l
+                LEFT JOIN users u ON u.id = l.user_id
+                WHERE l.id = $1`, [req.params.id]);
+            if (!lic) return res.status(404).json({ success: false, error: 'الترخيص غير موجود.' });
+            res.json({ success: true, license: lic });
+        } catch (err) {
+            res.status(500).json({ success: false, error: 'خطأ في جلب الترخيص.' });
+        }
+    }
+
     /** POST /api/v1/admin/licenses — إصدار ترخيص جديد */
     async issue(req, res) {
         try {
