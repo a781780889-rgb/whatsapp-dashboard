@@ -354,6 +354,27 @@ class SystemDB {
         await query(`CREATE INDEX IF NOT EXISTS idx_anomaly_severity ON cycle_anomalies(severity)`).catch(() => {});
         await query(`CREATE INDEX IF NOT EXISTS idx_anomaly_time     ON cycle_anomalies(created_at DESC)`).catch(() => {});
 
+        // ── QR Code Analysis — Phase 7 ───────────────────────────────────────
+        // جدول تتبع كل رمز QR يُولَّد: وقت التوليد، المسح، النتيجة
+        await query(`
+            CREATE TABLE IF NOT EXISTS qr_flow_log (
+                id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                account_id           TEXT NOT NULL,
+                attempt_id           TEXT REFERENCES connection_attempts(id) ON DELETE CASCADE,
+                qr_index             INTEGER DEFAULT 1,
+                generation_delay_ms  INTEGER,
+                generated_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+                scanned_at           TIMESTAMP,
+                scan_delay_ms        INTEGER,
+                outcome              TEXT NOT NULL DEFAULT 'pending',
+                created_at           TIMESTAMP DEFAULT NOW()
+            )
+        `).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_qrlog_account  ON qr_flow_log(account_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_qrlog_attempt  ON qr_flow_log(attempt_id)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_qrlog_outcome  ON qr_flow_log(outcome)`).catch(() => {});
+        await query(`CREATE INDEX IF NOT EXISTS idx_qrlog_gen      ON qr_flow_log(generated_at DESC)`).catch(() => {});
+
         console.log('[SystemDB] ✅ جميع الجداول جاهزة (PostgreSQL).');
     }
 
