@@ -17,6 +17,7 @@ import PrivateCampaignsView from './views/PrivateCampaignsView';
 import ProtectionView      from './views/ProtectionView';
 import AIAutomationView    from './views/AIAutomationView';
 // Admin views
+import DiagnosticsDashboardView from './views/DiagnosticsDashboardView';
 import UsersView            from './views/UsersView';
 import SubscriptionsView    from './views/SubscriptionsView';
 import LicensesView         from './views/LicensesView';
@@ -218,6 +219,7 @@ function AppInner() {
           <Route path="/direct-publish" element={<DirectPublishView    accountId={selectedAccountId} accounts={accounts} />} />
           <Route path="/protection"    element={<ProtectionView />} />
           <Route path="/ai-automation" element={<AIAutomationView />} />
+          <Route path="/diagnostics"   element={<DiagnosticsDashboardView accountId={selectedAccountId} />} />
 
           {/* Admin-only routes */}
           <Route path="/admin/stats"   element={
