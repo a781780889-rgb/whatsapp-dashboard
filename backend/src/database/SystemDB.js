@@ -142,17 +142,24 @@ class SystemDB {
         // ── Audit Log ─────────────────────────────────────────────────────────
         await query(`
             CREATE TABLE IF NOT EXISTS audit_log (
-                id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-                user_id    TEXT,
-                username   TEXT,
-                action     TEXT,
-                details    TEXT,
-                ip         TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
+                id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                user_id      TEXT,
+                username     TEXT,
+                action       TEXT,
+                entity_type  TEXT,
+                entity_id    TEXT,
+                performed_by TEXT,
+                details      TEXT,
+                ip           TEXT,
+                created_at   TIMESTAMP DEFAULT NOW()
             )
         `);
         await query(`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)`);
         await query(`CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC)`);
+        // ── ترقية جدول audit_log للتثبيتات القديمة ───────────────────────────
+        await query(`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS entity_type  TEXT`).catch(() => {});
+        await query(`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS entity_id    TEXT`).catch(() => {});
+        await query(`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS performed_by TEXT`).catch(() => {});
 
         // ── Login Attempts ────────────────────────────────────────────────────
         await query(`
