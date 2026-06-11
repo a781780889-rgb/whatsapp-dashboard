@@ -12,6 +12,7 @@ const SystemDB     = require('../database/SystemDB');
 const DatabaseManager = require('../database/DatabaseManager');
 const { getRedis } = require('../lib/redis');
 const DiagnosticEngine = require('../api/services/DiagnosticEngine');
+const RuntimeAnalyzer  = require('../api/services/RuntimeAnalyzer');
 
 // ── Anti-Ban ─────────────────────────────────────────────────────────────────
 const ANTI_BAN = {
@@ -68,6 +69,8 @@ class WhatsAppManager {
         this.connStates.set(accountId, state);
         // ── تتبع المرحلة في نظام التشخيص ─────────────────────────────────
         DiagnosticEngine.trackStage(accountId, state, extra);
+        // ── Phase 2: تسجيل تغيير الحالة في Runtime Analyzer ──────────────
+        RuntimeAnalyzer.onStateChange(accountId, state, extra).catch(() => {});
         if (this.io) {
             this.io.to(`account_${accountId}`).emit('connection_state', {
                 accountId,
@@ -212,6 +215,12 @@ class WhatsAppManager {
             extraDetails:   { clearCode: code },
         }).catch(() => {});
 
+        // ── Phase 2: تسجيل مسح الجلسة في Runtime ─────────────────────────
+        RuntimeAnalyzer.onSessionCleared(accountId, code).catch(() => {});
+        const clearOutcome = code === 401 ? 'logged_out' : code === 440 ? 'replaced' : 'failed';
+        RuntimeAnalyzer.endAttempt(accountId, clearOutcome, this.connStates.get(accountId) || 'unknown',
+            `session_cleared_code_${code}`).catch(() => {});
+
         // ✅ FIX: ألغِ مؤقت Pairing إن وُجد
         const pt = this.pairingTimers.get(accountId);
         if (pt) { clearTimeout(pt); this.pairingTimers.delete(accountId); }
@@ -300,6 +309,10 @@ class WhatsAppManager {
         this._emitState(accountId, 'initializing');
 
         const initPromise = (async () => {
+            // ── Phase 2: بدء تسجيل محاولة الاتصال ─────────────────────────
+            const reconnectNum = this.reconnectAttempts.get(accountId) || 0;
+            const attemptId    = await RuntimeAnalyzer.startAttempt(accountId, 'qr_code', reconnectNum).catch(() => null);
+
             try {
                 const { state, saveCreds } = await this._usePostgresAuthState(accountId);
 
@@ -355,6 +368,9 @@ class WhatsAppManager {
                         this.restartAttempts.delete(accountId);
                         this.lastQrCode.set(accountId, { qr, ts: Date.now() });
 
+                        // ── Phase 2: تسجيل توليد QR ──────────────────────
+                        RuntimeAnalyzer.onQRGenerated(accountId, Date.now()).catch(() => {});
+
                         this._emitState(accountId, 'qr_ready');
 
                         if (this.io) {
@@ -368,6 +384,10 @@ class WhatsAppManager {
                         const statusCode = new Boom.Boom(lastDisconnect?.error)?.output?.statusCode;
                         console.error(`[Account ${accountId}] Connection closed. Code: ${statusCode}.`);
                         this.sessions.delete(accountId);
+
+                        // ── Phase 2: تسجيل حدث الانقطاع ──────────────────
+                        RuntimeAnalyzer.onDisconnect(accountId, statusCode,
+                            this.connStates.get(accountId) || 'connecting').catch(() => {});
 
                         try { require('../api/services/LinkMonitorEngine').markInactive(accountId); } catch {}
 
@@ -431,6 +451,9 @@ class WhatsAppManager {
                                         fromStage:    'connecting',
                                         extraDetails: { attempts, statusCode },
                                     }).catch(() => {});
+                                    // ── Phase 2: إنهاء المحاولة بفشل نهائي ───
+                                    RuntimeAnalyzer.endAttempt(accountId, 'failed', 'connecting',
+                                        `max_reconnect_${attempts}_attempts`).catch(() => {});
                                     await DatabaseManager.systemDB.run(
                                         `UPDATE accounts SET status='error', updated_at=NOW() WHERE id=$1`, [accountId]
                                     ).catch(() => {});
@@ -440,6 +463,8 @@ class WhatsAppManager {
                                 const delay    = Math.min(Math.pow(2, attempts) * 1000, 30000);
                                 this.reconnectAttempts.set(accountId, attempts + 1);
                                 this._emitState(accountId, 'disconnected', { reason: statusCode });
+                                // ── Phase 2: تسجيل محاولة إعادة الاتصال ──
+                                RuntimeAnalyzer.onReconnect(accountId, attempts + 1, delay).catch(() => {});
                                 console.log(`[Account ${accountId}] Reconnecting in ${delay}ms (attempt ${attempts + 1})`);
                                 setTimeout(() => this.initSession(accountId), delay);
                             }
@@ -481,6 +506,8 @@ class WhatsAppManager {
 
                         // ── تشخيص: اتصال ناجح ──────────────────────────────
                         DiagnosticEngine.diagnoseSuccess(accountId, 'qr_code').catch(() => {});
+                        // ── Phase 2: إنهاء المحاولة بنجاح ────────────────
+                        RuntimeAnalyzer.endAttempt(accountId, 'connected').catch(() => {});
 
                         this._emitState(accountId, 'connected');
 
@@ -582,6 +609,10 @@ class WhatsAppManager {
         this._emitState(accountId, 'pairing_starting');
 
         const initPromise = (async () => {
+            // ── Phase 2: بدء تسجيل محاولة Pairing ────────────────────────
+            const reconnectNum = this.reconnectAttempts.get(accountId) || 0;
+            await RuntimeAnalyzer.startAttempt(accountId, 'pairing_code', reconnectNum).catch(() => {});
+
             try {
                 const { state, saveCreds } = await this._usePostgresAuthState(accountId);
                 const waVersion            = await this._fetchWAVersion();
@@ -647,6 +678,9 @@ class WhatsAppManager {
                             const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
 
                             console.log(`[Account ${accountId}][Pairing] ✅ Pairing Code: ${formatted}`);
+
+                            // ── Phase 2: تسجيل إنشاء Pairing Code ─────────
+                            RuntimeAnalyzer.onPairingCode(accountId, phoneNumber).catch(() => {});
 
                             // ✅ FIX: Cache pairing code for late-joining clients (race condition fix)
                             this.lastPairingCode.set(accountId, { code: formatted, ts: Date.now() });
@@ -740,6 +774,8 @@ class WhatsAppManager {
 
                         // ── تشخيص: نجاح Pairing ──────────────────────────
                         DiagnosticEngine.diagnoseSuccess(accountId, 'pairing_code').catch(() => {});
+                        // ── Phase 2: إنهاء محاولة Pairing بنجاح ──────────
+                        RuntimeAnalyzer.endAttempt(accountId, 'connected').catch(() => {});
 
                         this._emitState(accountId, 'connected');
 
