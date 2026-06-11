@@ -79,6 +79,7 @@ router.get('/accounts/:id',                auth, subCheck, AccountController.get
 router.get('/accounts/:id/stats',          auth, subCheck, AccountController.getAccountStats.bind(AccountController));
 router.get('/accounts/:id/logs',           auth, subCheck, AccountController.getLogs.bind(AccountController));
 router.post('/accounts/:id/connect',       auth, subCheck, AccountController.connectAccount.bind(AccountController));
+router.get('/accounts/:id/qr-status',      auth, subCheck, AccountController.getQrStatus.bind(AccountController));
 router.post('/accounts/:id/connect-pairing', auth, subCheck, AccountController.connectWithPairing.bind(AccountController));
 router.post('/accounts/:id/reset',         auth, subCheck, AccountController.resetSession.bind(AccountController));
 router.post('/accounts/:id/disconnect',    auth, subCheck, AccountController.disconnectAccount.bind(AccountController));
