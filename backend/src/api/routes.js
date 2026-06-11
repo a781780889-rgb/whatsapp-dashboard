@@ -351,6 +351,18 @@ router.get ('/admin/baileys/report',                  auth, role('admin'),  Bail
 router.get ('/admin/baileys/stats',                   auth, role('admin'),  BaileysAnalyzerController.getSystemStats.bind(BaileysAnalyzerController));
 router.get ('/admin/baileys/problematic',             auth, role('admin'),  BaileysAnalyzerController.getProblematicAccounts.bind(BaileysAnalyzerController));
 
+// ── المرحلة العاشرة — Infrastructure Analysis ─────────────────────────────
+const InfrastructureController = require('./controllers/InfrastructureController');
+
+router.get ('/admin/infra/report',           auth, role('admin'),  InfrastructureController.getSystemReport.bind(InfrastructureController));
+router.get ('/admin/infra/stats',            auth, role('admin'),  InfrastructureController.getQuickStats.bind(InfrastructureController));
+router.get ('/admin/infra/postgres',         auth, role('admin'),  InfrastructureController.getPostgresHealth.bind(InfrastructureController));
+router.get ('/admin/infra/postgres/tables',  auth, role('admin'),  InfrastructureController.getPostgresTableStats.bind(InfrastructureController));
+router.get ('/admin/infra/redis',            auth, role('admin'),  InfrastructureController.getRedisHealth.bind(InfrastructureController));
+router.get ('/admin/infra/redis/keys',       auth, role('admin'),  InfrastructureController.getRedisKeyDistribution.bind(InfrastructureController));
+router.get ('/admin/infra/bullmq',           auth, role('admin'),  InfrastructureController.getBullMQStats.bind(InfrastructureController));
+router.get ('/admin/infra/process',          auth, role('admin'),  InfrastructureController.getProcessInfo.bind(InfrastructureController));
+
 module.exports = router;
 
 
