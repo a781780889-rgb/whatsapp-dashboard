@@ -40,6 +40,17 @@ class DatabaseManager {
         }
     }
 
+    /**
+     * Drop the PostgreSQL schema for an account and remove it from cache.
+     * Called during full account deletion.
+     */
+    async dropAccountSchema(accountId) {
+        const db = this.activeAccounts.get(accountId) || new AccountDB(accountId);
+        await db.dropSchema();
+        this.activeAccounts.delete(accountId);
+        console.log(`[DatabaseManager] Schema for account [${accountId}] dropped and cache cleared.`);
+    }
+
     async closeAll() {
         for (const [accountId, db] of this.activeAccounts.entries()) {
             await db.close();
