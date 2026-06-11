@@ -267,6 +267,16 @@ router.get ('/accounts/:id/runtime/errors',                             auth, su
 router.get ('/accounts/:id/runtime/stats',                              auth, subCheck, RuntimeController.getConnectionStats.bind(RuntimeController));
 router.get ('/admin/runtime/stats',                                     auth, role('admin'), RuntimeController.getSystemStats.bind(RuntimeController));
 
+// ── Phase 3: Connection Cycle Analysis ───────────────────────────────────────
+const CycleController = require('./controllers/ConnectionCycleController');
+router.get ('/accounts/:id/cycle/latest',                               auth, subCheck, CycleController.getLatestCycle.bind(CycleController));
+router.get ('/accounts/:id/cycle/history',                              auth, subCheck, CycleController.getRecentCycles.bind(CycleController));
+router.get ('/accounts/:id/cycle/stats',                                auth, subCheck, CycleController.getCycleStats.bind(CycleController));
+router.get ('/accounts/:id/cycle/anomalies',                            auth, subCheck, CycleController.getAnomalies.bind(CycleController));
+router.get ('/accounts/:id/cycle/attempts/:attemptId',                  auth, subCheck, CycleController.getCycleByAttempt.bind(CycleController));
+router.get ('/accounts/:id/cycle/attempts/:attemptId/report',           auth, subCheck, CycleController.getCycleReport.bind(CycleController));
+router.get ('/admin/cycle/stats',                                       auth, role('admin'), CycleController.getSystemStats.bind(CycleController));
+
 module.exports = router;
 
 
