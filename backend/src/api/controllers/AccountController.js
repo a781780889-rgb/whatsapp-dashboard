@@ -16,8 +16,8 @@ class AccountController {
             }
             const id = crypto.randomUUID();
             await DatabaseManager.systemDB.run(
-                `INSERT INTO accounts (id, user_id, phone_number, name, role, task_status)
-                 VALUES ($1, $2, $3, $4, 'stopped', 'idle')`,
+                `INSERT INTO accounts (id, user_id, phone_number, name, role, task_status, warmup_phase, warmup_started_at)
+                 VALUES ($1, $2, $3, $4, 'stopped', 'idle', TRUE, NOW())`,
                 [id, user_id || null, phone_number || null, name.trim()]
             );
             await DatabaseManager.getAccountDB(id);
@@ -301,12 +301,38 @@ class AccountController {
     async deleteAccount(req, res) {
         try {
             const { id } = req.params;
-            const session = WhatsAppManager.getSession(id);
-            if (session) { try { await session.logout(); } catch (_) {} }
-            await DatabaseManager.closeAccountDB(id);
+            const JobScheduler = require('../../scheduler/JobScheduler');
+
+            // 1. Full WhatsApp cleanup (logout, clear Maps, Redis rate keys)
+            await WhatsAppManager.fullDeleteAccount(id);
+
+            // 2. Remove all pending BullMQ jobs for this account
+            await JobScheduler.removeAccountJobs(id);
+
+            // 3. Drop the account's PostgreSQL schema (CASCADE deletes all tenant data)
+            await DatabaseManager.dropAccountSchema(id);
+
+            // 4. Delete session data from system tables
+            if (typeof DatabaseManager.systemDB.deleteAllSessionData === 'function') {
+                await DatabaseManager.systemDB.deleteAllSessionData(id);
+            }
+
+            // 5. Delete account row from system DB
             await DatabaseManager.systemDB.run(`DELETE FROM accounts WHERE id = $1`, [id]);
+
+            // 6. Audit log
+            try {
+                await DatabaseManager.systemDB.run(
+                    `INSERT INTO audit_log (id, action, entity_type, entity_id, performed_by, details)
+                     VALUES ($1, 'delete_account', 'account', $2, $3, $4)`,
+                    [require('crypto').randomUUID(), id, req.user?.id || 'system',
+                     JSON.stringify({ deleted_at: new Date().toISOString() })]
+                );
+            } catch (_) { /* audit log failure is non-fatal */ }
+
             return res.json({ success: true, message: 'Account deleted completely.' });
         } catch (error) {
+            console.error('Delete Account Error:', error);
             return res.status(500).json({ success: false, error: 'Internal Server Error' });
         }
     }
