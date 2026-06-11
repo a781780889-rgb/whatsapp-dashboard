@@ -322,6 +322,35 @@ router.get ('/admin/qr/report',          auth, role('admin'),  QRAnalyzerControl
 router.get ('/admin/qr/stats',           auth, role('admin'),  QRAnalyzerController.getSystemStats.bind(QRAnalyzerController));
 router.get ('/admin/qr/slow',            auth, role('admin'),  QRAnalyzerController.getSlowAccounts.bind(QRAnalyzerController));
 
+// ── المرحلة الثامنة — Pairing Code Analysis ──────────────────────────────
+const PairingCodeAnalyzerController = require('./controllers/PairingCodeAnalyzerController');
+
+// Per-Account
+router.get ('/accounts/:id/pairing/report',   auth, subCheck,      PairingCodeAnalyzerController.getAccountReport.bind(PairingCodeAnalyzerController));
+router.get ('/accounts/:id/pairing/stats',    auth, subCheck,      PairingCodeAnalyzerController.getAccountStats.bind(PairingCodeAnalyzerController));
+router.get ('/accounts/:id/pairing/history',  auth, subCheck,      PairingCodeAnalyzerController.getAccountHistory.bind(PairingCodeAnalyzerController));
+router.get ('/accounts/:id/pairing/latency',  auth, subCheck,      PairingCodeAnalyzerController.getLatency.bind(PairingCodeAnalyzerController));
+
+// Admin
+router.get ('/admin/pairing/report',          auth, role('admin'),  PairingCodeAnalyzerController.getSystemReport.bind(PairingCodeAnalyzerController));
+router.get ('/admin/pairing/stats',           auth, role('admin'),  PairingCodeAnalyzerController.getSystemStats.bind(PairingCodeAnalyzerController));
+router.get ('/admin/pairing/problematic',     auth, role('admin'),  PairingCodeAnalyzerController.getProblematicAccounts.bind(PairingCodeAnalyzerController));
+
+// ── المرحلة التاسعة — Baileys Deep Analysis ──────────────────────────────
+const BaileysAnalyzerController = require('./controllers/BaileysAnalyzerController');
+
+// Per-Account
+router.get ('/accounts/:id/baileys/report',           auth, subCheck,      BaileysAnalyzerController.getAccountReport.bind(BaileysAnalyzerController));
+router.get ('/accounts/:id/baileys/stats',            auth, subCheck,      BaileysAnalyzerController.getAccountStats.bind(BaileysAnalyzerController));
+router.get ('/accounts/:id/baileys/history',          auth, subCheck,      BaileysAnalyzerController.getAccountHistory.bind(BaileysAnalyzerController));
+router.get ('/accounts/:id/baileys/events',           auth, subCheck,      BaileysAnalyzerController.getEventBreakdown.bind(BaileysAnalyzerController));
+router.get ('/accounts/:id/baileys/messages/errors',  auth, subCheck,      BaileysAnalyzerController.getMessageErrors.bind(BaileysAnalyzerController));
+
+// Admin
+router.get ('/admin/baileys/report',                  auth, role('admin'),  BaileysAnalyzerController.getSystemReport.bind(BaileysAnalyzerController));
+router.get ('/admin/baileys/stats',                   auth, role('admin'),  BaileysAnalyzerController.getSystemStats.bind(BaileysAnalyzerController));
+router.get ('/admin/baileys/problematic',             auth, role('admin'),  BaileysAnalyzerController.getProblematicAccounts.bind(BaileysAnalyzerController));
+
 module.exports = router;
 
 
