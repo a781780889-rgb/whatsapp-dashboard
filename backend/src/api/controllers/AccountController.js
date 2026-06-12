@@ -207,8 +207,9 @@ class AccountController {
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
 
+            // ✅ FIX: تحديث الحالة قبل بدء الجلسة
             await DatabaseManager.systemDB.run(
-                `UPDATE accounts SET connection_type = 'qr_code' WHERE id = $1`, [id]
+                `UPDATE accounts SET connection_type = 'qr_code', status = 'initializing' WHERE id = $1`, [id]
             );
 
             WhatsAppManager.initSession(id).catch(err =>
@@ -252,8 +253,9 @@ class AccountController {
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
 
+            // ✅ FIX: تحديث الحالة قبل بدء الجلسة
             await DatabaseManager.systemDB.run(
-                `UPDATE accounts SET connection_type = 'pairing_code', phone_number = $1 WHERE id = $2`,
+                `UPDATE accounts SET connection_type = 'pairing_code', phone_number = $1, status = 'initializing' WHERE id = $2`,
                 [cleanPhone, id]
             );
 
