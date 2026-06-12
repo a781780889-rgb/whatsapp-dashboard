@@ -325,11 +325,24 @@ class WhatsAppManager {
             // ── Phase 3: ربط المحاولة بمحلل دورة الاتصال ────────────────────
             CycleAnalyzer.bindAttempt(accountId, attemptId, 'qr_code');
 
-            try {
-                const { state, saveCreds } = await this._usePostgresAuthState(accountId);
+                    try {
+            const { state, saveCreds } = await this._usePostgresAuthState(accountId);
 
-                const waVersion = await this._fetchWAVersion();
-                console.log(`[Account ${accountId}] WA version: ${waVersion.join('.')}`);
+            // ✅ إصلاح جوهري: إذا لم يكن الحساب مسجلاً (registered: false)
+            // ونحن في دالة initSession العادية، فهذا يعني أننا فقدنا وضع Pairing
+            // يجب إعادة التوجيه لـ initPairingSession إذا كان هناك رقم هاتف مخزن
+            if (!state.creds?.registered) {
+                const account = await DatabaseManager.systemDB.queryOne(
+                    `SELECT phone_number, connection_type FROM accounts WHERE id = $1`, [accountId]
+                );
+                if (account?.connection_type === 'pairing_code' && account?.phone_number) {
+                    console.log(`[Account ${accountId}] Session not registered but in pairing mode — redirecting to initPairingSession.`);
+                    return this.initPairingSession(accountId, account.phone_number);
+                }
+            }
+
+            const waVersion = await this._fetchWAVersion();
+            console.log(`[Account ${accountId}] WA version: ${waVersion.join('.')}`);
 
                 // مؤقت توليد QR (30 ثانية)
                 const qrGenTimer = setTimeout(() => {
@@ -780,14 +793,21 @@ class WhatsAppManager {
                             return;
                         }
 
-                        // ✅ تحسين: إذا كان الـ pairing code قد أُرسل → المستخدم قد يكون أدخله للتو
-                        // كود 515 هنا يعني غالباً نجاح الإقران وبدء الجلسة
-                        if (pairingRequested && statusCode === DisconnectReason.restartRequired) {
-                            this._emitState(accountId, 'connecting');
-                            console.log(`[Account ${accountId}][Pairing] 515 received after pairing — likely success. Reconnecting to open session...`);
+                        // ✅ تحسين جوهري: معالجة كود 515 بعد طلب Pairing
+                        // كود 515 (Restart Required) يحدث غالباً بعد إدخال الكود في الجوال بنجاح
+                        if (statusCode === DisconnectReason.restartRequired) {
                             await saveCreds().catch(() => {});
-                            // انتظر قليلاً لضمان استقرار الخادم
-                            setTimeout(() => this.initSession(accountId), 5000);
+                            
+                            // إذا كان الحساب مسجلاً (registered: true) → ننتقل لـ initSession العادية لفتح الجلسة
+                            if (state.creds?.registered) {
+                                console.log(`[Account ${accountId}][Pairing] 515 received & registered — transitioning to full session.`);
+                                this._emitState(accountId, 'connecting');
+                                setTimeout(() => this.initSession(accountId), 3000);
+                            } else {
+                                // إذا لم يُسجل بعد → نعيد محاولة Pairing بنفس الرقم لضمان بقاء الكود صالحاً
+                                console.log(`[Account ${accountId}][Pairing] 515 received but NOT registered — retrying pairing to keep code valid.`);
+                                setTimeout(() => this.initPairingSession(accountId, phoneNumber), 3000);
+                            }
                             return;
                         }
 
