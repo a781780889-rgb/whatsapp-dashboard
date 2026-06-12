@@ -271,10 +271,18 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         } catch {}
       });
 
-      socket.on('connect_error', () => {
+      // ✅ FIX: معالجة أفضل لأخطاء الاتصال
+      socket.on('connect_error', (err: any) => {
         if (isMounted.current && connState !== 'connected') {
-          setError('خطأ في الاتصال بالخادم. تحقق من الاتصال.');
+          setError(`خطأ في الاتصال: ${err?.message || 'تحقق من الاتصال'}`);
           setConn('error');
+        }
+      });
+
+      socket.on('disconnect', () => {
+        if (isMounted.current && connState !== 'connected') {
+          setError('تم قطع الاتصال. حاول مرة أخرى.');
+          setConn('disconnected');
         }
       });
 
@@ -292,9 +300,10 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         setExpired(false);
         setError('');
         if (expireTimer.current) clearTimeout(expireTimer.current);
+        // ✅ FIX: استخدام 55 ثانية بدلاً من 58 للتوافق مع Backend (QR_CACHE_TTL_MS)
         expireTimer.current = setTimeout(() => {
           if (isMounted.current) setExpired(true);
-        }, 58_000);
+        }, 55_000);
       });
 
       socket.on('session_cleared', () => {
@@ -526,9 +535,11 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         if (!isMounted.current) return;
         setConn(s as ConnState);
         if (e) setError(e);
-        if (code && s === 'pairing_ready') {
+        // ✅ FIX: استقبال الرمز من حدث connection_state
+        if (s === 'pairing_ready' && code) {
           setPairingCode(code);
           startCountdown(120); // 2 دقيقة لإدخال الكود
+          showToast({ title: '✅ تم إنشاء رمز الإقران', description: 'أدخله في واتساب خلال دقيقتين', type: 'success' });
         }
       });
 
