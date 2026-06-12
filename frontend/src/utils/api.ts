@@ -17,8 +17,27 @@ export function clearTokens() {
   localStorage.removeItem(USER_KEY);
 }
 
-/** Attempt to refresh the access token using the stored refresh token.
- *  Returns new accessToken on success, null on failure. */
+/** Read CSRF token from cookie (set by backend on GET requests) */
+function getCsrfToken(): string | null {
+  const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+/** Fetch CSRF token from server if not in cookie */
+async function ensureCsrfToken(): Promise<string | null> {
+  let token = getCsrfToken();
+  if (token) return token;
+
+  try {
+    const res = await fetch(`${API}/auth/csrf-token`, { method: 'GET', credentials: 'include' });
+    const data = await res.json();
+    if (data.csrfToken) return data.csrfToken;
+  } catch { /* ignore */ }
+
+  return getCsrfToken();
+}
+
+/** Attempt to refresh the access token using the stored refresh token. */
 async function tryRefresh(): Promise<string | null> {
   const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
   if (!refreshToken) return null;
@@ -28,26 +47,28 @@ async function tryRefresh(): Promise<string | null> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refreshToken }),
+      credentials: 'include',
     });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.success && data.accessToken) {
-      // Rotate both tokens (server issues a new refresh token too)
       saveTokens(data.accessToken, data.refreshToken || refreshToken);
       return data.accessToken;
     }
   } catch {
-    // network error — can't refresh
+    // network error
   }
   return null;
 }
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 /**
- * Authenticated fetch — automatically attaches JWT Bearer token.
- * On 401, attempts a silent token refresh once before redirecting to login.
+ * Authenticated fetch — attaches JWT Bearer token + CSRF token automatically.
  */
 export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const token = localStorage.getItem(TOKEN_KEY);
+  const method = (options.method || 'GET').toUpperCase();
 
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string> || {}),
@@ -61,17 +82,23 @@ export async function authFetch(url: string, options: RequestInit = {}): Promise
     headers['Content-Type'] = 'application/json';
   }
 
-  let response = await fetch(url, { ...options, headers });
+  // أضف CSRF token للطلبات التي تُعدِّل البيانات
+  if (!SAFE_METHODS.has(method)) {
+    const csrfToken = await ensureCsrfToken();
+    if (csrfToken) {
+      headers['x-csrf-token'] = csrfToken;
+    }
+  }
+
+  let response = await fetch(url, { ...options, headers, credentials: 'include' });
 
   // ── Auto-refresh on 401 ────────────────────────────────────────────────────
   if (response.status === 401) {
     const newToken = await tryRefresh();
     if (newToken) {
-      // Retry the original request with the fresh token
       headers['Authorization'] = `Bearer ${newToken}`;
-      response = await fetch(url, { ...options, headers });
+      response = await fetch(url, { ...options, headers, credentials: 'include' });
     }
-    // Still 401 after refresh attempt → full logout
     if (response.status === 401) {
       clearTokens();
       window.location.href = '/';
