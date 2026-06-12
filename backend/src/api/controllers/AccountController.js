@@ -343,11 +343,13 @@ class AccountController {
     async connectWithPairing(req, res) {
         try {
             const { id } = req.params;
-            const { phone } = req.body || {};
-            if (!phone) return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
+            // الفرونت يُرسل phone_number أو phone - نقبل كلاهما
+            const { phone, phone_number } = req.body || {};
+            const rawPhone = phone || phone_number;
+            if (!rawPhone) return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
 
-            const result = await WhatsAppManager.initPairingSession(id, phone);
-            return res.json({ success: true, ...result });
+            await WhatsAppManager.initPairingSession(id, rawPhone);
+            return res.json({ success: true, message: 'جارٍ إنشاء رمز الإقران...' });
         } catch (error) {
             return res.status(500).json({ success: false, error: error.message });
         }
