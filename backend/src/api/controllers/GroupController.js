@@ -965,6 +965,82 @@ class GroupController {
             res.status(500).json({ success: false, error: err.message });
         }
     }
+
+    // ── GET /accounts/:accountId/groups/:groupId/members ─────────────────────
+    async getGroupMembers(req, res) {
+        try {
+            const { accountId, groupId } = req.params;
+            const page  = parseInt(req.query.page)  || 1;
+            const limit = parseInt(req.query.limit) || 50;
+            const offset = (page - 1) * limit;
+
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            const members = await accountDB.all(
+                `SELECT * FROM group_members WHERE group_id = ? ORDER BY name ASC LIMIT ? OFFSET ?`,
+                [groupId, limit, offset]
+            ).catch(() => []);
+            const total = await accountDB.get(
+                `SELECT COUNT(*) as count FROM group_members WHERE group_id = ?`, [groupId]
+            ).catch(() => ({ count: 0 }));
+
+            return res.json({ success: true, members, total: total?.count || 0, page, limit });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── POST /accounts/:accountId/groups/members/export-multi ────────────────
+    async exportMultipleGroupsMembers(req, res) {
+        try {
+            const { accountId } = req.params;
+            const { groupIds } = req.body || {};
+            if (!groupIds || !Array.isArray(groupIds)) {
+                return res.status(400).json({ success: false, error: 'groupIds مطلوب' });
+            }
+
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            const rows = [];
+            for (const gId of groupIds) {
+                const members = await accountDB.all(
+                    `SELECT gm.*, g.name as group_name FROM group_members gm
+                     LEFT JOIN groups g ON g.id = gm.group_id
+                     WHERE gm.group_id = ?`, [gId]
+                ).catch(() => []);
+                rows.push(...members);
+            }
+
+            const header = 'Group,Name,Phone,Admin';
+            const csvRows = [header, ...rows.map(m =>
+                `"${m.group_name||''}","${m.name||''}","${m.phone||m.id||''}","${m.is_admin?'Yes':'No'}"`
+            )];
+
+            res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+            res.setHeader('Content-Disposition', 'attachment; filename="members_export.csv"');
+            return res.send('\uFEFF' + csvRows.join('\n'));
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    }
+
+    // ── GET /accounts/:accountId/groups/saved-members ────────────────────────
+    async getSavedMembers(req, res) {
+        try {
+            const { accountId } = req.params;
+            const page  = parseInt(req.query.page)  || 1;
+            const limit = parseInt(req.query.limit) || 50;
+            const offset = (page - 1) * limit;
+
+            const accountDB = await DatabaseManager.getAccountDB(accountId);
+            const members = await accountDB.all(
+                `SELECT * FROM group_members ORDER BY name ASC LIMIT ? OFFSET ?`,
+                [limit, offset]
+            ).catch(() => []);
+
+            return res.json({ success: true, members, page, limit });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    }
 }
 
 module.exports = new GroupController();
