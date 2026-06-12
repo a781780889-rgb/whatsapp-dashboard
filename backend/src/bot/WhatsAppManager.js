@@ -363,7 +363,8 @@ class WhatsAppManager {
                     keepAliveIntervalMs: 25_000,
                     connectTimeoutMs:    60_000,
                     qrTimeout:           60_000,
-                    browser:             Browsers.ubuntu('Chrome'),
+                    // ✅ تحسين: استخدام تعريف متصفح ثابت لتجنب الـ Disconnect المفاجئ (كود 515/401)
+                    browser:             ['Ubuntu', 'Chrome', '110.0.5481.177'],
                     syncFullHistory:     false,
                     generateHighQualityLinkPreviews: false,
                     markOnlineOnConnect: false,
@@ -415,7 +416,8 @@ class WhatsAppManager {
                         try { require('../api/services/LinkMonitorEngine').markInactive(accountId); } catch {}
 
                         // جلسة فاسدة
-                        if (CLEAR_SESSION_CODES.has(statusCode) || statusCode === 500) {
+                        // ✅ تحسين: لا تمسح الجلسة عند كود 500 إلا إذا تكرر، فقد يكون خطأ مؤقت في خادم واتساب
+                        if (CLEAR_SESSION_CODES.has(statusCode)) {
                             await this._clearSession(accountId, statusCode);
                             return;
                         }
@@ -427,7 +429,8 @@ class WhatsAppManager {
 
                             const qrTime             = this.qrSentAt.get(accountId) || 0;
                             const timeSinceQR        = Date.now() - qrTime;
-                            const qrWasJustScanned   = timeSinceQR < 90_000;
+                            // ✅ تحسين: اعتبار الـ QR قد مُسح إذا كان الوقت أقل من 2 دقيقة (120 ثانية)
+                            const qrWasJustScanned   = timeSinceQR < 120_000;
 
                             if (retries515 > MAX_515_RETRIES && !qrWasJustScanned) {
                                 console.warn(`[Account ${accountId}] 515 repeated ${retries515}x — clearing.`);
@@ -436,17 +439,20 @@ class WhatsAppManager {
                                 return;
                             }
 
-                            const delay515 = qrWasJustScanned ? 3000 : Math.min(retries515 * 5000, 20000);
+                            // ✅ تحسين: زيادة التأخير عند المسح لضمان استقرار الجلسة
+                            const delay515 = qrWasJustScanned ? 5000 : Math.min(retries515 * 5000, 20000);
                             console.log(`[Account ${accountId}] Restart required (515) — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms…`);
 
                             if (qrWasJustScanned) {
                                 this._emitState(accountId, 'connecting');
                                 console.log(`[Account ${accountId}] QR was just scanned — saving creds and reconnecting.`);
-                                // ── Phase 7: تسجيل مسح QR ─────────────────
                                 QRAnalyzer.onQRScanned(accountId).catch(() => {});
+                                // ✅ تحسين: التأكد من حفظ البيانات قبل إعادة الاتصال
                                 await saveCreds().catch(() => {});
+                                await new Promise(r => setTimeout(r, 1000));
                             } else if (!state.creds?.registered) {
-                                await SystemDB.deleteAllSessionData(accountId).catch(() => {});
+                                // ✅ تحسين: لا تمسح البيانات فوراً، حاول الحفظ أولاً
+                                await saveCreds().catch(() => {});
                             } else {
                                 await saveCreds().catch(() => {});
                             }
@@ -663,7 +669,8 @@ class WhatsAppManager {
                     printQRInTerminal:  false,
                     keepAliveIntervalMs: 25_000,
                     connectTimeoutMs:    60_000,
-                    browser:             Browsers.ubuntu('Chrome'),
+                    // ✅ تحسين: استخدام تعريف متصفح ثابت لتجنب الـ Disconnect المفاجئ (كود 515/401)
+                    browser:             ['Ubuntu', 'Chrome', '110.0.5481.177'],
                     syncFullHistory:     false,
                     markOnlineOnConnect: false,
                     retryRequestDelayMs: 500,
@@ -773,13 +780,14 @@ class WhatsAppManager {
                             return;
                         }
 
-                        // إذا كان الـ pairing code قد أُرسل → المستخدم لم يدخله بعد
-                        // أعد الاتصال للانتظار
+                        // ✅ تحسين: إذا كان الـ pairing code قد أُرسل → المستخدم قد يكون أدخله للتو
+                        // كود 515 هنا يعني غالباً نجاح الإقران وبدء الجلسة
                         if (pairingRequested && statusCode === DisconnectReason.restartRequired) {
                             this._emitState(accountId, 'connecting');
-                            console.log(`[Account ${accountId}][Pairing] Reconnecting to complete pairing...`);
+                            console.log(`[Account ${accountId}][Pairing] 515 received after pairing — likely success. Reconnecting to open session...`);
                             await saveCreds().catch(() => {});
-                            setTimeout(() => this.initSession(accountId), 3000);
+                            // انتظر قليلاً لضمان استقرار الخادم
+                            setTimeout(() => this.initSession(accountId), 5000);
                             return;
                         }
 
