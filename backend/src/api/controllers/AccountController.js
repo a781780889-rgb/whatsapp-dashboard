@@ -311,6 +311,87 @@ class AccountController {
             return res.status(500).json({ success: false, error: 'Internal Server Error' });
         }
     }
+
+    // ── POST /accounts/:id/connect ────────────────────────────────────────────
+    async connectAccount(req, res) {
+        try {
+            const { id } = req.params;
+            const account = await DatabaseManager.systemDB.get(
+                `SELECT * FROM accounts WHERE id = $1`, [id]
+            );
+            if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+            await WhatsAppManager.initSession(id);
+            return res.json({ success: true, message: 'جارٍ الاتصال...' });
+        } catch (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── GET /accounts/:id/qr-status ──────────────────────────────────────────
+    async getQrStatus(req, res) {
+        try {
+            const { id } = req.params;
+            const status = WhatsAppManager.getQrStatus(id);
+            return res.json({ success: true, ...status });
+        } catch (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── POST /accounts/:id/connect-pairing ───────────────────────────────────
+    async connectWithPairing(req, res) {
+        try {
+            const { id } = req.params;
+            const { phone } = req.body || {};
+            if (!phone) return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
+
+            const result = await WhatsAppManager.initPairingSession(id, phone);
+            return res.json({ success: true, ...result });
+        } catch (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── POST /accounts/:id/reset ─────────────────────────────────────────────
+    async resetSession(req, res) {
+        try {
+            const { id } = req.params;
+            await WhatsAppManager.forceResetSession(id);
+            return res.json({ success: true, message: 'تمت إعادة تعيين الجلسة' });
+        } catch (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── POST /accounts/:id/disconnect ────────────────────────────────────────
+    async disconnectAccount(req, res) {
+        try {
+            const { id } = req.params;
+            await WhatsAppManager.disconnectAccount(id);
+            await DatabaseManager.systemDB.run(
+                `UPDATE accounts SET status = 'disconnected', updated_at = NOW() WHERE id = $1`, [id]
+            );
+            return res.json({ success: true, message: 'تم قطع الاتصال' });
+        } catch (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── GET /accounts/:id/logs ───────────────────────────────────────────────
+    async getLogs(req, res) {
+        try {
+            const { id } = req.params;
+            const limit = parseInt(req.query.limit) || 100;
+            const logs = await DatabaseManager.systemDB.all(
+                `SELECT * FROM activity_logs WHERE account_id = $1 ORDER BY created_at DESC LIMIT $2`,
+                [id, limit]
+            ).catch(() => []);
+            return res.json({ success: true, logs });
+        } catch (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+    }
 }
 
 module.exports = new AccountController();
