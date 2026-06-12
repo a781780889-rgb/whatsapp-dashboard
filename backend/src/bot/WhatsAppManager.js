@@ -726,6 +726,14 @@ class WhatsAppManager {
                             this._emitState(accountId, 'pairing_ready', { code: formatted });
 
                             if (this.io) {
+                                // ✅ FIX: إرسال الرمز في حدث connection_state أيضاً للتأكد من استقباله
+                                this.io.to(`account_${accountId}`).emit('connection_state', {
+                                    accountId,
+                                    state: 'pairing_ready',
+                                    code: formatted,
+                                    ts: Date.now(),
+                                });
+                                // ✅ FIX: إرسال حدث منفصل للتوافقية
                                 this.io.to(`account_${accountId}`).emit('pairing_code', {
                                     code:  formatted,
                                     phone: phoneNumber,
