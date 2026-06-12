@@ -332,7 +332,9 @@ class WhatsAppManager {
             // ونحن في دالة initSession العادية، فهذا يعني أننا فقدنا وضع Pairing
             // يجب إعادة التوجيه لـ initPairingSession إذا كان هناك رقم هاتف مخزن
             if (!state.creds?.registered) {
-                const account = await DatabaseManager.systemDB.queryOne(
+                // تصحيح: استخدام query المباشرة من lib/postgres عبر SystemDB أو استخدام queryOne المستوردة
+                const { queryOne } = require('../lib/postgres');
+                const account = await queryOne(
                     `SELECT phone_number, connection_type FROM accounts WHERE id = $1`, [accountId]
                 );
                 if (account?.connection_type === 'pairing_code' && account?.phone_number) {
@@ -377,7 +379,8 @@ class WhatsAppManager {
                     connectTimeoutMs:    60_000,
                     qrTimeout:           60_000,
                     // ✅ تحسين: استخدام تعريف متصفح ثابت لتجنب الـ Disconnect المفاجئ (كود 515/401)
-                    browser:             ['Ubuntu', 'Chrome', '110.0.5481.177'],
+                    // ✅ تحسين: استخدام macOS Chrome لتجنب رفض واتساب لبعض البيئات
+                    browser:             Browsers.macOS('Chrome'),
                     syncFullHistory:     false,
                     generateHighQualityLinkPreviews: false,
                     markOnlineOnConnect: false,
@@ -645,7 +648,10 @@ class WhatsAppManager {
     //    عند connection === 'open' يكون الاتصال قد اكتمل بالفعل — لا معنى
     //    لطلب pairing code بعدها.
     //
-    async initPairingSession(accountId, phoneNumber) {
+    async initPairingSession(accountId, rawPhoneNumber) {
+        // ✅ تنظيف رقم الهاتف: إزالة أي رموز غير رقمية لضمان قبول واتساب للرقم
+        const phoneNumber = rawPhoneNumber.replace(/\D/g, '');
+
         // إنهاء أي جلسة قائمة
         const old = this.sessions.get(accountId);
         if (old) {
@@ -683,7 +689,8 @@ class WhatsAppManager {
                     keepAliveIntervalMs: 25_000,
                     connectTimeoutMs:    60_000,
                     // ✅ تحسين: استخدام تعريف متصفح ثابت لتجنب الـ Disconnect المفاجئ (كود 515/401)
-                    browser:             ['Ubuntu', 'Chrome', '110.0.5481.177'],
+                    // ✅ تحسين: استخدام macOS Chrome لتجنب رفض واتساب لبعض البيئات
+                    browser:             Browsers.macOS('Chrome'),
                     syncFullHistory:     false,
                     markOnlineOnConnect: false,
                     retryRequestDelayMs: 500,
