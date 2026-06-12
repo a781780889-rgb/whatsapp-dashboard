@@ -113,6 +113,7 @@ app.use(cookieParser());
 
 // ── [FIX-14] CSRF Protection ─────────────────────────────────────────────────
 // يُطبَّق على كل المسارات (مسارات مُعفاة في csrf.js)
+const { csrfMiddleware } = require('./src/api/middleware/csrf');
 app.use(csrfMiddleware);
 
 // ── Rate Limiters ─────────────────────────────────────────────────────────────
@@ -122,8 +123,6 @@ const authLimiter = rateLimit({
     standardHeaders: true,
     message: { success: false, error: 'عدد كبير من المحاولات، حاول بعد 15 دقيقة.' }
 });
-// ── [FIX-14] CSRF Middleware ─────────────────────────────────────────────────
-const { csrfMiddleware } = require('./src/api/middleware/csrf');
 
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
