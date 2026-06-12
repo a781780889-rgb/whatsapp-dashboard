@@ -8,7 +8,7 @@ const pool = new Pool({
     ssl: process.env.DATABASE_URL?.includes('railway') ? { rejectUnauthorized: false } : false,
 });
 
-class PrivateCampaignService {
+class PrivateCampaignController {
 
     // ── Ensure Tables Exist ────────────────────────────────────────────────────
     async ensureTables() {
@@ -98,7 +98,7 @@ class PrivateCampaignService {
                 [crypto.randomUUID(), campaignId, accountId, level, message]
             );
         } catch (e) {
-            console.error('[PrivateCampaignService] _log error:', e.message);
+            console.error('[PrivateCampaignController] _log error:', e.message);
         }
     }
 
@@ -426,5 +426,5 @@ class PrivateCampaignService {
     }
 }
 
-module.exports = new PrivateCampaignService();
+module.exports = new PrivateCampaignController();
 
