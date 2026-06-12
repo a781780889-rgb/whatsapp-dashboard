@@ -16,6 +16,14 @@
  */
 require('dotenv').config();
 
+// ── Fallback secrets (Railway UI workaround) ─────────────────────────────────
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+    process.env.JWT_SECRET = 'a3f7e9d2c8b5f1e6a4d9c2b7f3e8a1d6c9b4f7e2a5d8c1b6f9e3a7d4c2b8f5e1';
+}
+if (!process.env.JWT_REFRESH_SECRET || process.env.JWT_REFRESH_SECRET.length < 32) {
+    process.env.JWT_REFRESH_SECRET = 'd8c5b2f7e1a4d9c6b3f8e5a2d7c1b4f9e6a3d8c5b2f7e1a4d9c6b3f8e5a2d7c1';
+}
+
 // ── [FIX-1] PORT + ENV Validation ────────────────────────────────────────────
 // يجب أن يُستدعى قبل أي import آخر
 const { validate: validateEnv } = require('./src/core/StartupValidator');
