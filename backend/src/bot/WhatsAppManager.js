@@ -112,6 +112,10 @@ class WhatsAppManager {
         this.pairingTimers     = new Map(); // accountId → timeout handle
         // [FIX-1] SESSION MEMORY LEAK: تتبع جميع setTimeout handles لمنع Ghost Timers
         this.reconnectTimers   = new Map(); // accountId → NodeJS.Timeout
+        // [FIX-QR-RACE] تتبع ما بعد مسح QR لمنع إعادة توليد QR قبل اكتمال التسجيل
+        // السبب: creds.registered يصبح true فقط بعد connection:open، ليس بعد مسح QR
+        // لذا إذا استدعينا initSession مرة أخرى بعد 515 (post-QR-scan)، يُولِّد QR جديداً
+        this.postScanReconnect = new Set(); // accountId — مسح QR، في انتظار open
         this.io                = null;
         this.logger            = pino({ level: 'silent' });
     }
@@ -180,6 +184,8 @@ class WhatsAppManager {
         this.lastPairingCode.delete(accountId);
         this.connStates.delete(accountId);
         this.reconnectTimers.delete(accountId);
+        // [FIX-QR-RACE] تنظيف علامة ما بعد المسح
+        this.postScanReconnect.delete(accountId);
 
         // [FIX-9] تنظيف FSM
         StateMachine.cleanup(accountId);
@@ -514,9 +520,24 @@ class WhatsAppManager {
 
             // ✅ إصلاح جوهري: إذا كانت الكريدنشال محفوظة (registered=true) فنتخطى qr_generating
             const isRegistered = !!state.creds?.registered;
-            if (isRegistered) {
+
+            // [FIX-QR-RACE] تحقق من علامة ما بعد المسح
+            // السبب: creds.registered يصبح true فقط عند connection:open
+            // لكن بعد مسح QR يرد 515 أولاً وcreds.registered لا يزال false
+            // الحل: نتذكر أن المسح حدث ونتخطى QR generation في المحاولة التالية
+            const isPostScan = this.postScanReconnect.has(accountId);
+            if (isPostScan) {
+                this.postScanReconnect.delete(accountId);
+                console.log(`[Account ${accountId}] Post-scan reconnect — skipping QR generation, trying to complete auth.`);
+            }
+
+            if (isRegistered || isPostScan) {
                 this._emitState(accountId, 'connecting');
-                console.log(`[Account ${accountId}] Creds registered — skipping QR generation, reconnecting directly.`);
+                if (!isRegistered) {
+                    console.log(`[Account ${accountId}] QR scanned — creds not registered yet but resuming auth with scanned keys.`);
+                } else {
+                    console.log(`[Account ${accountId}] Creds registered — skipping QR generation, reconnecting directly.`);
+                }
             } else {
                 this._emitState(accountId, 'qr_generating');
                 QRAnalyzer.onQRGenerating(accountId);
@@ -632,7 +653,8 @@ class WhatsAppManager {
                             }
 
                             // ✅ تحسين: زيادة التأخير عند المسح لضمان استقرار الجلسة
-                            const delay515 = qrWasJustScanned ? 5000 : Math.min(retries515 * 5000, 20000);
+                            // delay515=8s بعد المسح لإعطاء WA server وقتاً لمعالجة التسجيل
+                            const delay515 = qrWasJustScanned ? 8000 : Math.min(retries515 * 5000, 20000);
                             console.log(`[Account ${accountId}] Restart required (515) — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms…`);
 
                             if (qrWasJustScanned) {
@@ -642,6 +664,10 @@ class WhatsAppManager {
                                 // ✅ تحسين: التأكد من حفظ البيانات قبل إعادة الاتصال
                                 await saveCreds().catch(() => {});
                                 await new Promise(r => setTimeout(r, 1000));
+                                // [FIX-QR-RACE] سجّل أن QR مُسِح للتو
+                                // initSession القادمة ستتخطى qr_generating وتستكمل Auth
+                                this.postScanReconnect.add(accountId);
+                                console.log(`[Account ${accountId}] postScanReconnect flag set — next initSession will skip QR.`);
                             } else if (!state.creds?.registered) {
                                 // ✅ تحسين: لا تمسح البيانات فوراً، حاول الحفظ أولاً
                                 await saveCreds().catch(() => {});
@@ -983,16 +1009,22 @@ class WhatsAppManager {
                         if (statusCode === DisconnectReason.restartRequired) {
                             await saveCreds().catch(() => {});
                             
-                            // إذا كان الحساب مسجلاً (registered: true) → ننتقل لـ initSession العادية لفتح الجلسة
+                            // [FIX-PAIRING-515] إذا كان الحساب مسجلاً → ننتقل لـ initSession
                             if (state.creds?.registered) {
                                 console.log(`[Account ${accountId}][Pairing] 515 received & registered — transitioning to full session.`);
                                 this._emitState(accountId, 'connecting');
-                                // [FIX-1] _scheduleReconnect يمنع Ghost Timers
                                 this._scheduleReconnect(accountId, 3000, () => this.initSession(accountId));
+                            } else if (pairingRequested) {
+                                // ✅ الكود أُدخل في الهاتف — لكن creds.registered لا يزال false
+                                // (يصبح true فقط بعد connection:open)
+                                // الحل: علامة postScanReconnect تجعل initSession يتخطى QR ويستكمل Auth
+                                console.log(`[Account ${accountId}][Pairing] 515 after code entry — setting postScanReconnect, transitioning to full session.`);
+                                this.postScanReconnect.add(accountId);
+                                this._emitState(accountId, 'connecting');
+                                this._scheduleReconnect(accountId, 5000, () => this.initSession(accountId));
                             } else {
-                                // إذا لم يُسجل بعد → نعيد محاولة Pairing بنفس الرقم لضمان بقاء الكود صالحاً
-                                console.log(`[Account ${accountId}][Pairing] 515 received but NOT registered — retrying pairing to keep code valid.`);
-                                // [FIX-1] _scheduleReconnect يمنع Ghost Timers
+                                // الكود لم يُدخل بعد → نعيد محاولة Pairing
+                                console.log(`[Account ${accountId}][Pairing] 515 received but code NOT entered yet — retrying pairing.`);
                                 this._scheduleReconnect(accountId, 3000, () => this.initPairingSession(accountId, phoneNumber));
                             }
                             return;
