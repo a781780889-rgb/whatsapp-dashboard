@@ -12,7 +12,19 @@ import { API, authFetch } from '@/utils/api';
 import { cn } from '@/utils/cn';
 import { io, Socket } from 'socket.io-client';
 
-const SOCKET_URL = API.replace('/api/v1', '');
+// ✅ BUG #7 FIX: حساب SOCKET_URL بشكل صحيح لكلا الحالتين:
+// - رابط نسبي  (API = '/api/v1')           → SOCKET_URL = '' → يتصل بـ origin الحالي ✓
+// - رابط مطلق (API = 'https://x.com/api/v1') → SOCKET_URL = 'https://x.com'      ✓
+// السبب: API.replace('/api/v1', '') يُخطئ إذا كان هناك trailing-slash أو path مختلف
+const SOCKET_URL = (() => {
+  try {
+    // رابط مطلق → نستخرج الـ origin فقط (بروتوكول + نطاق + منفذ)
+    return new URL(API).origin;
+  } catch {
+    // رابط نسبي → نتصل بنفس الـ origin (Socket.IO يقبل '' كـ current origin)
+    return '';
+  }
+})();
 
 // ── أكواد الدول ───────────────────────────────────────────────────────────────
 const COUNTRY_CODES = [
@@ -506,6 +518,9 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
   const isMounted                     = useRef(true);
   // ✅ FIX: ref لتتبع الحالة الحقيقية داخل socket handlers (يحل stale closure)
   const connStateRef                  = useRef<ConnState>('idle');
+  // ✅ BUG #5 FIX: منع إظهار Toast مُكرَّر عند وصول pairing_code عبر قناتين
+  // (connection_state مع code) + (pairing_code مستقل)
+  const codeToastShownRef             = useRef(false);
   const pollRef                       = useRef<any>(null);
 
   const setConnState = (s: ConnState) => {
@@ -555,6 +570,7 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
     setError('');
     setPairingCode(null);
     setConnState('pairing_starting');
+    codeToastShownRef.current = false; // ✅ BUG #5 FIX: إعادة ضبط guard عند كل طلب جديد
 
     if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -607,10 +623,15 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         setConnState(s as ConnState);
         if (e) setError(e);
         // استقبال الرمز من حدث connection_state
+        // ✅ BUG #5 FIX: تحقق من codeToastShownRef لمنع Toast مُكرَّر
+        // (قد يصل الكود من connection_state + pairing_code في نفس الوقت)
         if (s === 'pairing_ready' && code) {
           setPairingCode(code);
           startCountdown(120);
-          showToast({ title: '✅ تم إنشاء رمز الإقران', description: 'أدخله في واتساب خلال دقيقتين', type: 'success' });
+          if (!codeToastShownRef.current) {
+            codeToastShownRef.current = true;
+            showToast({ title: '✅ تم إنشاء رمز الإقران', description: 'أدخله في واتساب خلال دقيقتين', type: 'success' });
+          }
         }
       });
 
@@ -620,7 +641,11 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         setConnState('pairing_ready');
         setError('');
         startCountdown(120);
-        showToast({ title: '✅ تم إنشاء رمز الإقران', description: 'أدخله في واتساب خلال دقيقتين', type: 'success' });
+        // ✅ BUG #5 FIX: إظهار Toast مرة واحدة فقط حتى لو وصل الكود من قناتين
+        if (!codeToastShownRef.current) {
+          codeToastShownRef.current = true;
+          showToast({ title: '✅ تم إنشاء رمز الإقران', description: 'أدخله في واتساب خلال دقيقتين', type: 'success' });
+        }
       });
 
       socket.on('pairing_error', ({ error: e }: any) => {
