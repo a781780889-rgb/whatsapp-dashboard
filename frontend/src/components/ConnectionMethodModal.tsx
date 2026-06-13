@@ -525,12 +525,21 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
   };
 
   const handleRequestCode = async () => {
-    const digits    = phoneLocal.replace(/\D/g, '');
+    let digits = phoneLocal.replace(/\D/g, '');
+    // ✅ FIX: إزالة الصفر البادئ (0) من الرقم المحلي إذا أدخله المستخدم
+    // مثال: 05XXXXXXXX → 5XXXXXXXX
+    if (digits.startsWith('0')) digits = digits.substring(1);
+
     if (digits.length < 7) {
-      showToast({ title: 'خطأ', description: 'أدخل رقم الهاتف بدون رمز الدولة', type: 'error' });
+      showToast({ title: 'خطأ', description: 'أدخل رقم الهاتف بدون رمز الدولة ودون صفر في البداية', type: 'error' });
       return;
     }
     const fullPhone = countryCode + digits;
+    // ✅ FIX: تحقق من الطول الكلي
+    if (fullPhone.length < 10 || fullPhone.length > 15) {
+      showToast({ title: 'خطأ', description: `الرقم "${fullPhone}" يبدو غير صحيح. تحقق من رمز الدولة والرقم.`, type: 'error' });
+      return;
+    }
 
     setError('');
     setPairingCode(null);
@@ -733,8 +742,11 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
             <p className="text-xs text-[var(--text-muted)] mt-1.5">
               الرقم الكامل:{' '}
               <span dir="ltr" className="font-mono text-[var(--text-secondary)]">
-                +{countryCode}{phoneLocal.replace(/\D/g, '')}
+                +{countryCode}{phoneLocal.replace(/\D/g, '').replace(/^0/, '')}
               </span>
+              {phoneLocal.replace(/\D/g, '').startsWith('0') && (
+                <span className="text-orange-400 mr-2">⚠ احذف الصفر البادئ</span>
+              )}
             </p>
           </div>
 
