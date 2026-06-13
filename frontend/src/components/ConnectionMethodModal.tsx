@@ -343,7 +343,10 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       const pollInterval = setInterval(async () => {
         if (!isMounted.current) return;
         try {
-          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`);
+          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`, {
+            cache: 'no-store',
+          });
+          if (!r.ok && r.status !== 200) return; // تجاهل 304 وغيره
           const d = await r.json();
           if (d.state === 'connected') {
             clearInterval(pollInterval);
@@ -588,7 +591,10 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       const pollInterval = setInterval(async () => {
         if (!isMounted.current) return;
         try {
-          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`);
+          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`, {
+            cache: 'no-store',
+          });
+          if (!r.ok && r.status !== 200) return; // تجاهل 304 وغيره
           const d = await r.json();
           if (d.state === 'connected') {
             clearInterval(pollInterval);
