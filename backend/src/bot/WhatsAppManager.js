@@ -390,7 +390,21 @@ class WhatsAppManager {
         await this._humanDelay();
         const sock = this.getSession(accountId);
         if (!sock) throw new Error('WhatsApp session not connected.');
-        return sock.sendMessage(to, content);
+        
+        const result = await sock.sendMessage(to, content);
+        
+        // [FIX-TRACKING] تسجيل إرسال الرسالة في المحلل لضمان التتبع والتحقق
+        try {
+            const messageId = result?.key?.id;
+            if (messageId) {
+                const jid = to;
+                BaileysAnalyzer.onMessageSent(accountId, messageId, jid).catch(() => {});
+            }
+        } catch (e) {
+            console.warn(`[Account ${accountId}] Failed to log message sent:`, e.message);
+        }
+        
+        return result;
     }
 
     // ── مسح جلسة فاسدة ───────────────────────────────────────────────────────
@@ -798,12 +812,13 @@ class WhatsAppManager {
                         BaileysAnalyzer.onConnectionEvent(accountId, 'connection_open',
                             { isOnline: true }, attemptId).catch(() => {});
 
-                        this._emitState(accountId, 'connected');
-
+                        // [FIX-IMMEDIATE] تحديث حالة الاتصال فوراً في قاعدة البيانات قبل إرسال الحالة للواجهة
                         await DatabaseManager.systemDB.run(
-                            `UPDATE accounts SET status = 'connected', health_status = 'normal' WHERE id = $1`,
+                            `UPDATE accounts SET status = 'connected', health_status = 'normal', updated_at = NOW() WHERE id = $1`,
                             [accountId]
-                        );
+                        ).catch(err => console.error(`[Account ${accountId}] Failed to update DB status to connected:`, err));
+
+                        this._emitState(accountId, 'connected');
 
                         try {
                             const LinkMonitorEngine = require('../api/services/LinkMonitorEngine');
@@ -881,7 +896,11 @@ class WhatsAppManager {
     //
     async initPairingSession(accountId, rawPhoneNumber) {
         // ✅ تنظيف رقم الهاتف: إزالة أي رموز غير رقمية لضمان قبول واتساب للرقم
-        const phoneNumber = rawPhoneNumber.replace(/\D/g, '');
+        let phoneNumber = rawPhoneNumber.replace(/\D/g, '');
+        
+        // [FIX-PHONE-FORMAT] التأكد من أن الرقم لا يبدأ بـ 00 أو + (تمت إزالتها بالفعل بـ \D)
+        // ولكن يجب التأكد من عدم وجود صفر دولي بادئ إذا كان متبوعاً برمز الدولة
+        if (phoneNumber.startsWith('00')) phoneNumber = phoneNumber.substring(2);
 
         // إنهاء أي جلسة قائمة
         const old = this.sessions.get(accountId);
