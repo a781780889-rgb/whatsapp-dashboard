@@ -107,6 +107,12 @@ class StateMachine {
             return this.transition(accountId, newState, extra);
         }
 
+        // ✅ BUG #6 FIX: نفس الحالة → ليس خطأً، تجاهل بصمت (no-op)
+        // يمنع تحذير "INVALID transition connected → connected" الناتج عن أحداث account_status المُكرَّرة
+        if (current === newState) {
+            return true;
+        }
+
         const allowed = VALID_TRANSITIONS[current] ?? [];
 
         if (!allowed.includes(newState)) {
