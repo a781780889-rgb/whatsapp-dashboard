@@ -203,8 +203,9 @@ class WhatsAppManager {
         // محاولة الانتقال عبر FSM
         const ok = StateMachine.transition(accountId, newState, extra);
         if (!ok) {
-            // سماح إجبارية لحالات الطوارئ (error / disconnected)
-            if (newState === 'error' || newState === 'disconnected') {
+            // سماح إجبارية لحالات الطوارئ وإعادة التهيئة
+            const forceAllowed = ['error', 'disconnected', 'initializing', 'idle'];
+            if (forceAllowed.includes(newState)) {
                 StateMachine.forceTransition(accountId, newState, extra);
             } else {
                 // انتقال غير صالح — تجاهل بصمت (تحذير مسجَّل بالفعل داخل FSM)
@@ -283,10 +284,12 @@ class WhatsAppManager {
 
     // ── Get full QR status (for REST endpoint) ────────────────────────────────
     getQrStatus(accountId) {
-        const state  = this.getConnectionState(accountId);
-        const cached = this.lastQrCode.get(accountId);
-        const qr     = cached && (Date.now() - cached.ts < QR_CACHE_TTL_MS) ? cached.qr : null;
-        return { state, qr, ts: cached?.ts || null };
+        const state       = this.getConnectionState(accountId);
+        const cached      = this.lastQrCode.get(accountId);
+        const qr          = cached && (Date.now() - cached.ts < QR_CACHE_TTL_MS) ? cached.qr : null;
+        const pairingData = this.lastPairingCode.get(accountId);
+        const code        = pairingData && (Date.now() - pairingData.ts < 120_000) ? pairingData.code : null;
+        return { state, qr, ts: cached?.ts || null, code };
     }
 
     // ── Get pending pairing code (for late-joining clients) ──────────────────
