@@ -488,9 +488,11 @@ class WhatsAppManager {
         if (this.sessions.has(accountId))     return this.sessions.get(accountId);
         if (this.initPromises.has(accountId)) return this.initPromises.get(accountId);
 
+        console.log(`[SOCKET_CONNECTED] Account ${accountId}: Starting new session init...`);
         this._emitState(accountId, 'initializing');
 
         const initPromise = (async () => {
+            console.log(`[SESSION_CREATE] Account ${accountId}: Initializing QR session (reconnect=${this.reconnectAttempts.get(accountId) || 0})`);
             // ── Phase 2: بدء تسجيل محاولة الاتصال ─────────────────────────
             const reconnectNum = this.reconnectAttempts.get(accountId) || 0;
             const attemptId    = await RuntimeAnalyzer.startAttempt(accountId, 'qr_code', reconnectNum).catch(() => null);
@@ -516,7 +518,7 @@ class WhatsAppManager {
             }
 
             const waVersion = await this._fetchWAVersion();
-            console.log(`[Account ${accountId}] WA version: ${waVersion.join('.')}`);
+            console.log(`[SESSION_RESTORE] Account ${accountId}: Auth state loaded. registered=${!!state.creds?.registered}. WA version: ${waVersion.join('.')}`);
 
             // ✅ إصلاح جوهري: إذا كانت الكريدنشال محفوظة (registered=true) فنتخطى qr_generating
             const isRegistered = !!state.creds?.registered;
@@ -593,23 +595,29 @@ class WhatsAppManager {
                     // ── QR جديد ──────────────────────────────────────────────
                     if (qr) {
                         clearTimeout(qrGenTimer);
-                        console.log(`[Account ${accountId}] QR Code ready.`);
-                        this.qrSentAt.set(accountId, Date.now());
+                        const qrTs = Date.now();
+                        console.log(`[QR_GENERATED] Account ${accountId}: QR Code ready.`);
+                        this.qrSentAt.set(accountId, qrTs);
                         this.restartAttempts.delete(accountId);
-                        this.lastQrCode.set(accountId, { qr, ts: Date.now() });
+                        this.lastQrCode.set(accountId, { qr, ts: qrTs });
 
                         // ── Phase 2: تسجيل توليد QR ──────────────────────
-                        RuntimeAnalyzer.onQRGenerated(accountId, Date.now()).catch(() => {});
+                        RuntimeAnalyzer.onQRGenerated(accountId, qrTs).catch(() => {});
                         // ── Phase 7: تسجيل QR في محلل QR ─────────────────
                         QRAnalyzer.onQRGenerated(accountId, attemptId).catch(() => {});
                         // ── Phase 9: تسجيل حدث QR في Baileys ─────────────
                         BaileysAnalyzer.onConnectionEvent(accountId, 'qr_generated', { qrIndex: 1 }, attemptId).catch(() => {});
 
-                        this._emitState(accountId, 'qr_ready');
+                        // [FIX-QR-PAYLOAD] تضمين QR في extra لضمان وصوله عبر SocketBridge و EventBus
+                        this._emitState(accountId, 'qr_ready', { qr });
 
+                        // [FIX-QR-DUAL] إرسال QR عبر حدث منفصل للتوافقية الكاملة
                         if (this.io) {
-                            this.io.to(`account_${accountId}`).emit('qr_code', { qr });
+                            this.io.to(`account_${accountId}`).emit('qr_code', { qr, ts: qrTs });
                         }
+                        // [FIX-QR-BRIDGE] إرسال QR عبر SocketBridge أيضاً (للـ late-joiners)
+                        SocketBridge.emitQR(accountId, qr);
+                        console.log(`[QR_SENT_TO_FRONTEND] Account ${accountId}: QR emitted to room account_${accountId}`);
                     }
 
                     // ── انقطاع ───────────────────────────────────────────────
@@ -655,7 +663,7 @@ class WhatsAppManager {
                             // ✅ تحسين: زيادة التأخير عند المسح لضمان استقرار الجلسة
                             // delay515=8s بعد المسح لإعطاء WA server وقتاً لمعالجة التسجيل
                             const delay515 = qrWasJustScanned ? 8000 : Math.min(retries515 * 5000, 20000);
-                            console.log(`[Account ${accountId}] Restart required (515) — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms…`);
+                            console.log(`[RECONNECT_START] Account ${accountId}: 515 restart required — attempt ${retries515}/${MAX_515_RETRIES}. Reconnecting in ${delay515}ms…`);
 
                             if (qrWasJustScanned) {
                                 this._emitState(accountId, 'connecting');
@@ -760,7 +768,8 @@ class WhatsAppManager {
                     // ── اتصال ناجح ────────────────────────────────────────────
                     if (connection === 'open') {
                         clearTimeout(qrGenTimer);
-                        console.log(`[Account ${accountId}] Connected successfully.`);
+                        console.log(`[AUTH_SUCCESS] Account ${accountId}: QR scan completed — connection open.`);
+                        console.log(`[QR_SCANNED] Account ${accountId}: QR was scanned and accepted by WhatsApp.`);
                         this.reconnectAttempts.delete(accountId);
                         this.restartAttempts.delete(accountId);
                         this.qrSentAt.delete(accountId);
@@ -1138,7 +1147,8 @@ class WhatsAppManager {
                         clearTimeout(pairingTimer);
                         this.pairingTimers.delete(accountId);
 
-                        console.log(`[Account ${accountId}][Pairing] ✅ Connected successfully via Pairing Code.`);
+                        console.log(`[AUTH_SUCCESS] Account ${accountId}: Pairing connection open — connected successfully.`);
+                        console.log(`[PAIRING_SUCCESS] Account ${accountId}: WhatsApp account linked via Pairing Code.`);
 
                         this.reconnectAttempts.delete(accountId);
                         this.restartAttempts.delete(accountId);
