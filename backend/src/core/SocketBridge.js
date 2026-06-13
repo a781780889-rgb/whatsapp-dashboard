@@ -79,35 +79,40 @@ class SocketBridge {
     /**
      * يُعيد إرسال الحالة الكاملة للـ client المتأخر.
      * يحل مشكلة Race Condition: client يفتح Modal بعد إصدار QR.
+     * [FIX-REPLAY] يتضمن QR و Code مباشرةً في connection_state لضمان الاستقبال.
      */
     _replayState(socket, accountId) {
         try {
             const WhatsAppManager = require('../bot/WhatsAppManager');
             const { state, qr, code } = WhatsAppManager.getStateSummary(accountId);
 
-            // إرسال الحالة دائماً
+            // [FIX-REPLAY] إرسال الحالة مع QR/Code مضمّنَين مباشرةً
             socket.emit('connection_state', {
                 accountId,
                 state,
-                ts: Date.now(),
+                ts:       Date.now(),
                 replayed: true,
+                // تضمين QR إذا كانت الحالة qr_ready
+                ...(qr   ? { qr }   : {}),
+                // تضمين Code إذا كانت الحالة pairing_ready
+                ...(code ? { code } : {}),
             });
 
-            // إعادة إرسال QR إذا كان لا يزال صالحاً
+            // إعادة إرسال QR كحدث منفصل (للتوافقية مع handlers القديمة)
             if (qr) {
-                socket.emit('qr_code', { qr, replayed: true });
+                socket.emit('qr_code', { qr, ts: Date.now(), replayed: true });
             }
 
-            // إعادة إرسال Pairing Code إذا كان لا يزال صالحاً
+            // إعادة إرسال Pairing Code كحدث منفصل
             if (code) {
-                socket.emit('pairing_code', { code, replayed: true });
+                socket.emit('pairing_code', { code, ts: Date.now(), replayed: true });
             }
 
             // إرسال account_status إذا كان متصلاً
             if (state === 'connected') {
                 socket.emit('account_status', {
                     accountId,
-                    status: 'connected',
+                    status:   'connected',
                     replayed: true,
                 });
             }
