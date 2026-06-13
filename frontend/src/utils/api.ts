@@ -74,6 +74,12 @@ export async function authFetch(url: string, options: RequestInit = {}): Promise
     ...(options.headers as Record<string, string> || {}),
   };
 
+  // منع الـ HTTP caching لضمان بيانات حديثة دائماً (يحل مشكلة 304 في Railway)
+  if (method === 'GET' || method === 'HEAD') {
+    headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+    headers['Pragma'] = 'no-cache';
+  }
+
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
