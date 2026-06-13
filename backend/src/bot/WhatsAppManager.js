@@ -88,7 +88,7 @@ const TEMP_DISCONNECT_CODES = new Set([
     DisconnectReason.connectionClosed,   // 428
 ]);
 
-const QR_SCAN_WINDOW_MS      = 60_000;
+const QR_SCAN_WINDOW_MS      = 180_000; // 3 دقائق — وقت كافٍ بعد المسح للاتصال
 const MAX_515_RETRIES        = 5;
 const QR_CACHE_TTL_MS        = 55_000; // QR valid for ~60s, cache for 55s
 const PAIRING_TIMEOUT_MS     = 45_000; // 45s to get pairing code
@@ -512,29 +512,39 @@ class WhatsAppManager {
             const waVersion = await this._fetchWAVersion();
             console.log(`[Account ${accountId}] WA version: ${waVersion.join('.')}`);
 
-                // مؤقت توليد QR (30 ثانية)
+            // ✅ إصلاح جوهري: إذا كانت الكريدنشال محفوظة (registered=true) فنتخطى qr_generating
+            const isRegistered = !!state.creds?.registered;
+            if (isRegistered) {
+                this._emitState(accountId, 'connecting');
+                console.log(`[Account ${accountId}] Creds registered — skipping QR generation, reconnecting directly.`);
+            } else {
+                this._emitState(accountId, 'qr_generating');
+                QRAnalyzer.onQRGenerating(accountId);
+            }
+
+                // مؤقت: 30 ثانية للـ QR (غير مسجل) أو 90 ثانية لإعادة الاتصال (مسجل)
+                const genTimeoutMs = isRegistered ? 90_000 : QR_GENERATE_TIMEOUT_MS;
                 const qrGenTimer = setTimeout(() => {
-                    if (this.getConnectionState(accountId) === 'qr_generating') {
-                        // ── تشخيص: مهلة QR ────────────────────────────────
+                    const curState = this.getConnectionState(accountId);
+                    const shouldFire = isRegistered
+                        ? (curState === 'connecting' || curState === 'initializing')
+                        : curState === 'qr_generating';
+                    if (shouldFire) {
                         DiagnosticEngine.diagnose(accountId, {
-                            contextKey:  'qr_timeout',
-                            fromStage:   'qr_generating',
-                            extraDetails: { timeoutMs: QR_GENERATE_TIMEOUT_MS },
+                            contextKey:  isRegistered ? 'reconnect_timeout' : 'qr_timeout',
+                            fromStage:   curState,
+                            extraDetails: { timeoutMs: genTimeoutMs, isRegistered },
                         }).catch(() => {});
-                        // ── Phase 7: تسجيل timeout في محلل QR ────────────
-                        QRAnalyzer.onQRTimeout(accountId).catch(() => {});
-                        this._emitState(accountId, 'error', { error: 'انتهت مهلة إنشاء رمز QR. حاول مرة أخرى.' });
+                        if (!isRegistered) QRAnalyzer.onQRTimeout(accountId).catch(() => {});
+                        const errMsg = isRegistered
+                            ? 'انتهت مهلة إعادة الاتصال. تأكد من الإنترنت وحاول مرة أخرى.'
+                            : 'انتهت مهلة إنشاء رمز QR. حاول مرة أخرى.';
+                        this._emitState(accountId, 'error', { error: errMsg });
                         if (this.io) {
-                            this.io.to(`account_${accountId}`).emit('connection_error', {
-                                error: 'انتهت مهلة إنشاء رمز QR (30 ثانية). تأكد من الاتصال بالإنترنت وحاول مرة أخرى.'
-                            });
+                            this.io.to(`account_${accountId}`).emit('connection_error', { error: errMsg });
                         }
                     }
-                }, QR_GENERATE_TIMEOUT_MS);
-
-                this._emitState(accountId, 'qr_generating');
-                // ── Phase 7: بدء تتبع وقت توليد QR ───────────────────────
-                QRAnalyzer.onQRGenerating(accountId);
+                }, genTimeoutMs);
 
                 const sock = makeWASocket({
                     auth:               state,
