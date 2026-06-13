@@ -637,6 +637,7 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
 
       socket.on('pairing_code', ({ code }: any) => {
         if (!isMounted.current) return;
+        console.log('[Pairing] Received code from socket:', code);
         setPairingCode(code);
         setConnState('pairing_ready');
         setError('');
