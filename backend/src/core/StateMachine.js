@@ -23,17 +23,18 @@ const EventBus = require('./EventBus');
 
 const VALID_TRANSITIONS = {
     idle:               ['initializing'],
-    initializing:       ['qr_generating', 'pairing_starting', 'connecting', 'error', 'disconnected'],
-    qr_generating:      ['qr_ready', 'error', 'disconnected'],
-    qr_ready:           ['scanning', 'connecting', 'disconnected', 'error', 'qr_ready'],
-    pairing_starting:   ['pairing_generating', 'error', 'disconnected'],
-    pairing_generating: ['pairing_ready', 'error', 'disconnected'],
-    pairing_ready:      ['scanning', 'connecting', 'disconnected', 'error'],
-    scanning:           ['connecting', 'qr_generating', 'error', 'disconnected'],
-    connecting:         ['connected', 'qr_generating', 'pairing_starting', 'disconnected', 'error'],
-    connected:          ['disconnected', 'error'],
-    disconnected:       ['initializing', 'idle', 'error'],
-    error:              ['idle', 'initializing', 'disconnected'],
+    initializing:       ['qr_generating', 'pairing_starting', 'connecting', 'error', 'disconnected', 'idle'],
+    qr_generating:      ['qr_ready', 'error', 'disconnected', 'initializing'],
+    qr_ready:           ['scanning', 'connecting', 'disconnected', 'error', 'qr_ready', 'initializing', 'qr_generating'],
+    pairing_starting:   ['pairing_generating', 'error', 'disconnected', 'initializing'],
+    pairing_generating: ['pairing_ready', 'error', 'disconnected', 'initializing'],
+    pairing_ready:      ['scanning', 'connecting', 'disconnected', 'error', 'initializing'],
+    scanning:           ['connecting', 'qr_generating', 'error', 'disconnected', 'initializing'],
+    // [FIX] connecting → initializing مطلوب عند إعادة التهيئة بعد 515/reconnect
+    connecting:         ['connected', 'qr_generating', 'pairing_starting', 'disconnected', 'error', 'initializing'],
+    connected:          ['disconnected', 'error', 'initializing'],
+    disconnected:       ['initializing', 'idle', 'error', 'pairing_starting', 'qr_generating'],
+    error:              ['idle', 'initializing', 'disconnected', 'pairing_starting', 'qr_generating'],
 };
 
 // الحالات التي لا تحتاج QR جديد عند الاسترداد
