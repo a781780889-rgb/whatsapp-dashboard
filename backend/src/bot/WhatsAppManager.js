@@ -659,13 +659,30 @@ class WhatsAppManager {
 
                             if (qrWasJustScanned) {
                                 this._emitState(accountId, 'connecting');
-                                console.log(`[Account ${accountId}] QR was just scanned — saving creds and reconnecting.`);
+                                console.log(`[Account ${accountId}] QR was just scanned — forcing registered=true and saving creds.`);
                                 QRAnalyzer.onQRScanned(accountId).catch(() => {});
-                                // ✅ تحسين: التأكد من حفظ البيانات قبل إعادة الاتصال
+
+                                // ═══════════════════════════════════════════════════════════
+                                // [ROOT FIX] الإصلاح الجذري لمشكلة "تعذر تسجيل الدخول":
+                                //
+                                // المشكلة: creds.registered يبقى false حتى connection:open
+                                // لكن 515 يفور قبل connection:open
+                                // → initSession التالية ترى registered=false → تولّد QR جديد
+                                // → Baileys يبدأ تسجيلاً جديداً يتعارض مع بيانات المسح
+                                // → WhatsApp: "تعذر تسجيل الدخول"
+                                //
+                                // الحل: نضع registered=true يدوياً قبل الحفظ
+                                // → initSession التالية ترى registered=true
+                                // → Baileys يُكمل Auth بالـ keys المخزنة (من مسح QR)
+                                // → connection:open يفور بنجاح ✅
+                                // ═══════════════════════════════════════════════════════════
+                                if (state.creds) {
+                                    state.creds.registered = true;
+                                    console.log(`[Account ${accountId}] creds.registered forced to true — Baileys will resume session instead of new QR.`);
+                                }
                                 await saveCreds().catch(() => {});
-                                await new Promise(r => setTimeout(r, 1000));
-                                // [FIX-QR-RACE] سجّل أن QR مُسِح للتو
-                                // initSession القادمة ستتخطى qr_generating وتستكمل Auth
+                                await new Promise(r => setTimeout(r, 2000));
+                                // [FIX-QR-RACE] علامة إضافية للأمان
                                 this.postScanReconnect.add(accountId);
                                 console.log(`[Account ${accountId}] postScanReconnect flag set — next initSession will skip QR.`);
                             } else if (!state.creds?.registered) {
@@ -1007,23 +1024,38 @@ class WhatsAppManager {
                         // ✅ تحسين جوهري: معالجة كود 515 بعد طلب Pairing
                         // كود 515 (Restart Required) يحدث غالباً بعد إدخال الكود في الجوال بنجاح
                         if (statusCode === DisconnectReason.restartRequired) {
-                            await saveCreds().catch(() => {});
-                            
                             // [FIX-PAIRING-515] إذا كان الحساب مسجلاً → ننتقل لـ initSession
                             if (state.creds?.registered) {
+                                await saveCreds().catch(() => {});
                                 console.log(`[Account ${accountId}][Pairing] 515 received & registered — transitioning to full session.`);
                                 this._emitState(accountId, 'connecting');
                                 this._scheduleReconnect(accountId, 3000, () => this.initSession(accountId));
                             } else if (pairingRequested) {
-                                // ✅ الكود أُدخل في الهاتف — لكن creds.registered لا يزال false
-                                // (يصبح true فقط بعد connection:open)
-                                // الحل: علامة postScanReconnect تجعل initSession يتخطى QR ويستكمل Auth
-                                console.log(`[Account ${accountId}][Pairing] 515 after code entry — setting postScanReconnect, transitioning to full session.`);
+                                // ═══════════════════════════════════════════════════════════
+                                // [ROOT FIX] الإصلاح الجذري لمشكلة Pairing Code:
+                                //
+                                // المشكلة: الكود أُدخل في الهاتف → 515 فار → creds.registered=false
+                                // → initPairingSession مجدداً → كود جديد لا علاقة له بالإدخال الأول
+                                // → الحلقة اللانهائية: "بانتظار إدخال الرمز → جار إنشاء Code... → منقطع"
+                                //
+                                // الحل: نضع registered=true يدوياً قبل الحفظ
+                                // → initSession التالية ترى registered=true
+                                // → Baileys يُكمل Auth بالـ keys المخزنة (من إدخال الكود)
+                                // → connection:open يفور بنجاح ✅
+                                // ═══════════════════════════════════════════════════════════
+                                console.log(`[Account ${accountId}][Pairing] 515 after code entry — forcing registered=true.`);
+                                if (state.creds) {
+                                    state.creds.registered = true;
+                                    console.log(`[Account ${accountId}][Pairing] creds.registered forced to true — Baileys will resume session.`);
+                                }
+                                await saveCreds().catch(() => {});
+                                await new Promise(r => setTimeout(r, 2000));
                                 this.postScanReconnect.add(accountId);
                                 this._emitState(accountId, 'connecting');
                                 this._scheduleReconnect(accountId, 5000, () => this.initSession(accountId));
                             } else {
                                 // الكود لم يُدخل بعد → نعيد محاولة Pairing
+                                await saveCreds().catch(() => {});
                                 console.log(`[Account ${accountId}][Pairing] 515 received but code NOT entered yet — retrying pairing.`);
                                 this._scheduleReconnect(accountId, 3000, () => this.initPairingSession(accountId, phoneNumber));
                             }
@@ -1265,9 +1297,15 @@ class WhatsAppManager {
                         }
 
                         if (statusCode === DisconnectReason.restartRequired) {
+                            // [ROOT FIX] نفس الإصلاح الجذري — تعيين registered=true
+                            if (state.creds && !state.creds.registered) {
+                                state.creds.registered = true;
+                                console.log(`[PAIRING_SUCCESS] Account ${accountId}: retry 515 — forcing registered=true before reconnect.`);
+                            }
                             await saveCreds().catch(() => {});
                             if (state.creds?.registered) {
-                                this._scheduleReconnect(accountId, 3000, () => this.initSession(accountId));
+                                this.postScanReconnect.add(accountId);
+                                this._scheduleReconnect(accountId, 4000, () => this.initSession(accountId));
                             } else {
                                 this._scheduleReconnect(accountId, 3000, () => this._retryPairingWithSameCreds(accountId, phoneNumber));
                             }
