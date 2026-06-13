@@ -912,13 +912,14 @@ class WhatsAppManager {
                         this.pairingTimers.delete(accountId);
 
                         this._emitState(accountId, 'pairing_generating');
-                        console.log(`[Account ${accountId}][Pairing] QR event intercepted — requesting pairing code for ${phoneNumber}...`);
+                        console.log(`[PAIRING_START] Account ${accountId}: QR event intercepted — requesting pairing code for ${phoneNumber}`);
 
                         try {
+                            console.log(`[PAIRING_REQUESTED] Account ${accountId}: calling requestPairingCode(${phoneNumber})`);
                             const code      = await sock.requestPairingCode(phoneNumber);
                             const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
 
-                            console.log(`[Account ${accountId}][Pairing] ✅ Pairing Code: ${formatted}`);
+                            console.log(`[PAIRING_CODE_RECEIVED] Account ${accountId}: code = ${formatted}`);
 
                             // ── Phase 2: تسجيل إنشاء Pairing Code ─────────
                             RuntimeAnalyzer.onPairingCode(accountId, phoneNumber).catch(() => {});
@@ -927,6 +928,7 @@ class WhatsAppManager {
                             this.lastPairingCode.set(accountId, { code: formatted, ts: Date.now() });
 
                             this._emitState(accountId, 'pairing_ready', { code: formatted });
+                            console.log(`[PAIRING_CODE_SENT] Account ${accountId}: code ${formatted} sent to frontend`);
 
                             if (this.io) {
                                 // ✅ FIX: إرسال الرمز في حدث connection_state أيضاً للتأكد من استقباله
@@ -996,25 +998,72 @@ class WhatsAppManager {
                             return;
                         }
 
-                        // خطأ شبكة → أعد المحاولة
+                        // ────────────────────────────────────────────────────────────────
+                        // [FIX-PAIRING-408] انقطاع شبكة — التفريق بين حالتين:
+                        //
+                        // الحالة A: pairingRequested=true (تم إرسال الكود بالفعل)
+                        //   → لا نحذف بيانات الجلسة، لأن الكود مرتبط بـ auth keys الحالية
+                        //   → نعيد الاتصال بنفس الـ credentials بدون طلب كود جديد
+                        //   → نبقي الكود ظاهراً للمستخدم
+                        //
+                        // الحالة B: pairingRequested=false (لم يُرسل كود بعد)
+                        //   → نعيد بدء الجلسة كاملاً (الطريقة القديمة)
+                        // ────────────────────────────────────────────────────────────────
                         const attempts = (this.reconnectAttempts.get(accountId) || 0) + 1;
                         this.reconnectAttempts.set(accountId, attempts);
-                        const delay = Math.min(attempts * 3000, 15000);
+                        const delay = Math.min(attempts * 2000, 10000);
 
-                        this._emitState(accountId, 'disconnected', { reason: statusCode, attempt: attempts });
+                        if (pairingRequested) {
+                            // ✅ FIX: الكود أُرسل — أبقِ نفس الـ auth keys وأعِد الاتصال
+                            console.log(`[PAIRING_CODE_SENT] Account ${accountId}: 408 after code sent — reconnecting with SAME creds (attempt ${attempts})`);
 
-                        if (attempts <= 3) {
-                            console.log(`[Account ${accountId}][Pairing] Retrying in ${delay}ms (attempt ${attempts})...`);
-                            // [FIX-1] _scheduleReconnect يمنع Ghost Timers
-                            this._scheduleReconnect(accountId, delay, () => this.initPairingSession(accountId, phoneNumber));
-                        } else {
-                            this._emitState(accountId, 'error', {
-                                error: `فشل الاتصال بعد ${attempts} محاولات. تحقق من الإنترنت وحاول مرة أخرى.`,
+                            // أبقِ الكود ظاهراً للمستخدم وأخبره بأن الاتصال جارٍ
+                            const cachedCode = this.lastPairingCode.get(accountId);
+                            this._emitState(accountId, 'pairing_ready', {
+                                code: cachedCode?.code || undefined,
+                                reconnecting: true,
                             });
-                            if (this.io) {
-                                this.io.to(`account_${accountId}`).emit('pairing_error', {
-                                    error: `فشل الاتصال بعد ${attempts} محاولات (كود: ${statusCode}). تحقق من الإنترنت.`,
+                            // إعادة إرسال الكود صراحةً لضمان ظهوره في الواجهة
+                            if (this.io && cachedCode?.code) {
+                                this.io.to(`account_${accountId}`).emit('pairing_code', {
+                                    code: cachedCode.code,
+                                    phone: phoneNumber,
+                                    reconnecting: true,
                                 });
+                            }
+
+                            if (attempts <= 5) {
+                                // [FIX-PAIRING-408] إعادة الاتصال بنفس الـ credentials (لا حذف جلسة)
+                                this._scheduleReconnect(accountId, delay, () =>
+                                    this._retryPairingWithSameCreds(accountId, phoneNumber)
+                                );
+                            } else {
+                                console.warn(`[PAIRING_FAILED] Account ${accountId}: max reconnect attempts (${attempts}) reached after code sent`);
+                                this._emitState(accountId, 'error', {
+                                    error: 'انقطع الاتصال. الرجاء طلب كود جديد.',
+                                });
+                                if (this.io) {
+                                    this.io.to(`account_${accountId}`).emit('pairing_error', {
+                                        error: 'انقطع الاتصال أكثر من 5 مرات. اضغط "إعادة المحاولة" للحصول على كود جديد.',
+                                    });
+                                }
+                            }
+                        } else {
+                            // لم يُرسل كود بعد — أعِد البدء كاملاً
+                            this._emitState(accountId, 'disconnected', { reason: statusCode, attempt: attempts });
+
+                            if (attempts <= 3) {
+                                console.log(`[PAIRING_START] Account ${accountId}: 408 before code — retrying pairing in ${delay}ms (attempt ${attempts})`);
+                                this._scheduleReconnect(accountId, delay, () => this.initPairingSession(accountId, phoneNumber));
+                            } else {
+                                this._emitState(accountId, 'error', {
+                                    error: `فشل الاتصال بعد ${attempts} محاولات. تحقق من الإنترنت وحاول مرة أخرى.`,
+                                });
+                                if (this.io) {
+                                    this.io.to(`account_${accountId}`).emit('pairing_error', {
+                                        error: `فشل الاتصال بعد ${attempts} محاولات (كود: ${statusCode}). تحقق من الإنترنت.`,
+                                    });
+                                }
                             }
                         }
                         return;
@@ -1089,9 +1138,215 @@ class WhatsAppManager {
         return await initPromise;
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // [FIX-PAIRING-408] _retryPairingWithSameCreds
+    //
+    // إعادة الاتصال بنفس الـ auth keys دون حذف بيانات الجلسة.
+    // يُستدعى بعد 408 عندما يكون الكود قد أُرسل بالفعل.
+    //
+    // الفرق الجوهري عن initPairingSession:
+    //   - لا يحذف بيانات الجلسة
+    //   - لا يطلب pairing code جديد عند ظهور QR event
+    //   - إذا الـ creds أصبحت registered → يُحوِّل إلى initSession العادية
+    // ────────────────────────────────────────────────────────────────────────
+    async _retryPairingWithSameCreds(accountId, phoneNumber) {
+        // إنهاء أي socket قائم
+        const old = this.sessions.get(accountId);
+        if (old) { try { old.end(undefined); } catch {} this.sessions.delete(accountId); }
+        this.initPromises.delete(accountId);
+
+        console.log(`[PAIRING_REQUESTED] Account ${accountId}: retrying connection with existing creds (no session delete)`);
+        this._emitState(accountId, 'pairing_starting');
+
+        const retryPromise = (async () => {
+            try {
+                const { state, saveCreds } = await this._usePostgresAuthState(accountId);
+                const waVersion = await this._fetchWAVersion();
+
+                // إذا كانت الـ creds مسجلة → ننتقل لـ initSession مباشرة
+                if (state.creds?.registered) {
+                    console.log(`[PAIRING_SUCCESS] Account ${accountId}: creds registered — transitioning to full session`);
+                    return this.initSession(accountId);
+                }
+
+                const sock = makeWASocket({
+                    auth:               state,
+                    version:            waVersion,
+                    logger:             this.logger,
+                    printQRInTerminal:  false,
+                    keepAliveIntervalMs: 25_000,
+                    connectTimeoutMs:    60_000,
+                    browser:             Browsers.macOS('Chrome'),
+                    syncFullHistory:     false,
+                    markOnlineOnConnect: false,
+                    retryRequestDelayMs: 500,
+                    maxRetries:          5,
+                });
+
+                sock.ev.on('creds.update', saveCreds);
+
+                sock.ev.on('connection.update', async (update) => {
+                    const { connection, lastDisconnect, qr } = update;
+
+                    // QR event — لا نطلب كوداً جديداً، نُبقي الكود الحالي ونُعيد حالة pairing_ready
+                    if (qr) {
+                        const cachedCode = this.lastPairingCode.get(accountId);
+                        if (cachedCode?.code) {
+                            console.log(`[PAIRING_CODE_SENT] Account ${accountId}: QR fired during retry — keeping existing code ${cachedCode.code}`);
+                            this._emitState(accountId, 'pairing_ready', { code: cachedCode.code });
+                            if (this.io) {
+                                this.io.to(`account_${accountId}`).emit('pairing_code', {
+                                    code: cachedCode.code, phone: phoneNumber,
+                                });
+                            }
+                        } else {
+                            // الكود انتهى — اطلب كوداً جديداً
+                            console.log(`[PAIRING_START] Account ${accountId}: code expired during retry — requesting new code`);
+                            this._emitState(accountId, 'pairing_generating');
+                            try {
+                                const newCode = await sock.requestPairingCode(phoneNumber);
+                                const formatted = newCode?.match(/.{1,4}/g)?.join('-') || newCode;
+                                this.lastPairingCode.set(accountId, { code: formatted, ts: Date.now() });
+                                this._emitState(accountId, 'pairing_ready', { code: formatted });
+                                if (this.io) {
+                                    this.io.to(`account_${accountId}`).emit('pairing_code', { code: formatted, phone: phoneNumber });
+                                    console.log(`[PAIRING_CODE_RECEIVED] Account ${accountId}: new code ${formatted}`);
+                                    console.log(`[PAIRING_CODE_SENT] Account ${accountId}: new code sent to frontend`);
+                                }
+                            } catch (err) {
+                                console.error(`[PAIRING_FAILED] Account ${accountId}: requestPairingCode error:`, err.message);
+                                this._emitState(accountId, 'error', { error: err.message });
+                            }
+                        }
+                        return;
+                    }
+
+                    if (connection === 'close') {
+                        const statusCode = new Boom.Boom(lastDisconnect?.error)?.output?.statusCode;
+                        console.log(`[SOCKET_DISCONNECTED] Account ${accountId}: retry connection closed. Code: ${statusCode}`);
+                        this.sessions.delete(accountId);
+                        this.initPromises.delete(accountId);
+
+                        if (CLEAR_SESSION_CODES.has(statusCode)) {
+                            await this._clearSession(accountId, statusCode);
+                            return;
+                        }
+
+                        if (statusCode === DisconnectReason.restartRequired) {
+                            await saveCreds().catch(() => {});
+                            if (state.creds?.registered) {
+                                this._scheduleReconnect(accountId, 3000, () => this.initSession(accountId));
+                            } else {
+                                this._scheduleReconnect(accountId, 3000, () => this._retryPairingWithSameCreds(accountId, phoneNumber));
+                            }
+                            return;
+                        }
+
+                        // 408 مجدداً — أعِد المحاولة مع نفس الـ creds
+                        if (TEMP_DISCONNECT_CODES.has(statusCode)) {
+                            const retryAttempts = (this.reconnectAttempts.get(accountId) || 0) + 1;
+                            this.reconnectAttempts.set(accountId, retryAttempts);
+                            const cachedCode = this.lastPairingCode.get(accountId);
+                            if (cachedCode?.code) {
+                                this._emitState(accountId, 'pairing_ready', { code: cachedCode.code, reconnecting: true });
+                                if (this.io) {
+                                    this.io.to(`account_${accountId}`).emit('pairing_code', { code: cachedCode.code, phone: phoneNumber });
+                                }
+                            }
+                            if (retryAttempts <= 5) {
+                                const retryDelay = Math.min(retryAttempts * 2000, 10000);
+                                this._scheduleReconnect(accountId, retryDelay, () => this._retryPairingWithSameCreds(accountId, phoneNumber));
+                            } else {
+                                this._emitState(accountId, 'error', { error: 'انقطع الاتصال. اضغط "إعادة المحاولة" للحصول على كود جديد.' });
+                            }
+                            return;
+                        }
+
+                        // أي كود آخر → إعادة محاولة كاملة
+                        this._scheduleReconnect(accountId, 3000, () => this.initPairingSession(accountId, phoneNumber));
+                    }
+
+                    if (connection === 'open') {
+                        console.log(`[PAIRING_SUCCESS] Account ${accountId}: connected via pairing retry`);
+                        this.reconnectAttempts.delete(accountId);
+                        this.sessions.set(accountId, sock);
+                        this._emitState(accountId, 'connected');
+                        await DatabaseManager.systemDB.run(
+                            `UPDATE accounts SET status = 'connected', health_status = 'normal',
+                             connection_type = 'pairing_code', phone_number = $1, updated_at = NOW()
+                             WHERE id = $2`,
+                            [phoneNumber, accountId]
+                        ).catch(console.error);
+                        if (this.io) {
+                            this.io.emit('account_status', { accountId, status: 'connected' });
+                            this.io.to(`account_${accountId}`).emit('account_status', { accountId, status: 'connected' });
+                        }
+                    }
+                });
+
+                return sock;
+            } catch (err) {
+                this.initPromises.delete(accountId);
+                console.error(`[PAIRING_FAILED] Account ${accountId}: _retryPairingWithSameCreds error:`, err.message);
+                this._emitState(accountId, 'error', { error: err.message });
+                throw err;
+            }
+        })();
+
+        this.initPromises.set(accountId, retryPromise);
+        return await retryPromise;
+    }
+
     // ── Force Reset ───────────────────────────────────────────────────────────
     async forceResetSession(accountId) {
         await this._clearSession(accountId, 'force_reset');
+        return true;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // [FIX-QR] startFreshQRSession — يُستخدم من connectAccount endpoint
+    //
+    // السبب: initSession وحده لا يكفي لأنه:
+    //   1. إذا وُجد creds.registered=true → يتخطى QR ويذهب مباشرة لـ connecting
+    //   2. إذا كان connection_type='pairing_code' → يُعيد التوجيه لـ initPairingSession
+    //
+    // الحل: نظّف كل شيء أولاً (ذاكرة + قاعدة بيانات) ثم ابدأ جلسة QR نظيفة.
+    // ────────────────────────────────────────────────────────────────────────
+    async startFreshQRSession(accountId) {
+        console.log(`[QR_START] Account ${accountId}: starting fresh QR session`);
+
+        // 1. تنظيف الذاكرة والـ timers والـ FSM
+        this._cleanupAccount(accountId);
+
+        // 2. مسح بيانات الجلسة من قاعدة البيانات (يضمن عدم تخطي QR)
+        await SystemDB.deleteAllSessionData(accountId).catch(() => {});
+
+        // 3. إعادة تعيين نوع الاتصال لـ qr_code في DB
+        await DatabaseManager.systemDB.run(
+            `UPDATE accounts SET connection_type = 'qr_code', status = 'disconnected', updated_at = NOW() WHERE id = $1`,
+            [accountId]
+        ).catch(() => {});
+
+        console.log(`[QR_START] Account ${accountId}: session cleared, initiating QR generation`);
+
+        // 4. بدء جلسة QR نظيفة (fire & forget — الأحداث تصل عبر Socket)
+        this.initSession(accountId).catch(err =>
+            console.error(`[QR_START] Account ${accountId}: initSession error:`, err.message)
+        );
+
+        return true;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // [FIX-DISCONNECT] disconnectAccount — كانت مفقودة وتسبب "is not a function"
+    // ────────────────────────────────────────────────────────────────────────
+    async disconnectAccount(accountId) {
+        console.log(`[SOCKET_DISCONNECTED] Account ${accountId}: manual disconnect requested`);
+        this._cleanupAccount(accountId);
+        await DatabaseManager.systemDB.run(
+            `UPDATE accounts SET status = 'disconnected', updated_at = NOW() WHERE id = $1`,
+            [accountId]
+        ).catch(() => {});
         return true;
     }
 
