@@ -22,17 +22,22 @@
 const EventBus = require('./EventBus');
 
 const VALID_TRANSITIONS = {
-    idle:               ['initializing'],
+    idle:               ['initializing', 'qr_generating', 'pairing_starting'],
     initializing:       ['qr_generating', 'pairing_starting', 'connecting', 'error', 'disconnected', 'idle'],
-    qr_generating:      ['qr_ready', 'error', 'disconnected', 'initializing'],
-    qr_ready:           ['scanning', 'connecting', 'disconnected', 'error', 'qr_ready', 'initializing', 'qr_generating'],
-    pairing_starting:   ['pairing_generating', 'error', 'disconnected', 'initializing'],
-    pairing_generating: ['pairing_ready', 'error', 'disconnected', 'initializing'],
-    pairing_ready:      ['scanning', 'connecting', 'disconnected', 'error', 'initializing'],
-    scanning:           ['connecting', 'qr_generating', 'error', 'disconnected', 'initializing'],
+    // [FIX-CROSS] إضافة pairing_starting لتسمح التبديل من QR إلى Pairing
+    qr_generating:      ['qr_ready', 'error', 'disconnected', 'initializing', 'pairing_starting'],
+    // [FIX-CROSS] إضافة pairing_starting لتسمح التبديل من QR جاهز إلى Pairing
+    qr_ready:           ['scanning', 'connecting', 'disconnected', 'error', 'qr_ready', 'initializing', 'qr_generating', 'pairing_starting'],
+    // [FIX-CROSS] إضافة qr_generating لتسمح التبديل من Pairing إلى QR
+    pairing_starting:   ['pairing_generating', 'error', 'disconnected', 'initializing', 'qr_generating'],
+    // [FIX-CROSS] إضافة qr_generating لتسمح التبديل من Pairing generating إلى QR
+    pairing_generating: ['pairing_ready', 'error', 'disconnected', 'initializing', 'qr_generating', 'pairing_starting'],
+    // [FIX-CROSS] إضافة qr_generating لتسمح التبديل من Pairing ready إلى QR
+    pairing_ready:      ['scanning', 'connecting', 'disconnected', 'error', 'initializing', 'qr_generating', 'pairing_starting'],
+    scanning:           ['connecting', 'qr_generating', 'error', 'disconnected', 'initializing', 'pairing_starting'],
     // [FIX] connecting → initializing مطلوب عند إعادة التهيئة بعد 515/reconnect
     connecting:         ['connected', 'qr_generating', 'pairing_starting', 'disconnected', 'error', 'initializing'],
-    connected:          ['disconnected', 'error', 'initializing'],
+    connected:          ['disconnected', 'error', 'initializing', 'qr_generating', 'pairing_starting'],
     disconnected:       ['initializing', 'idle', 'error', 'pairing_starting', 'qr_generating'],
     error:              ['idle', 'initializing', 'disconnected', 'pairing_starting', 'qr_generating'],
 };
