@@ -254,17 +254,11 @@ class WhatsAppManager {
         RuntimeAnalyzer.onStateChange(accountId, newState, extra).catch(() => {});
         CycleAnalyzer.onStageChange(accountId, newState, extra).catch(() => {});
 
-        // [FIX-2] SocketBridge — إرسال مركزي
+        // [FIX-2] SocketBridge — إرسال مركزي (مصدر وحيد للحقيقة)
+        // ⚠️ BUG #1 FIX: تمت إزالة io.to().emit() المباشر هنا لمنع إرسال connection_state مرتين
+        // SocketBridge.emitConnectionState يغطي الغرفة بالكامل — لا حاجة لإرسال ثانٍ
         SocketBridge.emitConnectionState(accountId, newState, extra);
 
-        if (this.io) {
-            this.io.to(`account_${accountId}`).emit('connection_state', {
-                accountId,
-                state: newState,
-                ts: Date.now(),
-                ...extra,
-            });
-        }
         console.log(`[Account ${accountId}] State ${prevState} → ${newState}`, extra.error ? `(${extra.error})` : '');
     }
 
@@ -626,11 +620,11 @@ class WhatsAppManager {
                         this._emitState(accountId, 'qr_ready', { qr });
 
                         // [FIX-QR-DUAL] إرسال QR عبر حدث منفصل للتوافقية الكاملة
+                        // ⚠️ BUG #2 FIX: SocketBridge.emitQR() أُزيل — _emitState يُرسل connection_state مع qr
+                        // و SocketBridge._replayState يتولى الـ late-joiners تلقائياً
                         if (this.io) {
                             this.io.to(`account_${accountId}`).emit('qr_code', { qr, ts: qrTs });
                         }
-                        // [FIX-QR-BRIDGE] إرسال QR عبر SocketBridge أيضاً (للـ late-joiners)
-                        SocketBridge.emitQR(accountId, qr);
                         console.log(`[QR_SENT_TO_FRONTEND] Account ${accountId}: QR emitted to room account_${accountId}`);
                     }
 
@@ -816,16 +810,11 @@ class WhatsAppManager {
                             LinkMonitorEngine.markActive(accountId);
                         } catch {}
 
-                        if (this.io) {
-                            // ✅ FIX: emit to BOTH room (for modal socket) AND global (for dashboard)
-                            this.io.to(`account_${accountId}`).emit('account_status', { accountId, status: 'connected' });
-                            this.io.emit('account_status', { accountId, status: 'connected' });
-                            this.io.emit('notification', {
-                                type: 'success',
-                                title: '✅ تم الاتصال',
-                                message: 'تم ربط حساب الواتساب بنجاح.',
-                            });
-                        }
+                        // ⚠️ BUG #4 FIX: استخدام SocketBridge بدلاً من io.emit المباشر
+                        // SocketBridge.emitAccountStatus يُرسل للغرفة + البث العام في آنٍ واحد
+                        // يمنع التكرار الناتج عن io.to().emit() + io.emit() في نفس الوقت
+                        SocketBridge.emitAccountStatus(accountId, 'connected');
+                        SocketBridge.emitNotification('success', '✅ تم الاتصال', 'تم ربط حساب الواتساب بنجاح.', accountId);
                     }
                 });
 
@@ -1002,15 +991,10 @@ class WhatsAppManager {
                             this._emitState(accountId, 'pairing_ready', { code: formatted });
                             console.log(`[PAIRING_CODE_SENT] Account ${accountId}: code ${formatted} sent to frontend`);
 
+                            // ⚠️ BUG #5 FIX: إزالة إرسال connection_state المُكرَّر
+                            // _emitState أعلاه يُرسل بالفعل connection_state (مع code) عبر SocketBridge
+                            // نُبقي على pairing_code كحدث منفصل للتوافقية فقط (بدون connection_state مُكرَّر)
                             if (this.io) {
-                                // ✅ FIX: إرسال الرمز في حدث connection_state أيضاً للتأكد من استقباله
-                                this.io.to(`account_${accountId}`).emit('connection_state', {
-                                    accountId,
-                                    state: 'pairing_ready',
-                                    code: formatted,
-                                    ts: Date.now(),
-                                });
-                                // ✅ FIX: إرسال حدث منفصل للتوافقية
                                 this.io.to(`account_${accountId}`).emit('pairing_code', {
                                     code:  formatted,
                                     phone: phoneNumber,
