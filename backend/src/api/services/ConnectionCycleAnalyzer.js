@@ -100,6 +100,11 @@ class ConnectionCycleAnalyzer {
     constructor() {
         // activeStages: accountId → { stage, enteredAt, attemptId, connectionType }
         this._activeStages = new Map();
+        // ✅ BUG #3 FIX: Circuit breaker لأخطاء PostgreSQL
+        // يمنع إغراق السجلات بـ ECONNREFUSED عند كل تغيير حالة
+        this._lastDbErrorTs  = 0;      // آخر timestamp لتسجيل خطأ DB
+        this._dbErrorCount   = 0;      // عدد الأخطاء المُكتَّمة
+        this._DB_ERROR_THROTTLE_MS = 60_000; // تسجيل مرة واحدة كل دقيقة فقط
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -161,7 +166,21 @@ class ConnectionCycleAnalyzer {
                     ...extra,
                     prevStageMs: timeInPrevStageMs,
                 }),
-            ]).catch(err => console.warn('[CycleAnalyzer] insert transition error:', err.message));
+            ]).catch(err => {
+                // ✅ BUG #3 FIX: إخماد أخطاء ECONNREFUSED المُكرَّرة (تحدث 7-10× لكل دورة اتصال)
+                // نُسجِّل خطأ واحداً فقط كل 60 ثانية بدلاً من إغراق السجلات
+                this._dbErrorCount++;
+                const now = Date.now();
+                if (now - this._lastDbErrorTs >= this._DB_ERROR_THROTTLE_MS) {
+                    this._lastDbErrorTs = now;
+                    const suppressed = this._dbErrorCount - 1;
+                    console.warn(
+                        `[CycleAnalyzer] DB insert error${suppressed > 0 ? ` (+ ${suppressed} suppressed)` : ''}:`,
+                        err.message
+                    );
+                    this._dbErrorCount = 0;
+                }
+            });
 
             // ── تحديث الحالة الداخلية ─────────────────────────────────────
             this._activeStages.set(accountId, {
