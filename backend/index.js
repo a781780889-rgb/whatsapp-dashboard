@@ -65,6 +65,14 @@ const app = express();
 // ── Security: Helmet ──────────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 
+// ── [FIX-CACHE] منع HTTP caching لجميع مسارات API لتجنب 304 في Railway ────────
+app.use('/api', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+});
+
 // ── [FIX-24] HTTP Request Logging ─────────────────────────────────────────────
 const { httpLogger } = require('./src/core/Logger');
 app.use(httpLogger);
