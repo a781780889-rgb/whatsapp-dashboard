@@ -332,6 +332,10 @@ class AccountController {
     async getQrStatus(req, res) {
         try {
             const { id } = req.params;
+            // منع الـ HTTP caching تماماً — هذا endpoint يتغير باستمرار
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
             const status = WhatsAppManager.getQrStatus(id);
             return res.json({ success: true, ...status });
         } catch (error) {
