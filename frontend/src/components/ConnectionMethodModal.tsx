@@ -213,6 +213,14 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
   const socketRef             = useRef<Socket | null>(null);
   const expireTimer           = useRef<any>(null);
   const isMounted             = useRef(true);
+  // ✅ FIX: ref لتتبع الحالة الحقيقية داخل socket handlers (يحل مشكلة stale closure)
+  const connStateRef          = useRef<ConnState>('idle');
+  const pollRef               = useRef<any>(null);
+
+  const setConnState = (s: ConnState) => {
+    connStateRef.current = s;
+    setConn(s);
+  };
 
   useEffect(() => { isMounted.current = true; return () => { isMounted.current = false; }; }, []);
 
@@ -221,11 +229,12 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
     setQr(null);
     setExpired(false);
     setError('');
-    setConn('initializing');
+    setConnState('initializing');
 
-    // قطع أي socket سابق
+    // قطع أي socket سابق + إيقاف polling سابق
     if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
     if (expireTimer.current) { clearTimeout(expireTimer.current); }
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
 
     try {
       // 1. إرسال طلب الاتصال للـ backend
@@ -233,11 +242,11 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       const data = await res.json();
       if (!data.success) {
         setError(data.error || 'فشل بدء الاتصال');
-        setConn('error');
+        setConnState('error');
         return;
       }
 
-      setConn('qr_generating');
+      setConnState('qr_generating');
 
       // 2. الاتصال بـ Socket.IO والانضمام للغرفة
       const socket = io(SOCKET_URL, {
@@ -252,17 +261,20 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         socket.emit('join_account', accountId);
 
         // 3. بعد الانضمام للغرفة: تحقق من وجود QR مخزّن (لتجنب Race Condition)
-        // إذا انبعث QR قبل أن ينضم Socket للغرفة، يحصل عليه من الـ REST endpoint
         try {
-          const qrRes  = await authFetch(`${API}/accounts/${accountId}/qr-status`);
+          const qrRes  = await authFetch(`${API}/accounts/${accountId}/qr-status`, { cache: 'no-store' });
+          if (!qrRes.ok) return;
           const qrData = await qrRes.json();
-          if (qrData.qr && isMounted.current) {
+          if (!isMounted.current) return;
+          if (qrData.state === 'connected') {
+            handleConnected(); return;
+          }
+          if (qrData.qr) {
             setQr(qrData.qr);
-            setConn('qr_ready');
+            setConnState('qr_ready');
             setExpired(false);
             if (expireTimer.current) clearTimeout(expireTimer.current);
-            // احسب الوقت المتبقي من الـ timestamp المخزّن
-            const age     = qrData.ts ? Date.now() - qrData.ts : 0;
+            const age       = qrData.ts ? Date.now() - qrData.ts : 0;
             const remaining = Math.max(55000 - age, 5000);
             expireTimer.current = setTimeout(() => {
               if (isMounted.current) setExpired(true);
@@ -271,36 +283,39 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         } catch {}
       });
 
-      // ✅ FIX: معالجة أفضل لأخطاء الاتصال
+      // ✅ FIX: connect_error — لا نُظهر خطأ إذا كان المستخدم في منتصف المسح
       socket.on('connect_error', (err: any) => {
-        if (isMounted.current && connState !== 'connected') {
-          setError(`خطأ في الاتصال: ${err?.message || 'تحقق من الاتصال'}`);
-          setConn('error');
-        }
+        if (!isMounted.current) return;
+        // تجاهل الخطأ إذا كنا في حالة scanning/connecting — الـ polling سيُكمل
+        const cur = connStateRef.current;
+        if (cur === 'scanning' || cur === 'connecting' || cur === 'connected') return;
+        setError(`خطأ في الاتصال: ${err?.message || 'تحقق من الاتصال'}`);
+        setConnState('error');
       });
 
+      // ✅ FIX: disconnect — لا نُظهر خطأ إذا كنا في scanning/connecting
+      // الـ polling سيستمر بمفرده ويرصد connected
       socket.on('disconnect', () => {
-        if (isMounted.current && connState !== 'connected') {
-          setError('تم قطع الاتصال. حاول مرة أخرى.');
-          setConn('disconnected');
-        }
+        if (!isMounted.current) return;
+        const cur = connStateRef.current;
+        if (cur === 'connected' || cur === 'scanning' || cur === 'connecting') return;
+        // لا نُوقف الـ polling — يبقى يعمل مستقلاً
       });
 
       // ── الأحداث الرئيسية ──────────────────────────────────────────────────
       socket.on('connection_state', ({ state: s, error: e }: any) => {
         if (!isMounted.current) return;
-        setConn(s as ConnState);
+        setConnState(s as ConnState);
         if (e) setError(e);
       });
 
       socket.on('qr_code', ({ qr: code }: any) => {
         if (!isMounted.current) return;
         setQr(code);
-        setConn('qr_ready');
+        setConnState('qr_ready');
         setExpired(false);
         setError('');
         if (expireTimer.current) clearTimeout(expireTimer.current);
-        // ✅ FIX: استخدام 55 ثانية بدلاً من 58 للتوافق مع Backend (QR_CACHE_TTL_MS)
         expireTimer.current = setTimeout(() => {
           if (isMounted.current) setExpired(true);
         }, 55_000);
@@ -309,20 +324,21 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       socket.on('session_cleared', () => {
         if (!isMounted.current) return;
         setQr(null);
-        setConn('qr_generating');
+        setConnState('qr_generating');
       });
 
       socket.on('connection_error', ({ error: e }: any) => {
         if (!isMounted.current) return;
         setError(e);
-        setConn('error');
+        setConnState('error');
       });
 
       const handleConnected = () => {
         if (!isMounted.current) return;
-        setConn('connected');
-        socket.disconnect();
-        socketRef.current = null;
+        if (connStateRef.current === 'connected') return; // منع التكرار
+        setConnState('connected');
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
         setTimeout(() => {
           showToast({ title: '✅ متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
           onConnected();
@@ -334,34 +350,40 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         if (s === 'connected') {
           handleConnected();
         } else if (s === 'disconnected') {
-          setConn('disconnected');
+          const cur = connStateRef.current;
+          if (cur !== 'connected' && cur !== 'scanning' && cur !== 'connecting') {
+            setConnState('disconnected');
+          }
         }
       });
 
-      // ✅ FIX: Polling fallback — كل 3 ثوانٍ نتحقق من الـ state عبر REST
-      // يضمن وصول حدث الاتصال حتى لو فاتت الـ Socket events
-      const pollInterval = setInterval(async () => {
+      // ✅ FIX: Polling مستقل — يعمل حتى بعد انقطاع Socket
+      // لا نربطه بـ socket.on('disconnect') لأن ذلك يقتله عند أي انقطاع مؤقت
+      pollRef.current = setInterval(async () => {
         if (!isMounted.current) return;
+        if (connStateRef.current === 'connected') {
+          clearInterval(pollRef.current); pollRef.current = null; return;
+        }
         try {
-          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`, {
-            cache: 'no-store',
-          });
-          if (!r.ok && r.status !== 200) return; // تجاهل 304 وغيره
+          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`, { cache: 'no-store' });
+          if (!r.ok) return;
           const d = await r.json();
           if (d.state === 'connected') {
-            clearInterval(pollInterval);
+            clearInterval(pollRef.current); pollRef.current = null;
             handleConnected();
+          } else if (d.state === 'connecting' || d.state === 'scanning') {
+            // تحديث الحالة للمستخدم بدون إظهار خطأ
+            if (isMounted.current && connStateRef.current !== 'connected') {
+              setConnState(d.state as ConnState);
+            }
           }
         } catch { /* network error, ignore */ }
-      }, 3000);
-
-      // تنظيف الـ interval عند إغلاق الـ socket
-      socket.on('disconnect', () => clearInterval(pollInterval));
+      }, 2500);
 
     } catch (err: any) {
       if (isMounted.current) {
         setError('فشل الاتصال بالخادم. تحقق من الإنترنت.');
-        setConn('error');
+        setConnState('error');
       }
     }
   }, [accountId]);
@@ -371,12 +393,13 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
     return () => {
       if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
       if (expireTimer.current) clearTimeout(expireTimer.current);
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     };
   }, [startSession]);
 
   const isConnected = connState === 'connected';
   const isError     = connState === 'error';
-  const isLoading   = ['idle', 'initializing', 'qr_generating'].includes(connState);
+  const isLoading   = ['idle', 'initializing', 'qr_generating', 'connecting'].includes(connState);
 
   return (
     <div className="flex flex-col items-center gap-4">
@@ -470,6 +493,14 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
   const socketRef                     = useRef<Socket | null>(null);
   const countdownRef                  = useRef<any>(null);
   const isMounted                     = useRef(true);
+  // ✅ FIX: ref لتتبع الحالة الحقيقية داخل socket handlers (يحل stale closure)
+  const connStateRef                  = useRef<ConnState>('idle');
+  const pollRef                       = useRef<any>(null);
+
+  const setConnState = (s: ConnState) => {
+    connStateRef.current = s;
+    setConn(s);
+  };
 
   useEffect(() => {
     isMounted.current = true;
@@ -477,6 +508,7 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       isMounted.current = false;
       if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
       if (countdownRef.current) clearInterval(countdownRef.current);
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     };
   }, []);
 
@@ -502,9 +534,10 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
 
     setError('');
     setPairingCode(null);
-    setConn('pairing_starting');
+    setConnState('pairing_starting');
 
     if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
 
     try {
       // 1. إرسال طلب Pairing
@@ -516,7 +549,7 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
 
       if (!data.success) {
         setError(data.error || 'فشل إنشاء الرمز');
-        setConn('error');
+        setConnState('error');
         return;
       }
 
@@ -536,12 +569,12 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       // ── أحداث الـ Pairing ────────────────────────────────────────────────
       socket.on('connection_state', ({ state: s, error: e, code }: any) => {
         if (!isMounted.current) return;
-        setConn(s as ConnState);
+        setConnState(s as ConnState);
         if (e) setError(e);
-        // ✅ FIX: استقبال الرمز من حدث connection_state
+        // استقبال الرمز من حدث connection_state
         if (s === 'pairing_ready' && code) {
           setPairingCode(code);
-          startCountdown(120); // 2 دقيقة لإدخال الكود
+          startCountdown(120);
           showToast({ title: '✅ تم إنشاء رمز الإقران', description: 'أدخله في واتساب خلال دقيقتين', type: 'success' });
         }
       });
@@ -549,30 +582,35 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       socket.on('pairing_code', ({ code }: any) => {
         if (!isMounted.current) return;
         setPairingCode(code);
-        setConn('pairing_ready');
+        setConnState('pairing_ready');
         setError('');
-        startCountdown(120); // 2 دقيقة لإدخال الكود
+        startCountdown(120);
         showToast({ title: '✅ تم إنشاء رمز الإقران', description: 'أدخله في واتساب خلال دقيقتين', type: 'success' });
       });
 
       socket.on('pairing_error', ({ error: e }: any) => {
         if (!isMounted.current) return;
         setError(e);
-        setConn('error');
+        setConnState('error');
         showToast({ title: '❌ فشل إنشاء الرمز', description: e, type: 'error' });
       });
 
       socket.on('connection_error', ({ error: e }: any) => {
         if (!isMounted.current) return;
+        // تجاهل الأخطاء إذا كنا في مرحلة الانتظار بعد إدخال الكود
+        const cur = connStateRef.current;
+        if (cur === 'pairing_ready' || cur === 'connecting' || cur === 'connected') return;
         setError(e);
-        setConn('error');
+        setConnState('error');
       });
 
       const handlePairingConnected = () => {
         if (!isMounted.current) return;
-        setConn('connected');
+        if (connStateRef.current === 'connected') return; // منع التكرار
+        setConnState('connected');
         if (countdownRef.current) clearInterval(countdownRef.current);
-        socket.disconnect();
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
         setTimeout(() => {
           showToast({ title: '✅ متصل', description: 'تم ربط الحساب بنجاح', type: 'success' });
           onConnected();
@@ -586,36 +624,46 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         }
       });
 
-      // ✅ FIX: Polling fallback — يضمن وصول حدث الاتصال حتى لو فاتت الـ Socket events
-      // المشكلة: بعد إدخال الرمز → 515 → initSession → connected قد يفوت الـ frontend
-      const pollInterval = setInterval(async () => {
+      // ✅ FIX: Polling مستقل — لا يُوقَف عند انقطاع Socket
+      // هذا ضروري لأن: بعد إدخال الكود → 515 → initSession → يستغرق وقتاً → Socket ينقطع
+      pollRef.current = setInterval(async () => {
         if (!isMounted.current) return;
+        if (connStateRef.current === 'connected') {
+          clearInterval(pollRef.current); pollRef.current = null; return;
+        }
         try {
-          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`, {
-            cache: 'no-store',
-          });
-          if (!r.ok && r.status !== 200) return; // تجاهل 304 وغيره
+          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`, { cache: 'no-store' });
+          if (!r.ok) return;
           const d = await r.json();
           if (d.state === 'connected') {
-            clearInterval(pollInterval);
+            clearInterval(pollRef.current); pollRef.current = null;
             handlePairingConnected();
+          } else if (d.state === 'connecting') {
+            // إبلاغ المستخدم أن الاتصال جارٍ (بعد إدخال الكود)
+            if (isMounted.current && connStateRef.current !== 'connected') {
+              setConnState('connecting');
+            }
           }
         } catch { /* network error, ignore */ }
-      }, 3000);
+      }, 2500);
 
-      socket.on('disconnect', () => clearInterval(pollInterval));
+      // ✅ FIX: عند انقطاع Socket، نبقي الـ polling يعمل — لا نوقفه
+      socket.on('disconnect', () => {
+        // لا نفعل شيئاً — الـ polling سيستمر
+      });
 
     } catch {
       setError('فشل الاتصال بالخادم. تحقق من الإنترنت.');
-      setConn('error');
+      setConnState('error');
     }
   };
 
   const handleRetry = () => {
     setPairingCode(null);
     setError('');
-    setConn('idle');
+    setConnState('idle');
     if (countdownRef.current) clearInterval(countdownRef.current);
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   };
 
   const handleCopy = () => {
@@ -625,7 +673,7 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const isLoading   = ['pairing_starting', 'pairing_generating'].includes(connState);
+  const isLoading   = ['pairing_starting', 'pairing_generating', 'connecting'].includes(connState);
   const isConnected = connState === 'connected';
   const isError     = connState === 'error';
   const canSubmit   = phoneLocal.replace(/\D/g, '').length >= 7 && !isLoading;
