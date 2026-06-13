@@ -321,8 +321,12 @@ class AccountController {
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
 
-            await WhatsAppManager.initSession(id);
-            return res.json({ success: true, message: 'جارٍ الاتصال...' });
+            // ✅ FIX-QR: استخدام startFreshQRSession بدلاً من initSession مباشرة
+            // السبب: initSession تتخطى QR إذا كانت هناك بيانات جلسة قديمة (registered=true)
+            //        أو إذا كان connection_type='pairing_code' في قاعدة البيانات
+            // startFreshQRSession تمسح كل شيء وتبدأ جلسة QR نظيفة
+            WhatsAppManager.startFreshQRSession(id).catch(() => {});
+            return res.json({ success: true, message: 'جارٍ إنشاء رمز QR...' });
         } catch (error) {
             return res.status(500).json({ success: false, error: error.message });
         }
@@ -352,7 +356,21 @@ class AccountController {
             const rawPhone = phone || phone_number;
             if (!rawPhone) return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
 
-            await WhatsAppManager.initPairingSession(id, rawPhone);
+            // ✅ FIX-PAIRING: التحقق من تنسيق الرقم قبل البدء
+            const cleanPhone = rawPhone.replace(/\D/g, '');
+            if (cleanPhone.length < 10) {
+                return res.status(400).json({ success: false, error: 'رقم الهاتف قصير جداً. تأكد من إدخال رمز الدولة ورقم الهاتف كاملاً.' });
+            }
+            if (cleanPhone.startsWith('00')) {
+                return res.status(400).json({ success: false, error: 'أدخل الرقم بدون 00 في البداية. مثال: 9665XXXXXXXX' });
+            }
+
+            // ✅ FIX-PAIRING: fire & forget — لا تنتظر حتى ينتهي (قد يستغرق 45 ثانية)
+            //    الأحداث تصل عبر Socket.IO
+            WhatsAppManager.initPairingSession(id, cleanPhone).catch((err) => {
+                console.error(`[PAIRING_FAILED] Account ${id}: initPairingSession error:`, err.message);
+            });
+
             return res.json({ success: true, message: 'جارٍ إنشاء رمز الإقران...' });
         } catch (error) {
             return res.status(500).json({ success: false, error: error.message });
@@ -374,10 +392,8 @@ class AccountController {
     async disconnectAccount(req, res) {
         try {
             const { id } = req.params;
+            // ✅ FIX: disconnectAccount الآن موجودة في WhatsAppManager
             await WhatsAppManager.disconnectAccount(id);
-            await DatabaseManager.systemDB.run(
-                `UPDATE accounts SET status = 'disconnected', updated_at = NOW() WHERE id = $1`, [id]
-            );
             return res.json({ success: true, message: 'تم قطع الاتصال' });
         } catch (error) {
             return res.status(500).json({ success: false, error: error.message });
