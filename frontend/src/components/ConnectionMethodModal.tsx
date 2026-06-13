@@ -250,12 +250,29 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
 
       // 2. الاتصال بـ Socket.IO والانضمام للغرفة
       const socket = io(SOCKET_URL, {
-        transports: ['websocket'],
+        // [FIX-TRANSPORT] websocket أولاً ثم polling كـ fallback لضمان عمل Railway و reverse proxies
+        transports: ['websocket', 'polling'],
         reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 2000,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1500,
+        timeout: 20000,
       });
       socketRef.current = socket;
+
+      // دالة مساعدة: تحديث QR وضبط مؤقت الانتهاء
+      const applyQR = (qrCode: string, ts?: number) => {
+        if (!isMounted.current) return;
+        setQr(qrCode);
+        setConnState('qr_ready');
+        setExpired(false);
+        setError('');
+        if (expireTimer.current) clearTimeout(expireTimer.current);
+        const age       = ts ? Date.now() - ts : 0;
+        const remaining = Math.max(55000 - age, 5000);
+        expireTimer.current = setTimeout(() => {
+          if (isMounted.current) setExpired(true);
+        }, remaining);
+      };
 
       socket.on('connect', async () => {
         socket.emit('join_account', accountId);
@@ -270,15 +287,7 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
             handleConnected(); return;
           }
           if (qrData.qr) {
-            setQr(qrData.qr);
-            setConnState('qr_ready');
-            setExpired(false);
-            if (expireTimer.current) clearTimeout(expireTimer.current);
-            const age       = qrData.ts ? Date.now() - qrData.ts : 0;
-            const remaining = Math.max(55000 - age, 5000);
-            expireTimer.current = setTimeout(() => {
-              if (isMounted.current) setExpired(true);
-            }, remaining);
+            applyQR(qrData.qr, qrData.ts);
           }
         } catch {}
       });
@@ -303,22 +312,19 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
       });
 
       // ── الأحداث الرئيسية ──────────────────────────────────────────────────
-      socket.on('connection_state', ({ state: s, error: e }: any) => {
+      socket.on('connection_state', ({ state: s, error: e, qr: qrFromState, ts: qrTs }: any) => {
         if (!isMounted.current) return;
         setConnState(s as ConnState);
         if (e) setError(e);
+        // [FIX-QR-STATE] إذا جاء QR مع حدث connection_state → عرضه مباشرة
+        if (s === 'qr_ready' && qrFromState) {
+          applyQR(qrFromState, qrTs);
+        }
       });
 
-      socket.on('qr_code', ({ qr: code }: any) => {
+      socket.on('qr_code', ({ qr: code, ts: qrTs }: any) => {
         if (!isMounted.current) return;
-        setQr(code);
-        setConnState('qr_ready');
-        setExpired(false);
-        setError('');
-        if (expireTimer.current) clearTimeout(expireTimer.current);
-        expireTimer.current = setTimeout(() => {
-          if (isMounted.current) setExpired(true);
-        }, 55_000);
+        applyQR(code, qrTs);
       });
 
       socket.on('session_cleared', () => {
@@ -357,8 +363,8 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
         }
       });
 
-      // ✅ FIX: Polling مستقل — يعمل حتى بعد انقطاع Socket
-      // لا نربطه بـ socket.on('disconnect') لأن ذلك يقتله عند أي انقطاع مؤقت
+      // [FIX-POLLING] Polling مستقل — يعمل حتى بعد انقطاع Socket ويُحدِّث QR أيضاً
+      // هذا يضمن عرض QR حتى لو فشل Socket.IO WebSocket
       pollRef.current = setInterval(async () => {
         if (!isMounted.current) return;
         if (connStateRef.current === 'connected') {
@@ -372,9 +378,14 @@ function QRCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
             clearInterval(pollRef.current); pollRef.current = null;
             handleConnected();
           } else if (d.state === 'connecting' || d.state === 'scanning') {
-            // تحديث الحالة للمستخدم بدون إظهار خطأ
             if (isMounted.current && connStateRef.current !== 'connected') {
               setConnState(d.state as ConnState);
+            }
+          } else if (d.state === 'qr_ready' && d.qr) {
+            // [FIX-QR-POLLING] تحديث QR عبر HTTP polling إذا لم يصل عبر Socket
+            // هذا يحل مشكلة: Socket.IO WebSocket يفشل على بعض الشبكات/proxies
+            if (connStateRef.current !== 'connected' && connStateRef.current !== 'scanning') {
+              applyQR(d.qr, d.ts);
             }
           }
         } catch { /* network error, ignore */ }
@@ -564,15 +575,30 @@ function PairingCodeMethod({ accountId, onBack, onConnected, showToast }: any) {
 
       // 2. الاتصال بـ Socket.IO
       const socket = io(SOCKET_URL, {
-        transports: ['websocket'],
+        // [FIX-TRANSPORT] websocket أولاً ثم polling كـ fallback
+        transports: ['websocket', 'polling'],
         reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 2000,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1500,
+        timeout: 20000,
       });
       socketRef.current = socket;
 
-      socket.on('connect', () => {
+      socket.on('connect', async () => {
         socket.emit('join_account', accountId);
+        // تحقق من وجود pairing code مخزّن (للـ late-joiners)
+        try {
+          const r = await authFetch(`${API}/accounts/${accountId}/qr-status`, { cache: 'no-store' });
+          if (!r.ok) return;
+          const d = await r.json();
+          if (!isMounted.current) return;
+          if (d.state === 'connected') { handlePairingConnected(); return; }
+          if (d.state === 'pairing_ready' && d.code) {
+            setPairingCode(d.code);
+            setConnState('pairing_ready');
+            startCountdown(120);
+          }
+        } catch {}
       });
 
       // ── أحداث الـ Pairing ────────────────────────────────────────────────
