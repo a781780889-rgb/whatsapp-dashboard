@@ -169,9 +169,22 @@ app.get('/health', async (_, res) => {
 const server = http.createServer(app);
 const io     = new Server(server, {
     cors: corsOptions,
-    pingTimeout:    60000,
-    pingInterval:   25000,
-    upgradeTimeout: 30000,
+    pingTimeout:     60000,
+    pingInterval:    25000,
+    upgradeTimeout:  30000,
+    // [FIX-TRANSPORT] السماح بكلا النقلين: WebSocket أولاً ثم Polling كـ fallback
+    // هذا ضروري على Railway وخلف reverse proxies التي قد لا تدعم WebSocket upgrade دائماً
+    transports: ['websocket', 'polling'],
+    allowEIO3:  true,
+    // [FIX-CORS] ضمان CORS headers لـ Socket.IO على Railway
+    allowRequest: (req, fn) => {
+        const origin = req.headers.origin || '';
+        if (!origin) return fn(null, true);
+        if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+            return fn(null, true);
+        }
+        return fn('CORS blocked', false);
+    },
 });
 
 // ── [FIX-3] Setup Socket.IO — ترتيب التهيئة مهم لمنع Race Condition ──────────
