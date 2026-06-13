@@ -209,8 +209,12 @@ class WhatsAppManager {
         // محاولة الانتقال عبر FSM
         const ok = StateMachine.transition(accountId, newState, extra);
         if (!ok) {
-            // سماح إجبارية لحالات الطوارئ وإعادة التهيئة
-            const forceAllowed = ['error', 'disconnected', 'initializing', 'idle'];
+            // [FIX-FORCE] توسيع forceAllowed: جميع حالات البدء يجب أن لا تُحجب بصمت
+            // pairing_starting و qr_generating يجب أن تُنفَّذ دائماً حتى لو FSM يرفضها
+            const forceAllowed = [
+                'error', 'disconnected', 'initializing', 'idle',
+                'pairing_starting', 'pairing_generating', 'qr_generating',
+            ];
             if (forceAllowed.includes(newState)) {
                 StateMachine.forceTransition(accountId, newState, extra);
             } else {
@@ -474,13 +478,23 @@ class WhatsAppManager {
     }
 
     // ── جلب إصدار WA ─────────────────────────────────────────────────────────
+    // [FIX-VERSION] إعادة المحاولة 3 مرات قبل الوقوع إلى الإصدار الاحتياطي
     async _fetchWAVersion() {
-        try {
-            const { version } = await fetchLatestWaWebVersion();
-            return version;
-        } catch {
-            return [2, 3000, 1041235764];
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const { version } = await fetchLatestWaWebVersion();
+                return version;
+            } catch (err) {
+                if (attempt < 2) {
+                    // انتظر قبل إعادة المحاولة (2s ثم 4s)
+                    await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+                }
+            }
         }
+        // إصدار احتياطي — تم التحديث من الإصدار القديم [2,3000,1041235764]
+        // هذا الإصدار أحدث ويُقلِّل احتمالية الرفض من خوادم واتساب
+        console.warn('[WhatsAppManager] fetchLatestWaWebVersion failed 3 times — using fallback version.');
+        return [2, 3000, 1023141390];
     }
 
     // ── Init Session (QR Code Flow) ──────────────────────────────────────────
@@ -894,6 +908,12 @@ class WhatsAppManager {
 
         // مسح جلسة قديمة لضمان جلسة نظيفة
         await SystemDB.deleteAllSessionData(accountId).catch(() => {});
+
+        // [FIX-PAIRING-FSM] تنظيف FSM قبل البدء
+        // السبب: إذا كان الحساب في حالة qr_ready/qr_generating (بعد محاولة QR فاشلة)،
+        // فإن انتقال FSM إلى pairing_starting سيُحجَب وتبقى الواجهة معلقة.
+        // الحل: نُعيد تهيئة FSM دائماً عند بدء جلسة Pairing جديدة.
+        StateMachine.cleanup(accountId);
 
         this._emitState(accountId, 'pairing_starting');
 
