@@ -930,6 +930,20 @@ class WhatsAppManager {
 
     getSession(accountId) { return this.sessions.get(accountId); }
 
+    /**
+     * [FIX-DUPLICATE-CONNECT] isConnecting — هل هناك عملية اتصال/ربط جارية لهذا الحساب؟
+     * يُستخدم من AccountController لمنع تكرار طلبات /connect أو /connect-pairing
+     * (مثل ضغط المستخدم على الزر مرتين بسرعة)، والذي كان يُنشئ socketين متنافسين
+     * على نفس بيانات Baileys ويُسبِّب حلقات قطع اتصال 515/500 لا تنتهي.
+     */
+    isConnecting(accountId) {
+        if (this.initPromises.has(accountId)) return true;
+        const state = this.getConnectionState(accountId);
+        return ['initializing', 'qr_generating', 'qr_ready', 'scanning',
+                'pairing_starting', 'pairing_generating', 'pairing_ready',
+                'connecting'].includes(state);
+    }
+
     // ── Pairing Code Session ─────────────────────────────────────────────────
     //
     // 🔑 الإصلاح الجوهري:
@@ -1002,6 +1016,13 @@ class WhatsAppManager {
                 });
 
                 sock.ev.on('creds.update', saveCreds);
+
+                // [FIX-SESSION-TRACK] تسجيل الـ socket فوراً عند إنشائه، لا فقط عند open.
+                // السبب: قبل هذا الإصلاح كان this.sessions لا يحتوي على socket الـ Pairing
+                // أثناء pairing_generating/pairing_ready، فلا يستطيع _cleanupAccount أو أي
+                // محاولة اتصال أخرى لنفس الحساب إيجاده وإغلاقه، مما يسمح بوجود
+                // اتصالين (sockets) متنافسين على نفس بيانات Baileys ويُسبِّب حلقات 515/500.
+                this.sessions.set(accountId, sock);
 
                 let pairingRequested = false;
 
@@ -1255,7 +1276,7 @@ class WhatsAppManager {
 
                         this.reconnectAttempts.delete(accountId);
                         this.restartAttempts.delete(accountId);
-                        this.sessions.set(accountId, sock);
+                        // (مُسجَّل بالفعل في this.sessions منذ إنشاء الـ socket — [FIX-SESSION-TRACK])
 
                         // ── تشخيص: نجاح Pairing ──────────────────────────
                         DiagnosticEngine.diagnoseSuccess(accountId, 'pairing_code').catch(() => {});
@@ -1291,7 +1312,7 @@ class WhatsAppManager {
                     }
                 });
 
-                // ✅ FIX: session stored only when connection===open (line 683); not here
+                // [FIX-SESSION-TRACK] الـ socket مُسجَّل في this.sessions منذ سطر الإنشاء أعلاه
                 return sock;
 
             } catch (err) {
@@ -1361,6 +1382,9 @@ class WhatsAppManager {
                 });
 
                 sock.ev.on('creds.update', saveCreds);
+
+                // [FIX-SESSION-TRACK] نفس إصلاح initPairingSession — تسجيل فوري لمنع تنافس sockets
+                this.sessions.set(accountId, sock);
 
                 sock.ev.on('connection.update', async (update) => {
                     const { connection, lastDisconnect, qr } = update;
@@ -1452,7 +1476,7 @@ class WhatsAppManager {
                     if (connection === 'open') {
                         console.log(`[PAIRING_SUCCESS] Account ${accountId}: connected via pairing retry`);
                         this.reconnectAttempts.delete(accountId);
-                        this.sessions.set(accountId, sock);
+                        // (مُسجَّل بالفعل في this.sessions منذ إنشاء الـ socket)
                         this._emitState(accountId, 'connected');
                         await DatabaseManager.systemDB.run(
                             `UPDATE accounts SET status = 'connected', health_status = 'normal',
