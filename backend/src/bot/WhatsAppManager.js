@@ -77,8 +77,7 @@ const ANTI_BAN = {
 
 // ── Disconnect codes ──────────────────────────────────────────────────────────
 const CLEAR_SESSION_CODES = new Set([
-    // ✅ FIX: أُزيل badSession (500) من هنا — بعد مسح QR قد يأتي 500 مؤقت
-    // ونعالجه في منطق منفصل بدل مسح الجلسة فوراً
+    DisconnectReason.badSession,         // 500
     DisconnectReason.loggedOut,          // 401
     DisconnectReason.connectionReplaced, // 440
 ]);
@@ -511,16 +510,6 @@ class WhatsAppManager {
         if (this.sessions.has(accountId))     return this.sessions.get(accountId);
         if (this.initPromises.has(accountId)) return this.initPromises.get(accountId);
 
-        // تجاهل حسابات Business API
-        try {
-            const { queryOne } = require('../lib/postgres');
-            const acc = await queryOne('SELECT connection_type FROM accounts WHERE id = $1', [accountId]);
-            if (acc?.connection_type === 'business_api') {
-                console.log('[Account ' + accountId + '] Skipping QR init — Business API account.');
-                return null;
-            }
-        } catch (_) {}
-
         console.log(`[SOCKET_CONNECTED] Account ${accountId}: Starting new session init...`);
         this._emitState(accountId, 'initializing');
 
@@ -669,21 +658,56 @@ class WhatsAppManager {
 
                         try { require('../api/services/LinkMonitorEngine').markInactive(accountId); } catch {}
 
-                        // ✅ FIX: كود 500 بعد مسح QR مباشرة → أعد المحاولة بدل مسح الجلسة
+                        // ═══════════════════════════════════════════════════════════
+                        // [ROOT FIX-500] إصلاح جذري: "QR يظهر لكن الربط لا يكتمل"
+                        //
+                        // المشكلة: بعض إصدارات بروتوكول واتساب ترسل كود 500 (badSession)
+                        // فوراً بعد مسح المستخدم لـ QR، بدلاً من 515 (restartRequired)
+                        // المتوقَّع. الكود القديم كان يمسح الجلسة فوراً عند 500 (سطر
+                        // CLEAR_SESSION_CODES أدناه) دون فحص "هل تم المسح للتو؟" — وهذا
+                        // الفحص موجود فقط في مسار 515. النتيجة: المستخدم يمسح QR، الجلسة
+                        // تُحذف فوراً قبل اكتمال التسجيل، فيُطلب منه QR جديد إلى ما لا نهاية
+                        // أو ينقطع الاتصال بصمت دون أي رسالة واضحة.
+                        //
+                        // الحل: نطبّق نفس منطق qrWasJustScanned المستخدم في معالجة 515
+                        // على كود 500 تحديداً (لا على 401/440 لأنهما تسجيل خروج صريح من
+                        // واتساب ولا ينبغي تجاوزهما أبداً).
+                        // ═══════════════════════════════════════════════════════════
                         if (statusCode === DisconnectReason.badSession) {
-                            const qrTime = this.qrSentAt.get(accountId) || 0;
-                            const timeSinceQR = Date.now() - qrTime;
-                            const justScanned = timeSinceQR < 120_000;
-                            if (justScanned) {
-                                console.log('[Account ' + accountId + '] Got 500 right after QR scan — retrying in 5s instead of clearing session.');
-                                this._scheduleReconnect(accountId, 5000, () => this.initSession(accountId));
+                            const qrTime500      = this.qrSentAt.get(accountId) || 0;
+                            const justScanned500 = (Date.now() - qrTime500) < 120_000;
+
+                            if (justScanned500) {
+                                const retries500 = (this.restartAttempts.get(accountId) || 0) + 1;
+                                this.restartAttempts.set(accountId, retries500);
+
+                                if (retries500 > MAX_515_RETRIES) {
+                                    console.warn(`[Account ${accountId}] badSession(500) repeated ${retries500}x after scan — clearing for real.`);
+                                    this.restartAttempts.delete(accountId);
+                                    await this._clearSession(accountId, 500);
+                                    return;
+                                }
+
+                                console.log(`[Account ${accountId}] badSession(500) right after QR scan — treating like 515, NOT clearing session (attempt ${retries500}/${MAX_515_RETRIES}).`);
+                                this._emitState(accountId, 'connecting');
+                                QRAnalyzer.onQRScanned(accountId).catch(() => {});
+
+                                if (state.creds) {
+                                    state.creds.registered = true;
+                                    console.log(`[Account ${accountId}] creds.registered forced to true (500-after-scan path).`);
+                                }
+                                await saveCreds().catch(() => {});
+                                await new Promise(r => setTimeout(r, 2000));
+                                this.postScanReconnect.add(accountId);
+
+                                this._scheduleReconnect(accountId, 8000, () => this.initSession(accountId));
                                 return;
                             }
-                            await this._clearSession(accountId, statusCode);
-                            return;
+                            // لم يُمسَح QR حديثاً → جلسة فاسدة فعلياً، تابع للمسح أدناه
                         }
 
-                        // جلسة فاسدة
+                        // جلسة فاسدة (401 تسجيل خروج صريح / 440 جلسة مفتوحة بمكان آخر /
+                        // 500 بدون مسح حديث لـ QR)
                         if (CLEAR_SESSION_CODES.has(statusCode)) {
                             await this._clearSession(accountId, statusCode);
                             return;
@@ -1072,6 +1096,38 @@ class WhatsAppManager {
                         this.initPromises.delete(accountId);
 
                         // تسجيل خروج أو جلسة فاسدة
+                        // ═══════════════════════════════════════════════════════════
+                        // [ROOT FIX-500-PAIRING] نفس إصلاح ROOT FIX-500 (مسار QR) لكن هنا
+                        // نعتمد على pairingRequested بدل qrSentAt: إذا كان الكود قد أُرسل
+                        // للمستخدم بالفعل، فكود 500 (badSession) المفاجئ يُعامَل كـ515 —
+                        // لا نمسح الجلسة، بل نُكمل الاتصال بنفس بيانات المصادقة.
+                        // ═══════════════════════════════════════════════════════════
+                        if (statusCode === DisconnectReason.badSession && pairingRequested) {
+                            const retries500p = (this.restartAttempts.get(accountId) || 0) + 1;
+                            this.restartAttempts.set(accountId, retries500p);
+
+                            if (retries500p > MAX_515_RETRIES) {
+                                console.warn(`[Account ${accountId}][Pairing] badSession(500) repeated ${retries500p}x after code entry — clearing for real.`);
+                                this.restartAttempts.delete(accountId);
+                                await this._clearSession(accountId, 500);
+                                return;
+                            }
+
+                            console.log(`[Account ${accountId}][Pairing] badSession(500) right after code entry — treating like 515, NOT clearing session (attempt ${retries500p}/${MAX_515_RETRIES}).`);
+                            this._emitState(accountId, 'connecting');
+
+                            if (state.creds) {
+                                state.creds.registered = true;
+                                console.log(`[Account ${accountId}][Pairing] creds.registered forced to true (500-after-code path).`);
+                            }
+                            await saveCreds().catch(() => {});
+                            await new Promise(r => setTimeout(r, 2000));
+                            this.postScanReconnect.add(accountId);
+
+                            this._scheduleReconnect(accountId, 8000, () => this.initSession(accountId));
+                            return;
+                        }
+
                         if (CLEAR_SESSION_CODES.has(statusCode)) {
                             await this._clearSession(accountId, statusCode);
                             return;
