@@ -944,62 +944,7 @@ class WhatsAppManager {
                 'connecting'].includes(state);
     }
 
-    /**
-     * [FIX-QR-MISSING] startFreshQRSession — بدء جلسة QR نظيفة تماماً.
-     *
-     * هذه الدالة كانت مُستدعاة من AccountController.connectAccount()
-     * لكنها لم تكن موجودة → خطأ صامت → QR لا يظهر أبداً.
-     *
-     * الفرق عن initSession العادية:
-     *   - تمسح بيانات الجلسة القديمة (creds + keys) من DB
-     *   - تُنهي أي socket قائم
-     *   - تُعيد تهيئة FSM
-     *   - تبدأ جلسة QR نظيفة بدون redirecting لـ PairingCode
-     *   - مناسبة لحالة "حساب قديم بـ pairing_code يريد التحويل لـ QR"
-     */
-    async startFreshQRSession(accountId) {
-        console.log(`[Account ${accountId}] startFreshQRSession: clearing old session and starting fresh QR...`);
-
-        // إنهاء أي socket قائم
-        const old = this.sessions.get(accountId);
-        if (old) {
-            try { old.end(undefined); } catch (_) {}
-            this.sessions.delete(accountId);
-        }
-
-        // إلغاء أي عملية initSession قيد التنفيذ
-        this.initPromises.delete(accountId);
-
-        // إلغاء جميع الـ timers
-        this._cancelReconnectTimer(accountId);
-        AutoRecovery.cancel(accountId);
-        const pt = this.pairingTimers.get(accountId);
-        if (pt) { clearTimeout(pt); this.pairingTimers.delete(accountId); }
-
-        // مسح بيانات الجلسة القديمة (creds + signal keys)
-        // حتى لو كانت connection_type = pairing_code — نبدأ من الصفر
-        await SystemDB.deleteAllSessionData(accountId).catch(() => {});
-
-        // إعادة تهيئة FSM لضمان قبول انتقالات الـ QR
-        StateMachine.cleanup(accountId);
-
-        // تنظيف حالات QR القديمة
-        this.lastQrCode.delete(accountId);
-        this.lastPairingCode.delete(accountId);
-        this.qrSentAt.delete(accountId);
-        this.postScanReconnect.delete(accountId);
-        this.restartAttempts.delete(accountId);
-        this.connStates.delete(accountId);
-
-        // تحديث نوع الاتصال في DB ليكون qr_code
-        await DatabaseManager.systemDB.run(
-            `UPDATE accounts SET connection_type = 'qr_code', updated_at = NOW() WHERE id = $1`,
-            [accountId]
-        ).catch(() => {});
-
-        // بدء جلسة QR نظيفة
-        return this.initSession(accountId);
-    }
+    // [NOTE] startFreshQRSession is defined later in this file (see [FIX-QR] section)
 
     //
     // 🔑 الإصلاح الجوهري:
