@@ -510,6 +510,16 @@ class WhatsAppManager {
         if (this.sessions.has(accountId))     return this.sessions.get(accountId);
         if (this.initPromises.has(accountId)) return this.initPromises.get(accountId);
 
+        // تجاهل حسابات Business API
+        try {
+            const { queryOne } = require('../lib/postgres');
+            const acc = await queryOne('SELECT connection_type FROM accounts WHERE id = $1', [accountId]);
+            if (acc?.connection_type === 'business_api') {
+                console.log('[Account ' + accountId + '] Skipping QR init — Business API account.');
+                return null;
+            }
+        } catch (_) {}
+
         console.log(`[SOCKET_CONNECTED] Account ${accountId}: Starting new session init...`);
         this._emitState(accountId, 'initializing');
 
