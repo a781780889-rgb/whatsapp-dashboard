@@ -90,6 +90,40 @@ const AdminController = require('./controllers/AdminController');
 router.get('/admin/stats',         auth, role('admin'), AdminController.stats.bind(AdminController));
 router.get('/admin/activity-logs', auth, role('admin'), AdminController.activityLogs.bind(AdminController));
 
+// ── Admin: حذف الحسابات الوهمية (user_id=null) ───────────────────────────────
+const { queryAll, query } = require('../lib/postgres');
+const WhatsAppManagerAdmin = require('../bot/WhatsAppManager');
+router.delete('/admin/accounts/cleanup-orphans', auth, role('admin'), async (req, res) => {
+    try {
+        const orphans = await queryAll(
+            `SELECT id FROM accounts WHERE user_id IS NULL OR user_id NOT IN (SELECT id FROM users)`
+        );
+        const ids = orphans.map(r => r.id);
+        if (ids.length === 0) return res.json({ success: true, deleted: 0, message: 'لا توجد حسابات وهمية' });
+        for (const id of ids) {
+            try { await WhatsAppManagerAdmin.fullDeleteAccount(id); } catch (_) {}
+            await query(`DELETE FROM session_data WHERE account_id = $1`, [id]).catch(() => {});
+            await query(`DELETE FROM accounts WHERE id = $1`, [id]).catch(() => {});
+        }
+        return res.json({ success: true, deleted: ids.length, ids, message: `تم حذف ${ids.length} حساب وهمي` });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── QR Debug: حالة QR لحساب بعينه ────────────────────────────────────────────
+router.get('/admin/accounts/:id/qr-debug', auth, role('admin'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const status = WhatsAppManagerAdmin.getQrStatus(id);
+        const isConn = WhatsAppManagerAdmin.isConnecting(id);
+        const hasSess = !!WhatsAppManagerAdmin.getSession(id);
+        res.json({ success: true, accountId: id, qrStatus: status, isConnecting: isConn, hasSession: hasSess });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ══════════════════════════════════════════════════════
 //  ACCOUNTS
 // ══════════════════════════════════════════════════════
