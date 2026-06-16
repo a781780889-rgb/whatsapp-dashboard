@@ -80,7 +80,8 @@ class AccountController {
                     DatabaseManager.systemDB.all(`
                         SELECT id, name, phone_number, status, health_status,
                                role, task_status, last_activity_at,
-                               messages_sent_today, created_at, updated_at, user_id
+                               messages_sent_today, created_at, updated_at, user_id,
+                               connection_type
                         FROM accounts
                         ORDER BY created_at DESC
                         LIMIT $1 OFFSET $2
@@ -92,7 +93,8 @@ class AccountController {
                     DatabaseManager.systemDB.all(`
                         SELECT id, name, phone_number, status, health_status,
                                role, task_status, last_activity_at,
-                               messages_sent_today, created_at, updated_at
+                               messages_sent_today, created_at, updated_at,
+                               connection_type
                         FROM accounts
                         WHERE user_id = $1
                         ORDER BY created_at DESC
