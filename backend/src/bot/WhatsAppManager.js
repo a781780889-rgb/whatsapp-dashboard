@@ -77,7 +77,8 @@ const ANTI_BAN = {
 
 // ── Disconnect codes ──────────────────────────────────────────────────────────
 const CLEAR_SESSION_CODES = new Set([
-    DisconnectReason.badSession,         // 500
+    // ✅ FIX: أُزيل badSession (500) من هنا — بعد مسح QR قد يأتي 500 مؤقت
+    // ونعالجه في منطق منفصل بدل مسح الجلسة فوراً
     DisconnectReason.loggedOut,          // 401
     DisconnectReason.connectionReplaced, // 440
 ]);
@@ -668,8 +669,21 @@ class WhatsAppManager {
 
                         try { require('../api/services/LinkMonitorEngine').markInactive(accountId); } catch {}
 
+                        // ✅ FIX: كود 500 بعد مسح QR مباشرة → أعد المحاولة بدل مسح الجلسة
+                        if (statusCode === DisconnectReason.badSession) {
+                            const qrTime = this.qrSentAt.get(accountId) || 0;
+                            const timeSinceQR = Date.now() - qrTime;
+                            const justScanned = timeSinceQR < 120_000;
+                            if (justScanned) {
+                                console.log('[Account ' + accountId + '] Got 500 right after QR scan — retrying in 5s instead of clearing session.');
+                                this._scheduleReconnect(accountId, 5000, () => this.initSession(accountId));
+                                return;
+                            }
+                            await this._clearSession(accountId, statusCode);
+                            return;
+                        }
+
                         // جلسة فاسدة
-                        // ✅ تحسين: لا تمسح الجلسة عند كود 500 إلا إذا تكرر، فقد يكون خطأ مؤقت في خادم واتساب
                         if (CLEAR_SESSION_CODES.has(statusCode)) {
                             await this._clearSession(accountId, statusCode);
                             return;
