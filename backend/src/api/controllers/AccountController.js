@@ -9,6 +9,7 @@ const DatabaseManager   = require('../../database/DatabaseManager');
 const WhatsAppManager   = require('../../bot/WhatsAppManager');
 const AccountRoleEngine = require('../services/AccountRoleEngine');
 const CacheService      = require('../../lib/CacheService');
+const SystemDB          = require('../../database/SystemDB');
 const crypto = require('crypto');
 
 const VALID_ROLES = ['publisher', 'searcher', 'joiner', 'monitor', 'stopped'];
@@ -299,8 +300,13 @@ class AccountController {
                 return res.status(403).json({ success: false, error: 'غير مصرح.' });
             }
 
-            // إيقاف الجلسة أولاً
-            try { await WhatsAppManager.disconnectAccount(id); } catch (_) {}
+            // إيقاف الجلسة أولاً (logout آمن + تنظيف الذاكرة/Redis)
+            try { await WhatsAppManager.fullDeleteAccount(id); } catch (_) {}
+
+            // [FIX-SESSION-LEAK] حذف بيانات Auth State المحفوظة (creds + signal keys)
+            // من قاعدة البيانات. بدون هذا، تبقى صفوف مشفرة يتيمة في session_data
+            // مرتبطة بحساب محذوف إلى الأبد — تسرّب بيانات وتراكم غير ضروري في DB.
+            await SystemDB.deleteAllSessionData(id).catch(console.error);
 
             await DatabaseManager.systemDB.run(`DELETE FROM accounts WHERE id = $1`, [id]);
 
@@ -322,6 +328,15 @@ class AccountController {
                 `SELECT * FROM accounts WHERE id = $1`, [id]
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+            // [FIX-DUPLICATE-CONNECT] منع طلبات متزامنة (مثل ضغط الزر مرتين) من
+            // إنشاء socketين متنافسين على نفس بيانات الحساب — سبب جذري لحلقات 515/500.
+            if (WhatsAppManager.isConnecting(id)) {
+                return res.status(409).json({
+                    success: false,
+                    error: 'هناك عملية ربط جارية لهذا الحساب بالفعل. يرجى الانتظار حتى تنتهي.',
+                });
+            }
 
             // ✅ FIX-QR: استخدام startFreshQRSession بدلاً من initSession مباشرة
             // السبب: initSession تتخطى QR إذا كانت هناك بيانات جلسة قديمة (registered=true)
@@ -353,6 +368,11 @@ class AccountController {
     async connectWithPairing(req, res) {
         try {
             const { id } = req.params;
+            const account = await DatabaseManager.systemDB.get(
+                `SELECT id FROM accounts WHERE id = $1`, [id]
+            );
+            if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
             // الفرونت يُرسل phone_number أو phone - نقبل كلاهما
             const { phone, phone_number } = req.body || {};
             const rawPhone = phone || phone_number;
@@ -363,8 +383,19 @@ class AccountController {
             if (cleanPhone.length < 10) {
                 return res.status(400).json({ success: false, error: 'رقم الهاتف قصير جداً. تأكد من إدخال رمز الدولة ورقم الهاتف كاملاً.' });
             }
+            if (cleanPhone.length > 15) {
+                return res.status(400).json({ success: false, error: 'رقم الهاتف طويل جداً. تأكد من صحة الرقم المُدخل.' });
+            }
             if (cleanPhone.startsWith('00')) {
                 return res.status(400).json({ success: false, error: 'أدخل الرقم بدون 00 في البداية. مثال: 9665XXXXXXXX' });
+            }
+
+            // [FIX-DUPLICATE-CONNECT] منع طلبات متزامنة لنفس الحساب — نفس سبب الإصلاح في connectAccount
+            if (WhatsAppManager.isConnecting(id)) {
+                return res.status(409).json({
+                    success: false,
+                    error: 'هناك عملية ربط جارية لهذا الحساب بالفعل. يرجى الانتظار حتى تنتهي.',
+                });
             }
 
             // ✅ FIX-PAIRING: fire & forget — لا تنتظر حتى ينتهي (قد يستغرق 45 ثانية)
