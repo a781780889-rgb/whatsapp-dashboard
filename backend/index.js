@@ -295,7 +295,10 @@ async function bootstrap() {
         } catch (_) {}
 
         // إعادة تهيئة الحسابات المتصلة (من DB + Redis sessions)
-        const active = await SystemDB.all(`SELECT id FROM accounts WHERE status = 'connected'`);
+        // تجاهل حسابات Business API - لا تحتاج Baileys session
+        const active = await SystemDB.all(
+            `SELECT id FROM accounts WHERE status = 'connected' AND (connection_type IS NULL OR connection_type != 'business_api')`
+        );
         const accountIdsToInit = new Set([
             ...active.map(a => String(a.id)),
             ...sessionsToRestore.map(s => String(s.accountId)),
