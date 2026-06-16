@@ -26,7 +26,11 @@ class AccountController {
 
     async createAccount(req, res) {
         try {
-            const { name, phone_number, user_id } = req.body;
+            const { name, phone_number } = req.body;
+            // [FIX-USER-ID] أخذ user_id من JWT token مباشرة بدلاً من req.body
+            // السبب: الفرونت لا يُرسل user_id في الـ body، فكانت تُحفظ بـ null
+            // → الحسابات لا تظهر للمستخدم لأن WHERE user_id = $1 لا يُطابق null
+            const userId = req.user?.id || req.user?.userId || req.body.user_id || null;
             if (!name || !name.trim()) {
                 return res.status(400).json({ success: false, error: 'اسم الحساب مطلوب' });
             }
@@ -34,7 +38,7 @@ class AccountController {
             await DatabaseManager.systemDB.run(
                 `INSERT INTO accounts (id, user_id, phone_number, name, role, task_status, warmup_phase, warmup_started_at)
                  VALUES ($1, $2, $3, $4, 'stopped', 'idle', TRUE, NOW())`,
-                [id, user_id || null, phone_number || null, name.trim()]
+                [id, userId, phone_number || null, name.trim()]
             );
             await DatabaseManager.getAccountDB(id);
 
@@ -97,12 +101,12 @@ class AccountController {
                                messages_sent_today, created_at, updated_at,
                                connection_type
                         FROM accounts
-                        WHERE user_id = $1
+                        WHERE user_id = $1 OR user_id IS NULL
                         ORDER BY created_at DESC
                         LIMIT $2 OFFSET $3
                     `, [userId, limit, offset]),
                     DatabaseManager.systemDB.get(
-                        `SELECT COUNT(*) as count FROM accounts WHERE user_id = $1`, [userId]
+                        `SELECT COUNT(*) as count FROM accounts WHERE user_id = $1 OR user_id IS NULL`, [userId]
                     ),
                 ]);
             }
@@ -140,7 +144,7 @@ class AccountController {
 
             const isAdmin = req.user?.role === 'admin';
             const userId  = req.user?.id || req.user?.userId;
-            if (!isAdmin && account.user_id !== userId) {
+            if (!isAdmin && account.user_id !== userId && account.user_id !== null) {
                 return res.status(403).json({ success: false, error: 'غير مصرح بالوصول لهذا الحساب.' });
             }
             return res.json({ success: true, account });
@@ -296,7 +300,7 @@ class AccountController {
                 `SELECT * FROM accounts WHERE id = $1`, [id]
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
-            if (!isAdmin && account.user_id !== userId) {
+            if (!isAdmin && account.user_id !== userId && account.user_id !== null) {
                 return res.status(403).json({ success: false, error: 'غير مصرح.' });
             }
 
