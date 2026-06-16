@@ -28,31 +28,40 @@ class AccountController {
         try {
             const { name, phone_number } = req.body;
             // [FIX-USER-ID] أخذ user_id من JWT token مباشرة بدلاً من req.body
-            // السبب: الفرونت لا يُرسل user_id في الـ body، فكانت تُحفظ بـ null
-            // → الحسابات لا تظهر للمستخدم لأن WHERE user_id = $1 لا يُطابق null
-            const userId = req.user?.id || req.user?.userId || req.body.user_id || null;
+            const userId = req.user?.id || req.user?.userId || null;
+
             if (!name || !name.trim()) {
                 return res.status(400).json({ success: false, error: 'اسم الحساب مطلوب' });
             }
+
             const id = crypto.randomUUID();
+
+            // [FIX-INSERT] INSERT مبسط — بدون أعمدة اختيارية قد لا تكون موجودة
             await DatabaseManager.systemDB.run(
-                `INSERT INTO accounts (id, user_id, phone_number, name, role, task_status, warmup_phase, warmup_started_at)
-                 VALUES ($1, $2, $3, $4, 'stopped', 'idle', TRUE, NOW())`,
+                `INSERT INTO accounts (id, user_id, phone_number, name, role, task_status)
+                 VALUES ($1, $2, $3, $4, 'stopped', 'idle')`,
                 [id, userId, phone_number || null, name.trim()]
             );
+
             await DatabaseManager.getAccountDB(id);
 
             // [FIX-22] مسح كاش القائمة بعد الإنشاء
-            await CacheService.invalidateAccountsList();
+            await CacheService.invalidateAccountsList().catch(() => {});
 
             return res.status(201).json({
                 success: true, message: 'Account created successfully', accountId: id,
-                account: { id, name: name.trim(), phone_number: phone_number || null,
-                    user_id: user_id || null, status: 'disconnected', role: 'stopped', task_status: 'idle' }
+                account: {
+                    id, name: name.trim(),
+                    phone_number: phone_number || null,
+                    user_id: userId,
+                    status: 'disconnected',
+                    role: 'stopped',
+                    task_status: 'idle'
+                }
             });
         } catch (error) {
-            console.error('Create Account Error:', error);
-            return res.status(500).json({ success: false, error: 'Internal Server Error' });
+            console.error('Create Account Error:', error.message, error.stack);
+            return res.status(500).json({ success: false, error: `فشل إنشاء الحساب: ${error.message}` });
         }
     }
 
