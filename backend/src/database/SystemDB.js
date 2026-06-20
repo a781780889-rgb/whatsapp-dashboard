@@ -482,7 +482,7 @@ class SystemDB {
         const id        = crypto.randomUUID();
         await query(
             `INSERT INTO users (id, username, password, full_name, role, status)
-             VALUES ($1, $2, $3, $4, 'superadmin', 'active')
+             VALUES ($1, $2, $3, $4, 'super_admin', 'active')
              ON CONFLICT (username) DO NOTHING`,
             [id, adminUser, hash, 'Super Administrator']
         );
@@ -700,8 +700,16 @@ class SystemDB {
     }
 
     // ── Session Data ──────────────────────────────────────────────────────────
+    // ملاحظة جوهرية: بيانات جلسة Baileys (creds + signal keys) تحتوي على Buffers
+    // (مفاتيح تشفير، noise keys ...). لا يمكن تسلسلها بـ JSON عادي لأن Buffer يتحوّل
+    // إلى {type:'Buffer',data:[...]} ولا يعود Buffer عند القراءة → تفسد المصادقة بعد
+    // مسح QR (الاتصال يبقى عالقاً ولا يكتمل). الحل: استخدام BufferJSON من Baileys
+    // وهو exactly ما يفعله useMultiFileAuthState الرسمي.
     async saveSessionData(accountId, key, value) {
-        const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+        const { BufferJSON } = require('@whiskeysockets/baileys');
+        const serialized = typeof value === 'string'
+            ? value
+            : JSON.stringify(value, BufferJSON.replacer);
         await query(
             `INSERT INTO session_data (account_id, key, value, updated_at)
              VALUES ($1,$2,$3,NOW())
@@ -711,12 +719,13 @@ class SystemDB {
     }
 
     async getSessionData(accountId, key) {
+        const { BufferJSON } = require('@whiskeysockets/baileys');
         const row = await queryOne(
             `SELECT value FROM session_data WHERE account_id=$1 AND key=$2`,
             [accountId, key]
         );
         if (!row) return null;
-        try { return JSON.parse(row.value); } catch { return row.value; }
+        try { return JSON.parse(row.value, BufferJSON.reviver); } catch { return row.value; }
     }
 
     async deleteSessionData(accountId, key) {
