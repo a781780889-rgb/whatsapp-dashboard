@@ -239,3 +239,57 @@ const SystemDB = {
 };
 
 module.exports = SystemDB;
+
+// ── دوال إضافية مطلوبة من AuthController ────────────────────────────────────
+
+Object.assign(SystemDB, {
+
+    async getActiveSubscription(userId) {
+        return await this.get(
+            `SELECT * FROM subscriptions
+             WHERE user_id = $1 AND status = 'active'
+               AND (expires_at IS NULL OR expires_at > NOW())
+             ORDER BY created_at DESC LIMIT 1`,
+            [userId]
+        ).catch(() => null);
+    },
+
+    async getDaysRemaining(sub) {
+        if (!sub || !sub.expires_at) return 9999;
+        const ms = new Date(sub.expires_at) - Date.now();
+        return Math.max(0, Math.ceil(ms / 86400000));
+    },
+
+    async saveRefreshToken(userId, tokenHash, ip, userAgent, expiresAt, familyId) {
+        await this.run(
+            `INSERT INTO refresh_tokens (token_hash, family_id, user_id, used, expires_at)
+             VALUES ($1, $2, $3, FALSE, $4)
+             ON CONFLICT (token_hash) DO NOTHING`,
+            [tokenHash, familyId || null, userId, expiresAt]
+        ).catch(() => {});
+    },
+
+    async findRefreshToken(tokenHash) {
+        return await this.get(
+            `SELECT * FROM refresh_tokens WHERE token_hash = $1`, [tokenHash]
+        ).catch(() => null);
+    },
+
+    async revokeRefreshToken(tokenHash) {
+        await this.run(
+            `UPDATE refresh_tokens SET used = TRUE WHERE token_hash = $1`, [tokenHash]
+        ).catch(() => {});
+    },
+
+    async revokeAllUserTokensByFamily(familyId) {
+        await this.run(
+            `UPDATE refresh_tokens SET used = TRUE WHERE family_id = $1`, [familyId]
+        ).catch(() => {});
+    },
+
+    async revokeAllUserTokens(userId) {
+        await this.run(
+            `UPDATE refresh_tokens SET used = TRUE WHERE user_id = $1`, [userId]
+        ).catch(() => {});
+    },
+});
