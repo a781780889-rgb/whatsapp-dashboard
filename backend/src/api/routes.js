@@ -160,6 +160,13 @@ router.post('/webhook/whatsapp/:accountId', BusinessAPIController.webhookReceive
 
 
 const GroupController = require('./controllers/GroupController');
+
+// ── [GROUPS-LIVE] نظرة شاملة على كل المجموعات من كل الحسابات المتصلة ────────
+// ⚠️ مسارات ثابتة بدون :accountId — يجب أن تبقى منفصلة عن مسارات
+//    /accounts/:accountId/groups أدناه (لا تعارض بينها لأن البادئة مختلفة).
+router.get('/groups/live',       auth, subCheck, GroupController.getLiveOverview.bind(GroupController));
+router.post('/groups/sync-all',  auth, subCheck, GroupController.syncAllAccounts.bind(GroupController));
+
 router.get('/accounts/:accountId/groups',                        auth, subCheck, GroupController.getGroups.bind(GroupController));
 router.get('/accounts/:accountId/groups/categories',             auth, subCheck, GroupController.getGroupsByCategory.bind(GroupController));
 router.post('/accounts/:accountId/groups/sync',                  auth, subCheck, GroupController.syncGroups.bind(GroupController));
