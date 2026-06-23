@@ -293,3 +293,12 @@ Object.assign(SystemDB, {
         ).catch(() => {});
     },
 });
+
+// ── deleteAllSessionData ────────────────────────────────────────────
+Object.assign(SystemDB, {
+    async deleteAllSessionData(accountId) {
+        await this.run(
+            `DELETE FROM session_data WHERE account_id = $1`, [accountId]
+        ).catch(() => {});
+    },
+});
