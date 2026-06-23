@@ -1,8 +1,4 @@
 'use strict';
-/**
- * SystemDB — PostgreSQL System Database
- * الجداول: users, accounts, subscriptions, licenses, activity_logs, login_attempts
- */
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
@@ -23,142 +19,165 @@ function getPool() {
     return pool;
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username VARCHAR(100) UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    full_name VARCHAR(200),
-    email VARCHAR(200),
-    role VARCHAR(50) DEFAULT 'user',
-    status VARCHAR(50) DEFAULT 'active',
-    mfa_enabled BOOLEAN DEFAULT FALSE,
-    mfa_secret TEXT,
-    failed_login_count INT DEFAULT 0,
-    last_failed_login TIMESTAMPTZ,
-    locked_until TIMESTAMPTZ,
-    last_login TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS accounts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    name VARCHAR(200) NOT NULL,
-    phone_number VARCHAR(50),
-    status VARCHAR(50) DEFAULT 'disconnected',
-    health_status VARCHAR(50) DEFAULT 'unknown',
-    role VARCHAR(50) DEFAULT 'stopped',
-    task_status VARCHAR(50) DEFAULT 'idle',
-    connection_type VARCHAR(50) DEFAULT 'baileys',
-    messages_sent_today INT DEFAULT 0,
-    last_activity_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS subscriptions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-    plan_type VARCHAR(100) NOT NULL,
-    status VARCHAR(50) DEFAULT 'active',
-    max_accounts INT DEFAULT 3,
-    expires_at TIMESTAMPTZ,
-    notes TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS subscription_renewals (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    subscription_id UUID REFERENCES subscriptions(id) ON DELETE CASCADE,
-    plan_type VARCHAR(100),
-    extended_hours INT,
-    note TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS licenses (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    license_key VARCHAR(100) UNIQUE NOT NULL,
-    status VARCHAR(50) DEFAULT 'active',
-    plan_type VARCHAR(100),
-    issued_by UUID REFERENCES users(id) ON DELETE SET NULL,
-    expires_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS activity_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    username VARCHAR(100),
-    action VARCHAR(100),
-    details TEXT,
-    ip_address VARCHAR(100),
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS login_attempts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username VARCHAR(100),
-    ip_address VARCHAR(100),
-    success BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS jwt_families (
-    family_id VARCHAR(200) PRIMARY KEY,
-    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-    revoked BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS refresh_tokens (
-    token_hash VARCHAR(500) PRIMARY KEY,
-    family_id VARCHAR(200) REFERENCES jwt_families(family_id) ON DELETE CASCADE,
-    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-    used BOOLEAN DEFAULT FALSE,
-    expires_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS session_data (
-    account_id UUID REFERENCES accounts(id) ON DELETE CASCADE,
-    key TEXT NOT NULL,
-    value TEXT,
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (account_id, key)
-);
-
-CREATE TABLE IF NOT EXISTS protection_config (
-    id INT PRIMARY KEY DEFAULT 1,
-    config JSONB DEFAULT '{}',
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS protection_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID,
-    event_type VARCHAR(100),
-    details JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-`;
-
 const SystemDB = {
     async init() {
         const p = getPool();
-        await p.query(SCHEMA);
+
+        // ── الجداول الأساسية أولاً (بدون foreign keys) ──────────────────────
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                username VARCHAR(100) UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                full_name VARCHAR(200),
+                email VARCHAR(200),
+                role VARCHAR(50) DEFAULT 'user',
+                status VARCHAR(50) DEFAULT 'active',
+                mfa_enabled BOOLEAN DEFAULT FALSE,
+                mfa_secret TEXT,
+                failed_login_count INT DEFAULT 0,
+                last_failed_login TIMESTAMPTZ,
+                locked_until TIMESTAMPTZ,
+                last_login TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS accounts (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID,
+                name VARCHAR(200) NOT NULL,
+                phone_number VARCHAR(50),
+                status VARCHAR(50) DEFAULT 'disconnected',
+                health_status VARCHAR(50) DEFAULT 'unknown',
+                role VARCHAR(50) DEFAULT 'stopped',
+                task_status VARCHAR(50) DEFAULT 'idle',
+                connection_type VARCHAR(50) DEFAULT 'baileys',
+                messages_sent_today INT DEFAULT 0,
+                last_activity_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        // ── الجداول التي تعتمد على users ────────────────────────────────────
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID,
+                plan_type VARCHAR(100) NOT NULL,
+                status VARCHAR(50) DEFAULT 'active',
+                max_accounts INT DEFAULT 3,
+                expires_at TIMESTAMPTZ,
+                notes TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS subscription_renewals (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                subscription_id UUID,
+                plan_type VARCHAR(100),
+                extended_hours INT,
+                note TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS licenses (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID,
+                license_key VARCHAR(100) UNIQUE NOT NULL,
+                status VARCHAR(50) DEFAULT 'active',
+                plan_type VARCHAR(100),
+                issued_by UUID,
+                expires_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID,
+                username VARCHAR(100),
+                action VARCHAR(100),
+                details TEXT,
+                ip_address VARCHAR(100),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                username VARCHAR(100),
+                ip_address VARCHAR(100),
+                success BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS jwt_families (
+                family_id VARCHAR(200) PRIMARY KEY,
+                user_id UUID,
+                revoked BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                token_hash VARCHAR(500) PRIMARY KEY,
+                family_id VARCHAR(200),
+                user_id UUID,
+                used BOOLEAN DEFAULT FALSE,
+                expires_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS session_data (
+                account_id UUID,
+                key TEXT NOT NULL,
+                value TEXT,
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (account_id, key)
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS protection_config (
+                id INT PRIMARY KEY DEFAULT 1,
+                config JSONB DEFAULT '{}',
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS protection_logs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                account_id UUID,
+                event_type VARCHAR(100),
+                details JSONB,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
         console.log('[SystemDB] Schema initialized.');
     },
 
     async query(sql, params = []) {
         const p = getPool();
-        const result = await p.query(sql, params);
-        return result;
+        return await p.query(sql, params);
     },
 
     async get(sql, params = []) {
@@ -209,10 +228,9 @@ const SystemDB = {
     },
 
     async isBlocked(username) {
-        const row = await this.get(
-            `SELECT blocked_until FROM users WHERE username=$1 AND locked_until > NOW()`, [username]
+        return await this.get(
+            `SELECT locked_until FROM users WHERE username=$1 AND locked_until > NOW()`, [username]
         ).catch(() => null);
-        return row;
     },
 
     async close() {
