@@ -38,7 +38,11 @@ class GroupSyncService {
         if (!this._running) return;
         try {
             const GroupController = require('../controllers/GroupController');
-            const sessions = Array.from(WhatsAppManager.sessions.keys());
+            // ✅ FIX: WhatsAppManager.sessions غير متاح كخاصية خارجية (closure داخلي)
+            //         — استخدام الدالة العامة الجديدة getConnectedAccountIds() بدلاً منه.
+            //         قبل هذا الإصلاح كانت هذه السطر تفشل بصمت كل 60 ثانية، فلم
+            //         تكن المزامنة التلقائية تعمل فعلياً أبداً.
+            const sessions = WhatsAppManager.getConnectedAccountIds();
 
             for (const accountId of sessions) {
                 if (this._syncing.has(accountId)) continue;
@@ -121,6 +125,12 @@ class GroupSyncService {
         } finally {
             this._syncing.delete(accountId);
         }
+    }
+    // ── alias — يُستخدم من QueueManager handler ('sync_groups') في index.js ──
+    // ✅ FIX: كان index.js يستدعي GroupSyncService.syncAccount(accountId) وهي
+    //         دالة لم تكن موجودة أصلاً (TypeError عند تنفيذ أي مهمة sync_groups).
+    async syncAccount(accountId) {
+        return this.triggerSync(accountId);
     }
 }
 
