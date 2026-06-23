@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { API, authFetch } from '@/utils/api';
+import { io, Socket } from 'socket.io-client';
 
 
 /* ─────────────── Category Types ─────────────── */
@@ -1791,8 +1792,397 @@ function AutoSyncIndicator({
   );
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   [GROUPS-LIVE] نظرة شاملة حيّة على كل المجموعات من كل الحسابات المتصلة
+   ───────────────────────────────────────────────────────────────────────
+   هذا الجزء الجديد يجلب المجموعات مباشرة من جلسات واتساب المتصلة حالياً
+   (وليس من بيانات مخزّنة فقط)، يدعم زر "مزامنة المجموعات" بمزامنة حقيقية
+   فورية مع واتساب، ويتحدّث تلقائياً عبر Socket.IO عند انضمام/مغادرة
+   مجموعة دون أي حاجة لإعادة تحميل الصفحة.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+interface LiveAccountInfo {
+  id:              string;
+  name:            string;
+  phone_number:    string | null;
+  status:          string;
+  is_online:       boolean;
+  sync_available?: boolean;
+  message?:        string | null;
+  groups_count?:   number;
+  last_sync?:      string | null;
+  from_cache?:     boolean;
+}
+
+interface LiveGroup extends WaGroup {
+  account: LiveAccountInfo;
+}
+
+interface LiveSummary {
+  total_accounts:   number;
+  online_accounts:  number;
+  offline_accounts: number;
+  total_groups:     number;
+  total_members:    number;
+}
+
+interface SyncProgressEntry {
+  accountId:   string;
+  accountName: string;
+  status:      'syncing' | 'done' | 'error' | 'unavailable';
+  discovered?: number;
+  added?:      number;
+  updated?:    number;
+  removed?:    number;
+  message?:    string;
+}
+
+/** أصل خادم Socket.IO — مُشتق من عنوان API نفسه (نفس نمط ConnectionMethodModal) */
+const GROUPS_SOCKET_URL = (() => {
+  try { return new URL(API).origin; } catch { return ''; }
+})();
+
+/* ─────────────── شارة حساب داخل النظرة الشاملة ─────────────── */
+function AccountChip({ acc }: { acc: LiveAccountInfo }) {
+  return (
+    <div
+      title={acc.message || undefined}
+      className={cn(
+        'flex items-center gap-2 px-3 py-2 rounded-xl border shrink-0',
+        acc.is_online
+          ? 'bg-green-500/5 border-green-500/20'
+          : 'bg-[var(--bg-elevated)] border-[var(--border-default)]'
+      )}
+    >
+      <span className={cn(
+        'w-2 h-2 rounded-full shrink-0',
+        acc.is_online ? 'bg-green-500 animate-pulse' : 'bg-[var(--text-muted)]'
+      )} />
+      <div className="min-w-0">
+        <p className="text-xs font-bold text-[var(--text-primary)] truncate max-w-[120px]">{acc.name}</p>
+        <p className="text-[10px] text-[var(--text-muted)]">
+          {acc.is_online ? `${acc.groups_count ?? 0} مجموعة` : 'غير متصل'}
+        </p>
+      </div>
+      {!acc.is_online && <WifiOff className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />}
+    </div>
+  );
+}
+
+/* ─────────────── صف تقدّم مزامنة حساب واحد ─────────────── */
+function SyncProgressRow({ entry }: { entry: SyncProgressEntry }) {
+  const icon = entry.status === 'syncing'
+    ? <RefreshCw className="w-3.5 h-3.5 text-[var(--brand-primary)] animate-spin shrink-0" />
+    : entry.status === 'done'
+    ? <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
+    : entry.status === 'unavailable'
+    ? <WifiOff className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+    : <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />;
+
+  const text = entry.status === 'syncing'
+    ? 'جارٍ المزامنة الآن...'
+    : entry.status === 'done'
+    ? `تم اكتشاف ${entry.discovered ?? 0} مجموعة — مضافة ${entry.added ?? 0}، محدّثة ${entry.updated ?? 0}، محذوفة ${entry.removed ?? 0}`
+    : entry.status === 'unavailable'
+    ? (entry.message || 'الحساب غير متصل — المزامنة غير متاحة لهذا الحساب')
+    : (entry.message || 'فشلت المزامنة');
+
+  return (
+    <div className="flex items-center gap-2 py-1.5 text-xs">
+      {icon}
+      <span className="font-bold text-[var(--text-primary)] shrink-0">{entry.accountName}</span>
+      <span className="text-[var(--text-muted)] truncate">— {text}</span>
+    </div>
+  );
+}
+
+/* ─────────────── بطاقة مجموعة (نظرة شاملة لكل الحسابات) ─────────────── */
+function LiveGroupCard({ group, onClick }: { group: LiveGroup; onClick: () => void }) {
+  return (
+    <div
+      onClick={onClick}
+      className="card p-4 cursor-pointer hover:border-[var(--brand-primary)]/40 transition-all hover:-translate-y-0.5 group"
+    >
+      <div className="flex items-start gap-3 mb-3">
+        <GroupAvatar group={group} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-2">
+            <p className="font-bold text-[var(--text-primary)] text-sm leading-snug line-clamp-2">{group.name}</p>
+            <PublishBadge status={group.publish_status} />
+          </div>
+          <div className="flex items-center gap-1.5 mt-1">
+            <span className={cn(
+              'w-1.5 h-1.5 rounded-full shrink-0',
+              group.account.is_online ? 'bg-green-500' : 'bg-[var(--text-muted)]'
+            )} />
+            <p className="text-xs text-[var(--text-muted)] truncate">{group.account.name}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mb-3">
+        <div className="bg-[var(--bg-elevated)] rounded-xl p-2 text-center">
+          <Users className="w-3.5 h-3.5 text-[var(--brand-primary)] mx-auto mb-1" />
+          <p className="text-sm font-bold text-[var(--text-primary)]">{group.members_count.toLocaleString()}</p>
+          <p className="text-[10px] text-[var(--text-muted)]">عضو</p>
+        </div>
+        <div className="bg-[var(--bg-elevated)] rounded-xl p-2 text-center">
+          <Crown className="w-3.5 h-3.5 text-[var(--brand-primary)] mx-auto mb-1" />
+          <p className="text-sm font-bold text-[var(--text-primary)]">{group.admins_count}</p>
+          <p className="text-[10px] text-[var(--text-muted)]">مشرف</p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between pt-2 border-t border-[var(--border-default)]">
+        <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] font-mono truncate max-w-[150px]" title={group.group_jid}>
+          <Hash className="w-3 h-3 shrink-0" />{formatJid(group.group_jid)}
+        </span>
+        <button
+          onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(group.group_jid); }}
+          className="opacity-0 group-hover:opacity-100 transition-opacity text-[var(--text-muted)] hover:text-[var(--brand-primary)]"
+          title="نسخ معرّف المجموعة (Group ID)"
+        >
+          <Copy className="w-3 h-3" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────── النظرة الشاملة — كل المجموعات من كل الحسابات المتصلة ─────────────── */
+function AllAccountsGroupsOverview({ onSwitchToDetail }: { onSwitchToDetail?: () => void }) {
+  const [groups,      setGroups]      = useState<LiveGroup[]>([]);
+  const [accounts,    setAccounts]    = useState<LiveAccountInfo[]>([]);
+  const [summary,     setSummary]     = useState<LiveSummary | null>(null);
+  const [loading,     setLoading]     = useState(true);
+  const [syncing,     setSyncing]     = useState(false);
+  const [error,       setError]       = useState<string | null>(null);
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [search,      setSearch]      = useState('');
+  const [progress,    setProgress]    = useState<Map<string, SyncProgressEntry>>(new Map());
+  const [showProgress, setShowProgress] = useState(false);
+  const [liveSelectedGroup, setLiveSelectedGroup] = useState<LiveGroup | null>(null);
+
+  const socketRef      = useRef<Socket | null>(null);
+  const debounceRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── جلب حي من جلسات واتساب المتصلة (وليس من بيانات مخزّنة فقط) ──────────
+  const fetchLive = useCallback(async (forceRefresh = false) => {
+    setError(null);
+    try {
+      const res = await authFetch(`${API}/groups/live${forceRefresh ? '?refresh=1' : ''}`);
+      const ct  = res.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        setError('تعذّر الاتصال بالخادم. حاول مرة أخرى.');
+        return;
+      }
+      const data = await res.json();
+      if (data.success) {
+        setGroups(data.groups || []);
+        setAccounts(data.accounts || []);
+        setSummary(data.summary || null);
+        setGeneratedAt(data.generated_at || null);
+      } else {
+        setError(String(data.error || 'فشل جلب المجموعات'));
+      }
+    } catch (e: any) {
+      setError(String(e?.message || 'خطأ في الاتصال بالخادم'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // ── عند فتح الصفحة: جلب مباشر من جلسات واتساب المتصلة حالياً ────────────
+  useEffect(() => { fetchLive(false); }, [fetchLive]);
+
+  // ── Socket.IO: تحديث الواجهة لحظياً دون إعادة تحميل الصفحة ───────────────
+  useEffect(() => {
+    const socket = io(GROUPS_SOCKET_URL, { transports: ['websocket', 'polling'], reconnection: true });
+    socketRef.current = socket;
+
+    const scheduleQuietRefresh = () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => fetchLive(false), 1500);
+    };
+
+    socket.on('groups:sync_progress', (p: SyncProgressEntry) => {
+      setProgress(prev => {
+        const next = new Map(prev);
+        next.set(p.accountId, p);
+        return next;
+      });
+    });
+    socket.on('groups:sync_complete', () => { fetchLive(false); });
+    // انضمام/مغادرة/تحديث مجموعة لحساب متصل — تحديث تلقائي هادئ
+    socket.on('groups:changed', scheduleQuietRefresh);
+    // تغيّر حالة اتصال أي حساب (متصل/غير متصل) — يؤثر على إتاحة المزامنة
+    socket.on('account_status', scheduleQuietRefresh);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      socket.disconnect();
+    };
+  }, [fetchLive]);
+
+  // ── زر "مزامنة المجموعات": مزامنة حقيقية وفورية مع واتساب ────────────────
+  const handleSyncAll = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setShowProgress(true);
+    setProgress(new Map());
+    setError(null);
+    try {
+      const res  = await authFetch(`${API}/groups/sync-all`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) setError(String(data.error || 'فشلت عملية المزامنة'));
+      await fetchLive(true);
+    } catch (e: any) {
+      setError(String(e?.message || 'خطأ في الاتصال بالخادم'));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const filteredGroups = useMemo(() => {
+    if (!search.trim()) return groups;
+    const q = search.trim().toLowerCase();
+    return groups.filter(g =>
+      g.name.toLowerCase().includes(q) ||
+      g.group_jid.includes(q) ||
+      g.account.name.toLowerCase().includes(q)
+    );
+  }, [groups, search]);
+
+  const progressList = useMemo(() => Array.from(progress.values()), [progress]);
+  const hasOnlineAccount = accounts.some(a => a.is_online);
+
+  return (
+    <div className="flex flex-col gap-5 h-full">
+      {/* العنوان وزر المزامنة */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-[var(--text-primary)]">مجموعاتي على واتساب</h1>
+          <p className="text-[var(--text-secondary)] mt-1 text-sm">
+            بيانات حيّة مباشرة من كل حسابات واتساب المتصلة الآن
+            {generatedAt && <span className="text-[var(--text-muted)] mr-1"> · آخر تحديث {timeAgo(generatedAt)}</span>}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {onSwitchToDetail && (
+            <Button variant="outline" size="sm" className="gap-2" onClick={onSwitchToDetail}>
+              عرض حساب واحد بالتفصيل
+            </Button>
+          )}
+          <Button onClick={handleSyncAll} disabled={syncing} className="gap-2 shrink-0">
+            <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
+            {syncing ? 'جارٍ مزامنة كل الحسابات...' : 'مزامنة المجموعات'}
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-yellow-500/5 border border-yellow-500/20">
+          <AlertCircle className="w-4 h-4 text-yellow-400 shrink-0" />
+          <p className="text-sm text-yellow-400">{error}</p>
+        </div>
+      )}
+
+      {(syncing || (showProgress && progressList.length > 0)) && (
+        <div className="p-3 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-default)]">
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs font-bold text-[var(--text-primary)]">تقدّم المزامنة الحيّة</p>
+            {!syncing && (
+              <button onClick={() => setShowProgress(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          {progressList.length === 0
+            ? <p className="text-xs text-[var(--text-muted)]">جارٍ التحقّق من الحسابات المتصلة...</p>
+            : progressList.map(p => <SyncProgressRow key={p.accountId} entry={p} />)}
+        </div>
+      )}
+
+      {/* إحصائيات شاملة */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard icon={Users}     label="إجمالي المجموعات"   value={summary?.total_groups ?? 0} color="text-[var(--brand-primary)]" />
+        <StatCard icon={UserCheck} label="إجمالي الأعضاء"     value={(summary?.total_members ?? 0).toLocaleString()} color="text-blue-400" />
+        <StatCard icon={Wifi}      label="حسابات متصلة"       value={summary?.online_accounts ?? 0} color="text-green-400" />
+        <StatCard icon={WifiOff}   label="حسابات غير متصلة"   value={summary?.offline_accounts ?? 0} color="text-red-400" />
+      </div>
+
+      {/* شرائح الحسابات المرتبطة */}
+      {accounts.length > 0 && (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          {accounts.map(acc => <AccountChip key={acc.id} acc={acc} />)}
+        </div>
+      )}
+
+      {/* بحث */}
+      <div className="relative">
+        <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)] pointer-events-none" />
+        <input
+          className="input pr-10 w-full"
+          placeholder="بحث باسم المجموعة، المعرّف، أو الحساب..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+        {search && (
+          <button onClick={() => setSearch('')} className="absolute left-3 top-1/2 -translate-y-1/2">
+            <X className="w-4 h-4 text-[var(--text-muted)] hover:text-[var(--text-primary)]" />
+          </button>
+        )}
+      </div>
+
+      {/* شبكة المجموعات */}
+      <div className="flex-1 overflow-y-auto">
+        {loading ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {[...Array(6)].map((_, i) => <GroupSkeleton key={i} />)}
+          </div>
+        ) : filteredGroups.length === 0 ? (
+          <div className="h-full flex items-center justify-center min-h-[300px]">
+            <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
+              <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
+              <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات</h3>
+              <p className="text-sm text-[var(--text-secondary)] mt-2">
+                {hasOnlineAccount
+                  ? 'لم يتم اكتشاف أي مجموعات بعد. جرّب المزامنة الآن.'
+                  : 'لا يوجد حساب واتساب متصل حالياً. قم بتوصيل حساب من صفحة "الحسابات" أولاً.'}
+              </p>
+              <Button onClick={handleSyncAll} disabled={syncing} className="mt-4 gap-2">
+                <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
+                {syncing ? 'جارٍ المزامنة...' : 'مزامنة الآن'}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 pb-4">
+            {filteredGroups.map(g => (
+              <LiveGroupCard key={`${g.account.id}:${g.group_jid}`} group={g} onClick={() => setLiveSelectedGroup(g)} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {liveSelectedGroup && (
+        <GroupModal
+          group={liveSelectedGroup}
+          accountId={liveSelectedGroup.account.id}
+          onClose={() => setLiveSelectedGroup(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 /* ─────────────── Main View ─────────────── */
 export default function GroupsView({ accountId }: { accountId: string | null }) {
+  // ── [GROUPS-LIVE] الوضع الافتراضي الآن: نظرة شاملة على كل الحسابات المتصلة ──
+  // يمكن التبديل لعرض حساب واحد بالتفصيل (التصنيفات/الاستثناءات/النشر) عبر الزر
+  // الموجود داخل النظرة الشاملة، ويبقى الحساب المعروض هو الحساب المختار عالمياً.
+  const [mode, setMode] = useState<'overview' | 'account'>('overview');
+
   // ★ تهيئة الحالة من الكاش العالمي مباشرة — لا يختفي البيانات عند العودة
   const cached = accountId ? globalCache.get(accountId) : null;
 
@@ -2038,17 +2428,25 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     return { total, canPublish, asAdmin, totalMem, restricted, avgAct };
   }, [accountId, groups]);
 
+  // ── [GROUPS-LIVE] الوضع الافتراضي: النظرة الشاملة على كل الحسابات المتصلة ──
+  if (mode === 'overview') {
+    return <AllAccountsGroupsOverview onSwitchToDetail={() => setMode('account')} />;
+  }
+
   // ── حالة: لا يوجد حساب مختار ────────────────────────────────────────────
   if (!accountId) {
     return (
-      <div className="h-full flex items-center justify-center">
+      <div className="h-full flex flex-col items-center justify-center gap-4">
         <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
           <Smartphone className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
           <h3 className="text-lg font-bold text-[var(--text-primary)]">الرجاء اختيار حساب</h3>
           <p className="text-sm text-[var(--text-secondary)] mt-2">
-            يجب اختيار حساب واتساب نشط لعرض المجموعات الحقيقية.
+            يجب اختيار حساب واتساب نشط لعرض المجموعات الحقيقية، أو يمكنك العودة للنظرة الشاملة على كل الحسابات.
           </p>
         </div>
+        <Button variant="outline" size="sm" className="gap-2" onClick={() => setMode('overview')}>
+          ← الرجوع للنظرة الشاملة
+        </Button>
       </div>
     );
   }
@@ -2072,6 +2470,11 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
+
+          {/* [GROUPS-LIVE] الرجوع للنظرة الشاملة على كل الحسابات */}
+          <Button variant="outline" size="sm" className="gap-2 shrink-0" onClick={() => setMode('overview')}>
+            ← النظرة الشاملة
+          </Button>
 
           {/* مؤشر التحديث التلقائي */}
           <AutoSyncIndicator
@@ -2275,7 +2678,10 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
       )}
 
       {selectedGroup && (
-        <GroupDetailDialog
+        // ✅ FIX: كان هذا يستخدم اسم "GroupDetailDialog" غير المُعرَّف في أي مكان
+        //         بالملف (المكوّن الفعلي اسمه GroupModal) — كان هذا يتسبب بخطأ
+        //         "GroupDetailDialog is not defined" عند فتح أي مجموعة سابقاً.
+        <GroupModal
           group={selectedGroup}
           accountId={accountId}
           onClose={() => setSelectedGroup(null)}
