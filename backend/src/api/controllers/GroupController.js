@@ -11,6 +11,7 @@
 const WhatsAppManager = require('../../bot/WhatsAppManager');
 const DatabaseManager = require('../../database/DatabaseManager');
 const CacheService    = require('../../lib/CacheService');
+const SocketBridge    = require('../../core/SocketBridge');
 const { v4: uuidv4 } = require('uuid');
 
 // ── مساعد pagination ──────────────────────────────────────────────────────────
@@ -19,6 +20,37 @@ function parsePagination(query) {
     const limit = Math.min(500, Math.max(1, parseInt(query.limit || '100', 10)));
     const offset = (page - 1) * limit;
     return { page, limit, offset };
+}
+
+// ── [GROUPS-LIVE] مساعدات النظرة الشاملة على كل الحسابات ─────────────────────
+// مدى الفترة التي نعتبر فيها بيانات حساب ما "حديثة بما يكفي" فنتجنّب إعادة
+// الجلب الحي من واتساب لو طُلبت الصفحة عدة مرات متتالية في ثوانٍ قليلة.
+// أي طلب صريح بـ ?refresh=1 يتجاوز هذا الفحص ويفرض جلباً حيّاً دائماً.
+const LIVE_FRESHNESS_WINDOW_MS   = 15 * 1000;
+const LIVE_SYNC_TIMEOUT_MS       = 25 * 1000;
+const SYNC_ALL_TIMEOUT_MS        = 45 * 1000;
+
+function withTimeout(promise, ms, label = 'TIMEOUT') {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(label)), ms)),
+    ]);
+}
+
+/** حسابات المستخدم الحالي (كل الحسابات للأدمن، أو حسابات المستخدم + المشتركة) */
+async function listUserAccounts(req) {
+    const isAdmin = req.user?.role === 'admin';
+    const userId  = req.user?.id || req.user?.userId;
+    if (isAdmin) {
+        return DatabaseManager.systemDB.all(
+            `SELECT id, name, phone_number, status FROM accounts ORDER BY created_at DESC`
+        );
+    }
+    return DatabaseManager.systemDB.all(
+        `SELECT id, name, phone_number, status FROM accounts
+         WHERE user_id = $1 OR user_id IS NULL ORDER BY created_at DESC`,
+        [userId]
+    );
 }
 
 class GroupController {
@@ -298,6 +330,225 @@ class GroupController {
 
             res.json({ success: true, settings: updated });
         } catch (error) {
+            res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // [GROUPS-LIVE] نظرة شاملة حيّة على كل المجموعات من كل حسابات المستخدم
+    // المتصلة بواتساب — هذا هو ما تعرضه صفحة "المجموعات" الرئيسية الآن
+    // ════════════════════════════════════════════════════════════════════════
+
+    // ── GET /groups/live ──────────────────────────────────────────────────
+    async getLiveOverview(req, res) {
+        try {
+            const forceRefresh = req.query.refresh === '1';
+            const accountsList = await listUserAccounts(req);
+
+            const results = await Promise.allSettled(accountsList.map(async (acc) => {
+                const accountDB = await DatabaseManager.getAccountDB(acc.id);
+                await this._ensureGroupsTable(accountDB);
+                await this._ensureSyncSettingsTable(accountDB);
+
+                const sock     = WhatsAppManager.getSession(acc.id);
+                const isOnline = !!sock;
+                const accountMeta = {
+                    id: acc.id, name: acc.name, phone_number: acc.phone_number,
+                    status: acc.status, is_online: isOnline,
+                };
+
+                // ── الحساب غير متصل الآن — نعرض آخر بيانات محفوظة مع توضيح ──
+                if (!isOnline) {
+                    const { groups, total } = await this._getCachedGroupsPaginated(accountDB, 500, 0);
+                    return {
+                        account: accountMeta,
+                        sync_available: false,
+                        message: 'الحساب غير متصل بواتساب — تعذّر جلب بيانات حيّة، يُعرض آخر بيانات محفوظة.',
+                        groups, groups_count: total,
+                        last_sync: groups[0]?.last_sync || null,
+                    };
+                }
+
+                // ── الحساب متصل — تحقّق من حداثة آخر مزامنة قبل إعادة الجلب الحي ──
+                const settings = await accountDB.get(
+                    `SELECT last_auto_sync FROM group_sync_settings WHERE account_id = $1`, [acc.id]
+                ).catch(() => null);
+                const lastSyncMs = settings?.last_auto_sync ? new Date(settings.last_auto_sync).getTime() : 0;
+                const isFresh = !forceRefresh && (Date.now() - lastSyncMs) < LIVE_FRESHNESS_WINDOW_MS;
+
+                if (isFresh) {
+                    const { groups, total } = await this._getCachedGroupsPaginated(accountDB, 500, 0);
+                    return {
+                        account: accountMeta,
+                        sync_available: true,
+                        from_cache: true,
+                        groups, groups_count: total,
+                        last_sync: settings?.last_auto_sync || null,
+                    };
+                }
+
+                // ── جلب حي فعلي من جلسة Baileys النشطة ──
+                try {
+                    const groups = await withTimeout(
+                        this._syncFromWhatsApp(acc.id, sock, accountDB),
+                        LIVE_SYNC_TIMEOUT_MS
+                    );
+                    await accountDB.run(
+                        `UPDATE group_sync_settings SET last_auto_sync = NOW() WHERE account_id = $1`, [acc.id]
+                    ).catch(() => {});
+                    await CacheService.invalidateAccount(acc.id);
+
+                    return {
+                        account: accountMeta,
+                        sync_available: true,
+                        groups, groups_count: groups.length,
+                        last_sync: new Date().toISOString(),
+                    };
+                } catch (err) {
+                    // فشل الجلب الحي (مهلة/خطأ شبكة) — رجوع لآخر بيانات محفوظة بدلاً من كسر الصفحة
+                    const { groups, total } = await this._getCachedGroupsPaginated(accountDB, 500, 0);
+                    return {
+                        account: accountMeta,
+                        sync_available: true,
+                        warning: err.message === 'TIMEOUT'
+                            ? 'استغرقت المزامنة الحيّة وقتاً طويلاً — يُعرض آخر بيانات محفوظة.'
+                            : `فشلت المزامنة الحيّة: ${err.message}`,
+                        groups, groups_count: total,
+                        last_sync: groups[0]?.last_sync || null,
+                    };
+                }
+            }));
+
+            const accountsBreakdown = [];
+            const allGroups = [];
+
+            for (const r of results) {
+                if (r.status !== 'fulfilled') continue;
+                const v = r.value;
+                accountsBreakdown.push({
+                    ...v.account,
+                    sync_available: v.sync_available,
+                    message:        v.message || v.warning || null,
+                    groups_count:   v.groups_count,
+                    last_sync:      v.last_sync,
+                    from_cache:     !!v.from_cache,
+                });
+                for (const g of v.groups) {
+                    allGroups.push({ ...g, account: v.account });
+                }
+            }
+
+            allGroups.sort((a, b) => b.members_count - a.members_count);
+
+            return res.json({
+                success: true,
+                generated_at: new Date().toISOString(),
+                summary: {
+                    total_accounts:   accountsBreakdown.length,
+                    online_accounts:  accountsBreakdown.filter(a => a.is_online).length,
+                    offline_accounts: accountsBreakdown.filter(a => !a.is_online).length,
+                    total_groups:     allGroups.length,
+                    total_members:    allGroups.reduce((s, g) => s + (g.members_count || 0), 0),
+                },
+                accounts: accountsBreakdown,
+                groups:   allGroups,
+            });
+        } catch (error) {
+            console.error('[GroupController] getLiveOverview Error:', error);
+            res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // ── POST /groups/sync-all ────────────────────────────────────────────
+    // مزامنة حقيقية وفورية مع واتساب لكل حسابات المستخدم المتصلة الآن —
+    // وليس مجرد قراءة محلية من قاعدة البيانات. تُبَث الحالة لحظياً عبر
+    // Socket.IO (groups:sync_progress / groups:sync_complete) كي تعرض
+    // الواجهة تقدّم العملية لكل حساب على حدة.
+    async syncAllAccounts(req, res) {
+        try {
+            const accountsList = await listUserAccounts(req);
+
+            const perAccount = await Promise.allSettled(accountsList.map(async (acc) => {
+                const sock = WhatsAppManager.getSession(acc.id);
+
+                if (!sock) {
+                    SocketBridge.emit('groups:sync_progress', {
+                        accountId: acc.id, accountName: acc.name, status: 'unavailable',
+                        message: 'الحساب غير متصل بواتساب — تعذّرت المزامنة لهذا الحساب.',
+                    });
+                    return {
+                        account_id: acc.id, name: acc.name, status: 'unavailable',
+                        message: 'الحساب غير متصل بواتساب — تعذّرت المزامنة لهذا الحساب.',
+                    };
+                }
+
+                SocketBridge.emit('groups:sync_progress', {
+                    accountId: acc.id, accountName: acc.name, status: 'syncing',
+                });
+
+                const accountDB = await DatabaseManager.getAccountDB(acc.id);
+                await this._ensureGroupsTable(accountDB);
+                await this._ensureSyncSettingsTable(accountDB);
+
+                // لقطة قبل المزامنة — لحساب الفروقات (مضافة / محدّثة / محذوفة)
+                const beforeRows = await accountDB.all(
+                    `SELECT group_jid FROM wa_groups WHERE is_member = TRUE`
+                );
+                const beforeSet = new Set(beforeRows.map(r => r.group_jid));
+
+                try {
+                    const groups = await withTimeout(
+                        this._syncFromWhatsApp(acc.id, sock, accountDB),
+                        SYNC_ALL_TIMEOUT_MS
+                    );
+                    await accountDB.run(
+                        `UPDATE group_sync_settings SET last_auto_sync = NOW() WHERE account_id = $1`, [acc.id]
+                    ).catch(() => {});
+                    await CacheService.invalidateAccount(acc.id);
+
+                    const afterSet = new Set(groups.map(g => g.group_jid));
+                    const added    = [...afterSet].filter(j => !beforeSet.has(j)).length;
+                    const removed  = [...beforeSet].filter(j => !afterSet.has(j)).length;
+                    const updated  = groups.length - added;
+
+                    SocketBridge.emit('groups:sync_progress', {
+                        accountId: acc.id, accountName: acc.name, status: 'done',
+                        discovered: groups.length, added, updated, removed,
+                    });
+
+                    return {
+                        account_id: acc.id, name: acc.name, status: 'done',
+                        discovered: groups.length, added, updated, removed,
+                        synced_at: new Date().toISOString(),
+                    };
+                } catch (err) {
+                    const message = err.message === 'TIMEOUT' ? 'انتهت مهلة المزامنة' : err.message;
+                    SocketBridge.emit('groups:sync_progress', {
+                        accountId: acc.id, accountName: acc.name, status: 'error', message,
+                    });
+                    return { account_id: acc.id, name: acc.name, status: 'error', message };
+                }
+            }));
+
+            const summary = perAccount.map(r =>
+                r.status === 'fulfilled' ? r.value : { status: 'error', message: r.reason?.message }
+            );
+
+            SocketBridge.emit('groups:sync_complete', { summary, finished_at: new Date().toISOString() });
+
+            return res.json({
+                success: true,
+                finished_at: new Date().toISOString(),
+                accounts: summary,
+                totals: {
+                    synced:      summary.filter(s => s.status === 'done').length,
+                    unavailable: summary.filter(s => s.status === 'unavailable').length,
+                    failed:      summary.filter(s => s.status === 'error').length,
+                    discovered:  summary.reduce((s, a) => s + (a.discovered || 0), 0),
+                },
+            });
+        } catch (error) {
+            console.error('[GroupController] syncAllAccounts Error:', error);
             res.status(500).json({ success: false, error: error.message });
         }
     }
