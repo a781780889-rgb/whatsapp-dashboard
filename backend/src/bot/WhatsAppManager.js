@@ -116,6 +116,29 @@ class WhatsAppManager {
         return { success: true, message: 'Connection initiated' };
     }
 
+
+    async startFreshQRSession(accountId) {
+        // 1. أغلق الجلسة القديمة إن وجدت
+        const sock = sessions.get(accountId);
+        if (sock) {
+            try { sock.end(); } catch {}
+            sessions.delete(accountId);
+        }
+        connecting.delete(accountId);
+        qrData.delete(accountId);
+
+        // 2. احذف ملفات Auth القديمة لإجبار Baileys على توليد QR جديد
+        const fs = require('fs');
+        const authDir = path.join(AUTH_DIR, accountId);
+        if (fs.existsSync(authDir)) {
+            fs.rmSync(authDir, { recursive: true, force: true });
+        }
+
+        // 3. ابدأ جلسة جديدة (بدون auth → Baileys سيولّد QR تلقائياً)
+        await this.initSession(accountId);
+        return { success: true };
+    }
+
     async connectWithPairingCode(accountId, phoneNumber) {
         await this.initSession(accountId);
         const sock = sessions.get(accountId);
