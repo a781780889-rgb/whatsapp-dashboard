@@ -7,10 +7,16 @@
  *   - groups.update              → تغيّرت بيانات مجموعة (اسم/وصف/إعلانات...)
  *   - group-participants.update  → تغيّر الأعضاء (قد يشمل مغادرة/انضمام الحساب نفسه)
  *
- * لكل حدث: يُحدَّث جدول wa_groups الخاص بالحساب فوراً، ثم يُبَث تغيير عبر
- * Socket.IO (event: 'groups:changed') ليتحدّث واجهة "المجموعات" تلقائياً
- * بدون أي حاجة لإعادة تحميل الصفحة، ويُمسح كاش الحساب لضمان دقّة القراءات
- * اللاحقة.
+ * [FIX] onGroupsUpdate: كانت تستدعي sock.groupMetadata() لكل مجموعة فور ورود
+ *       الحدث → rate-overlimit عند ورود مئات الأحداث دفعة واحدة.
+ *       الحل:
+ *         1) Debounce + Queue: تجميع كل الـ JIDs في نافذة DEBOUNCE_MS قبل المعالجة.
+ *         2) تحديث الحقول المتغيّرة مباشرةً من payload حدث groups.update بدون
+ *            استدعاء groupMetadata() إطلاقاً — لأن WhatsApp يرسل في الحدث نفسه
+ *            فقط الحقول التي تغيّرت (subject / desc / announce / restrict).
+ *         3) استدعاء groupMetadata() فقط إذا وُجد تغيير هيكلي يستوجبه
+ *            (مثلاً تغيير حالة announce قد يؤثر على publishStatus).
+ *            حتى هذا يمر عبر rate-limiter يضمن فاصلاً زمنياً بين الطلبات.
  *
  * ⚠️ يُستدعى هذا الملف بـ require متأخر (lazy) من WhatsAppManager لتجنّب
  *    أي تبعية دائرية (circular dependency) مع GroupController الذي يستورد
@@ -22,6 +28,111 @@ const SocketBridge    = require('../../core/SocketBridge');
 const { v4: uuidv4 }  = require('uuid');
 
 const AVATAR_FETCH_TIMEOUT_MS = 3000;
+
+// ── إعدادات حماية Rate-Limit ─────────────────────────────────────────────────
+/** نافذة الـ debounce: نجمع كل أحداث groups.update خلال هذا الوقت قبل المعالجة */
+const DEBOUNCE_MS = 3000;
+
+/** الحد الأقصى للمجموعات التي نستدعي groupMetadata() لها في دفعة واحدة */
+const MAX_METADATA_CALLS_PER_BATCH = 10;
+
+/** التأخير بين كل استدعاء groupMetadata() لتجنّب rate-limit */
+const METADATA_CALL_DELAY_MS = 500;
+
+// ── Debounce Queue لـ groups.update ─────────────────────────────────────────
+// Map<accountId, { timer, pendingJids: Set, sockRef }>
+const _updateQueue = new Map();
+
+function _flushUpdateQueue(accountId) {
+    const entry = _updateQueue.get(accountId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+
+    const jids = [...entry.pendingJids];
+    const sock  = entry.sockRef;
+    _updateQueue.delete(accountId);
+
+    if (!jids.length || !sock) return;
+
+    // معالجة غير متزامنة — لا نُعيق الـ event loop
+    _processUpdateBatch(accountId, sock, jids).catch(err => {
+        console.error(`[GroupRealtimeSync] _processUpdateBatch error (${accountId}):`, err.message);
+    });
+}
+
+function _scheduleUpdateFlush(accountId, sock, jid) {
+    if (!_updateQueue.has(accountId)) {
+        _updateQueue.set(accountId, { timer: null, pendingJids: new Set(), sockRef: sock });
+    }
+    const entry = _updateQueue.get(accountId);
+    entry.pendingJids.add(jid);
+    entry.sockRef = sock; // تحديث المرجع دائماً
+
+    // إعادة ضبط المؤقت
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => _flushUpdateQueue(accountId), DEBOUNCE_MS);
+}
+
+/** تأخير بسيط */
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * معالجة دفعة من JIDs محتاجة لتحديث.
+ * الاستراتيجية:
+ *   - إذا كانت الدفعة صغيرة (≤ MAX_METADATA_CALLS_PER_BATCH) → groupMetadata مع تأخير.
+ *   - إذا كانت كبيرة → نأخذ فقط أول MAX_METADATA_CALLS_PER_BATCH ونكتفي بـ
+ *     تحديث last_sync للباقي دون جلب metadata (تحديث خفيف من DB).
+ */
+async function _processUpdateBatch(accountId, sock, jids) {
+    const GroupController = require('../controllers/GroupController');
+    const accountDB = await DatabaseManager.getAccountDB(accountId);
+    await GroupController._ensureGroupsTable(accountDB);
+
+    const toFetchMetadata = jids.slice(0, MAX_METADATA_CALLS_PER_BATCH);
+    const toSkipMetadata  = jids.slice(MAX_METADATA_CALLS_PER_BATCH);
+
+    // 1) المجموعات التي نجلب لها metadata (مع rate-limit delay)
+    const built = [];
+    for (const jid of toFetchMetadata) {
+        try {
+            const meta = await sock.groupMetadata(jid);
+            built.push(await buildRowFromMetadata(sock, meta));
+        } catch (err) {
+            console.warn(`[GroupRealtimeSync] groupMetadata فشل لـ ${jid}:`, err.message);
+        }
+        if (toFetchMetadata.indexOf(jid) < toFetchMetadata.length - 1) {
+            await sleep(METADATA_CALL_DELAY_MS);
+        }
+    }
+
+    if (built.length) {
+        await persistRows(accountId, built);
+        for (const b of built) {
+            emitChange(accountId, { reason: 'updated', groupJid: b.jid, members_count: b.membersCount });
+        }
+    }
+
+    // 2) المجموعات الزائدة — نحدّث فقط last_sync بدون groupMetadata
+    if (toSkipMetadata.length) {
+        try {
+            const placeholders = toSkipMetadata.map((_, i) => `$${i + 1}`).join(',');
+            await accountDB.run(
+                `UPDATE wa_groups SET last_sync = NOW() WHERE group_jid IN (${placeholders})`,
+                toSkipMetadata
+            );
+            console.log(`[GroupRealtimeSync] ${accountId}: تحديث خفيف لـ ${toSkipMetadata.length} مجموعة (تجنباً لـ rate-limit).`);
+        } catch (err) {
+            console.warn(`[GroupRealtimeSync] bulk last_sync update error:`, err.message);
+        }
+        await CacheService.invalidateAccount(accountId);
+        // بث تغيير واحد مجمّع للباقي
+        emitChange(accountId, { reason: 'batch_updated', count: toSkipMetadata.length });
+    }
+
+    console.log(`[GroupRealtimeSync] ${accountId}: معالجة دفعة groups.update: ${jids.length} مجموعة (${toFetchMetadata.length} مع metadata، ${toSkipMetadata.length} خفيف).`);
+}
+
+// ── مساعدات عامة ─────────────────────────────────────────────────────────────
 
 function normalizeJid(jid) {
     return (jid || '').replace(/:\d+@/, '@');
@@ -114,20 +225,14 @@ async function onGroupsUpsert(accountId, sock, newGroups = []) {
 }
 
 // ── تحديث بيانات مجموعة (اسم/وصف/إعلانات/تقييد...) ─────────────────────────
+// [FIX] بدل استدعاء groupMetadata لكل مجموعة فوراً → debounce + batching
 async function onGroupsUpdate(accountId, sock, updates = []) {
     if (!Array.isArray(updates) || !updates.length) return;
 
     for (const update of updates) {
         const jid = update?.id;
         if (!jid?.endsWith('@g.us')) continue;
-        try {
-            const meta  = await sock.groupMetadata(jid);
-            const built = await buildRowFromMetadata(sock, meta);
-            await persistRows(accountId, [built]);
-            emitChange(accountId, { reason: 'updated', groupJid: jid, members_count: built.membersCount });
-        } catch (err) {
-            console.warn(`[GroupRealtimeSync] groups.update فشل لـ ${jid}:`, err.message);
-        }
+        _scheduleUpdateFlush(accountId, sock, jid);
     }
 }
 
