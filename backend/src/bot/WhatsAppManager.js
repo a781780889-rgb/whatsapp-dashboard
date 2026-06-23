@@ -29,6 +29,13 @@ class WhatsAppManager {
     isConnecting(accountId) { return connecting.has(accountId); }
     getQrStatus(accountId) { return qrData.get(accountId) || null; }
 
+    // ── [GROUPS-LIVE] قائمة الحسابات المتصلة الآن (جلسات Baileys حيّة فعلياً) ──
+    // ✅ FIX: كانت GroupSyncService تستخدم `WhatsAppManager.sessions.keys()` مباشرة
+    //         لكن `sessions` متغيّر داخلي (closure) وليس خاصية على الكائن المُصدَّر،
+    //         فكانت تفشل بصمت (Cannot read properties of undefined) في كل تكرار.
+    getConnectedAccountIds() { return [...sessions.keys()]; }
+    isOnline(accountId) { return sessions.has(accountId); }
+
     async initSession(accountId) {
         if (connecting.has(accountId)) return;
         if (sessions.has(accountId)) return;
@@ -107,6 +114,37 @@ class WhatsAppManager {
             for (const msg of messages) {
                 if (!msg.message) continue;
                 emit('new_message', { accountId, message: msg });
+            }
+        });
+
+        // ── [GROUPS-LIVE] أحداث المجموعات الحيّة ────────────────────────────────
+        // تُمكِّن صفحة "المجموعات" من التحديث تلقائياً (دون إعادة تحميل) عند:
+        //  - انضمام الحساب لمجموعة جديدة                 → groups.upsert
+        //  - تغيّر بيانات مجموعة (الاسم/الوصف/الإعدادات)   → groups.update
+        //  - تغيّر الأعضاء، أو مغادرة/إزالة الحساب نفسه     → group-participants.update
+        // التنفيذ الفعلي (قراءة/كتابة DB + بث Socket.IO) موجود في GroupRealtimeSync،
+        // ويُستدعى بـ require متأخر لتجنّب أي تبعية دائرية مع GroupController.
+        sock.ev.on('groups.upsert', (newGroups) => {
+            try {
+                require('../api/services/GroupRealtimeSync').onGroupsUpsert(accountId, sock, newGroups);
+            } catch (err) {
+                console.error(`[WAManager] groups.upsert handler error (${accountId}):`, err.message);
+            }
+        });
+
+        sock.ev.on('groups.update', (updates) => {
+            try {
+                require('../api/services/GroupRealtimeSync').onGroupsUpdate(accountId, sock, updates);
+            } catch (err) {
+                console.error(`[WAManager] groups.update handler error (${accountId}):`, err.message);
+            }
+        });
+
+        sock.ev.on('group-participants.update', (update) => {
+            try {
+                require('../api/services/GroupRealtimeSync').onParticipantsUpdate(accountId, sock, update);
+            } catch (err) {
+                console.error(`[WAManager] group-participants.update handler error (${accountId}):`, err.message);
             }
         });
     }
