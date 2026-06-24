@@ -37,8 +37,23 @@ async function ensureCsrfToken(): Promise<string | null> {
   return getCsrfToken();
 }
 
-/** Attempt to refresh the access token using the stored refresh token. */
+// ── Refresh Token Mutex ───────────────────────────────────────────────────────
+// يمنع مشكلة REUSE DETECTED: لو عدة طلبات وصلوا بـ 401 في نفس الوقت،
+// كلهم ينتظرون نفس عملية الـ refresh بدل إرسال طلبات متعددة بنفس الـ token.
+let _refreshPromise: Promise<string | null> | null = null;
+
 async function tryRefresh(): Promise<string | null> {
+  // لو في refresh جاري بالفعل، انتظره بدل إطلاق طلب جديد
+  if (_refreshPromise) return _refreshPromise;
+
+  _refreshPromise = _doRefresh().finally(() => {
+    _refreshPromise = null;
+  });
+
+  return _refreshPromise;
+}
+
+async function _doRefresh(): Promise<string | null> {
   const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
   if (!refreshToken) return null;
 
