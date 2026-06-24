@@ -11,12 +11,42 @@ const crypto             = require('crypto');
 class LinkController {
 
     // ══════════════════════════════════════════════════════════════════════════
+    //  إنشاء الجداول إن لم تكن موجودة
+    // ══════════════════════════════════════════════════════════════════════════
+    async _ensureLinksTable(accountDB) {
+        await accountDB.run(`
+            CREATE TABLE IF NOT EXISTS link_categories (
+                id          SERIAL PRIMARY KEY,
+                name        TEXT NOT NULL,
+                color       TEXT DEFAULT '#6366f1',
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+        await accountDB.run(`
+            CREATE TABLE IF NOT EXISTS extracted_links (
+                id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                url          TEXT NOT NULL,
+                domain       TEXT,
+                link_type    TEXT DEFAULT 'other',
+                category_id  INTEGER REFERENCES link_categories(id) ON DELETE SET NULL,
+                ai_rating    NUMERIC(3,1) DEFAULT 0,
+                is_spam      BOOLEAN DEFAULT FALSE,
+                status       TEXT DEFAULT 'active',
+                country      TEXT,
+                extracted_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at   TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     //  جلب الروابط
     // ══════════════════════════════════════════════════════════════════════════
     async getLinks(req, res) {
         try {
             const { accountId } = req.params;
             const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureLinksTable(accountDB);
 
             const limit     = Math.min(parseInt(req.query.limit) || 100, 500);
             const status    = req.query.status    || 'active';
@@ -85,6 +115,7 @@ class LinkController {
         try {
             const { accountId } = req.params;
             const accountDB = await DatabaseManager.getAccountDB(accountId);
+            await this._ensureLinksTable(accountDB);
 
             const [total, spam, safe, avgRow, byType, topDomains, recent] = await Promise.all([
                 accountDB.get(`SELECT COUNT(*) AS cnt FROM extracted_links WHERE status='active'`),
