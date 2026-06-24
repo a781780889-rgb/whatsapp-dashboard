@@ -306,7 +306,7 @@ class JobScheduler {
                     UPDATE subscriptions
                     SET status = 'expired'
                     WHERE status = 'active'
-                      AND end_date < NOW()
+                      AND expires_at < NOW()
                 `);
                 const count = result?.rowCount || 0;
                 if (count > 0) {
