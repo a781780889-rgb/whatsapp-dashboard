@@ -1935,7 +1935,12 @@ function SyncProgressRow({ entry }: { entry: SyncProgressEntry }) {
 }
 
 /* ─────────────── بطاقة مجموعة (نظرة شاملة لكل الحسابات) ─────────────── */
-function LiveGroupCard({ group, onClick }: { group: LiveGroup; onClick: () => void }) {
+function LiveGroupCard({ group, onClick, onQuickPublish }: {
+  group: LiveGroup;
+  onClick: () => void;
+  onQuickPublish?: (g: LiveGroup) => void;
+}) {
+  const canPublish = group.publish_status !== 'red';
   return (
     <div
       onClick={onClick}
@@ -1975,13 +1980,24 @@ function LiveGroupCard({ group, onClick }: { group: LiveGroup; onClick: () => vo
         <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] font-mono truncate max-w-[150px]" title={group.group_jid}>
           <Hash className="w-3 h-3 shrink-0" />{formatJid(group.group_jid)}
         </span>
-        <button
-          onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(group.group_jid); }}
-          className="opacity-0 group-hover:opacity-100 transition-opacity text-[var(--text-muted)] hover:text-[var(--brand-primary)]"
-          title="نسخ معرّف المجموعة (Group ID)"
-        >
-          <Copy className="w-3 h-3" />
-        </button>
+        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          {canPublish && onQuickPublish && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onQuickPublish(group); }}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 transition-all"
+              title="نشر في هذه المجموعة"
+            >
+              <Send className="w-3 h-3" />نشر
+            </button>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(group.group_jid); }}
+            className="text-[var(--text-muted)] hover:text-[var(--brand-primary)]"
+            title="نسخ معرّف المجموعة (Group ID)"
+          >
+            <Copy className="w-3 h-3" />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -2000,6 +2016,11 @@ function AllAccountsGroupsOverview({ onSwitchToDetail }: { onSwitchToDetail?: ()
   const [progress,    setProgress]    = useState<Map<string, SyncProgressEntry>>(new Map());
   const [showProgress, setShowProgress] = useState(false);
   const [liveSelectedGroup, setLiveSelectedGroup] = useState<LiveGroup | null>(null);
+  // ── فلتر صلاحية النشر ─────────────────────────────────────────────────────
+  const [publishFilter, setPublishFilter] = useState<'all'|'green'|'yellow'|'red'>('all');
+  // ── نشر سريع من النظرة الشاملة ─────────────────────────────────────────────
+  const [showMemberPublish, setShowMemberPublish] = useState(false);
+  const [quickPublishGroup, setQuickPublishGroup] = useState<LiveGroup | null>(null);
 
   const socketRef      = useRef<Socket | null>(null);
   const debounceRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2091,6 +2112,19 @@ function AllAccountsGroupsOverview({ onSwitchToDetail }: { onSwitchToDetail?: ()
     );
   }, [groups, search]);
 
+  // ── إحصائيات وفلتر الصلاحية ─────────────────────────────────────────────
+  const publishStats = useMemo(() => ({
+    all:    filteredGroups.length,
+    green:  filteredGroups.filter(g => g.publish_status === 'green').length,
+    yellow: filteredGroups.filter(g => g.publish_status === 'yellow').length,
+    red:    filteredGroups.filter(g => g.publish_status === 'red').length,
+  }), [filteredGroups]);
+
+  const displayGroups = useMemo(() => {
+    if (publishFilter === 'all') return filteredGroups;
+    return filteredGroups.filter(g => g.publish_status === publishFilter);
+  }, [filteredGroups, publishFilter]);
+
   const progressList = useMemo(() => Array.from(progress.values()), [progress]);
   const hasOnlineAccount = accounts.some(a => a.is_online);
 
@@ -2156,6 +2190,33 @@ function AllAccountsGroupsOverview({ onSwitchToDetail }: { onSwitchToDetail?: ()
         </div>
       )}
 
+      {/* ── أزرار فلتر صلاحية النشر ── */}
+      <div className="flex gap-1 flex-wrap">
+        {[
+          { id: 'all',    label: 'جميع المجموعات',       count: publishStats.all,    activeColor: 'bg-[var(--brand-primary)]' },
+          { id: 'green',  label: '🟢 يستطيع النشر',       count: publishStats.green,  activeColor: 'bg-green-600' },
+          { id: 'yellow', label: '🟡 مقيد (مشرف فقط)',    count: publishStats.yellow, activeColor: 'bg-yellow-600' },
+          { id: 'red',    label: '🔴 لا يستطيع النشر',    count: publishStats.red,    activeColor: 'bg-red-600' },
+        ].map(f => (
+          <button
+            key={f.id}
+            onClick={() => setPublishFilter(f.id as any)}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors',
+              publishFilter === f.id
+                ? `${f.activeColor} text-white shadow-[var(--shadow-glow)]`
+                : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)]'
+            )}
+          >
+            {f.label}
+            <span className={cn(
+              'px-1.5 py-0.5 rounded text-[9px] font-bold',
+              publishFilter === f.id ? 'bg-white/20' : 'bg-[var(--bg-overlay)]'
+            )}>{f.count}</span>
+          </button>
+        ))}
+      </div>
+
       {/* بحث */}
       <div className="relative">
         <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)] pointer-events-none" />
@@ -2178,104 +2239,38 @@ function AllAccountsGroupsOverview({ onSwitchToDetail }: { onSwitchToDetail?: ()
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {[...Array(6)].map((_, i) => <GroupSkeleton key={i} />)}
           </div>
-        ) : filteredGroups.length === 0 ? (
+        ) : displayGroups.length === 0 ? (
           <div className="h-full flex items-center justify-center min-h-[300px]">
             <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
               <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
               <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات</h3>
               <p className="text-sm text-[var(--text-secondary)] mt-2">
-                {hasOnlineAccount
-                  ? 'لم يتم اكتشاف أي مجموعات بعد. جرّب المزامنة الآن.'
-                  : 'لا يوجد حساب واتساب متصل حالياً. قم بتوصيل حساب من صفحة "الحسابات" أولاً.'}
+                {publishFilter !== 'all'
+                  ? `لا توجد مجموعات في هذه الفئة. جرّب فلتراً آخر أو مزامنة جديدة.`
+                  : hasOnlineAccount
+                    ? 'لم يتم اكتشاف أي مجموعات بعد. جرّب المزامنة الآن.'
+                    : 'لا يوجد حساب واتساب متصل حالياً. قم بتوصيل حساب من صفحة "الحسابات" أولاً.'}
               </p>
-              <Button onClick={handleSyncAll} disabled={syncing} className="mt-4 gap-2">
-                <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
-                {syncing ? 'جارٍ المزامنة...' : 'مزامنة الآن'}
-              </Button>
+              {publishFilter !== 'all' ? (
+                <Button onClick={() => setPublishFilter('all')} variant="outline" className="mt-4 gap-2">
+                  <X className="w-4 h-4" />إظهار جميع المجموعات
+                </Button>
+              ) : (
+                <Button onClick={handleSyncAll} disabled={syncing} className="mt-4 gap-2">
+                  <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
+                  {syncing ? 'جارٍ المزامنة...' : 'مزامنة الآن'}
+                </Button>
+              )}
             </div>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 pb-4">
-            {filteredGroups.map(g => (
-              <LiveGroupCard key={`${g.account.id}:${g.group_jid}`} group={g} onClick={() => setLiveSelectedGroup(g)} />
-            ))}
-          </div>
-        )}
-      </div>
-
-      {liveSelectedGroup && (
-        <GroupModal
-          group={liveSelectedGroup}
-          accountId={liveSelectedGroup.account.id}
-          onClose={() => setLiveSelectedGroup(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-/* ─────────────── Main View ─────────────── */
-export default function GroupsView({ accountId }: { accountId: string | null }) {
-  // ── [GROUPS-LIVE] الوضع الافتراضي الآن: نظرة شاملة على كل الحسابات المتصلة ──
-  // يمكن التبديل لعرض حساب واحد بالتفصيل (التصنيفات/الاستثناءات/النشر) عبر الزر
-  // الموجود داخل النظرة الشاملة، ويبقى الحساب المعروض هو الحساب المختار عالمياً.
-  const [mode, setMode] = useState<'overview' | 'account'>('overview');
-
-  // ★ تهيئة الحالة من الكاش العالمي مباشرة — لا يختفي البيانات عند العودة
-  const cached = accountId ? globalCache.get(accountId) : null;
-
-  const [groups,        setGroups       ] = useState<WaGroup[]>(cached?.groups || []);
-  const [loading,       setLoading      ] = useState(false);
-  const [syncing,       setSyncing      ] = useState(false);
-  const [error,         setError        ] = useState<string | null>(null);
-  const [syncedAt,      setSyncedAt     ] = useState<string | null>(cached?.syncedAt || null);
-  const [filter,        setFilter       ] = useState('all');
-  const [search,        setSearch       ] = useState('');
-  const [showFilters,   setShowFilters  ] = useState(false);
-  const [selectedGroup, setSelectedGroup] = useState<WaGroup | null>(null);
-  const [showSyncSettings, setShowSyncSettings] = useState(false);
-  const [nextSyncIn,    setNextSyncIn   ] = useState(0);
-  const [viewMode,      setViewMode     ] = useState<'grid'|'categories'>('grid');
-  // الجزء الخامس
-  const [showMemberPublish, setShowMemberPublish] = useState(false);
-  const [quickPublishGroup, setQuickPublishGroup] = useState<WaGroup | null>(null);
-
-  const handleQuickPublish = useCallback((group: WaGroup) => {
-    setQuickPublishGroup(group);
-    setShowMemberPublish(true);
-  }, []);
-
-  // إعدادات المزامنة — مخزّنة في localStorage
-  const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => {
-    if (!accountId) return { interval_minutes: 15, auto_sync_enabled: true, last_auto_sync: null };
-    try {
-      const stored = localStorage.getItem(`wa_sync_${accountId}`);
-      return stored ? JSON.parse(stored) : { interval_minutes: 15, auto_sync_enabled: true, last_auto_sync: null };
-    } catch { return { interval_minutes: 15, auto_sync_enabled: true, last_auto_sync: null }; }
-  });
-
-  const autoRefreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const countdownTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const nextSyncRef      = useRef<number>(syncSettings.interval_minutes * 60);
-
-  // ── حفظ إعدادات المزامنة ───────────────────────────────────────────────
-  const saveSyncSettings = useCallback((s: SyncSettings) => {
-    if (!accountId) return;
-    setSyncSettings(s);
-    try { localStorage.setItem(`wa_sync_${accountId}`, JSON.stringify(s)); } catch {}
-  }, [accountId]);
-
-  // ── جلب المجموعات من الكاش أولاً ثم تحديث الـ state ───────────────────
-  const fetchGroups = useCallback(async (forceRefresh = false) => {
-    if (!accountId) return;
-
-    // إذا لدينا كاش حديث (< 60 ثانية) وليس force refresh — لا داعي للجلب
-    const existing = globalCache.get(accountId);
-    if (!forceRefresh && existing && (Date.now() - existing.ts) < 60_000) return;
-
-    // إذا كان هناك كاش قديم، أبقِ عليه أثناء التحميل (لا تعرض حالة فارغة)
-    if (!existing) setLoading(true);
-    setError(null);
-
-    try {
-      const url = `${API}/accounts/${accountId}/groups${forceRefresh ? '?
+            {displayGroups.map(g => (
+              <LiveGroupCard
+                key={`${g.account.id}:${g.group_jid}`}
+                group={g}
+                onClick={() => setLiveSelectedGroup(g)}
+                onQuickPublish={g.publish_status !== 'red' ? (grp) => {
+                  setQuickPublishGroup(grp);
+                  setShowMemberPublish(true);
+       
