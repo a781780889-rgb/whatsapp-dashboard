@@ -1,15 +1,15 @@
 'use strict';
 /**
  * WhatsAppManager — Baileys WhatsApp Session Manager
+ * [FIX-SESSION] استبدال useMultiFileAuthState (/tmp) بـ PostgreSQLAuthState
+ * لأن /tmp يُمسح عند كل Railway deploy مما يُفقد الجلسة ويستوجب QR جديد.
  */
-const path = require('path');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const SystemDB = require('../database/SystemDB');
 const DatabaseManager = require('../database/DatabaseManager');
 const SocketBridge = require('../core/SocketBridge');
-
-const AUTH_DIR = path.resolve('/tmp/wa-auth');
+const { usePostgreSQLAuthState, deletePostgreSQLAuthState } = require('./PostgreSQLAuthState');
 const sessions    = new Map();    // accountId → socket
 const qrData      = new Map();    // accountId → { qr, timestamp }
 const connecting  = new Set();    // accountId
@@ -51,11 +51,8 @@ class WhatsAppManager {
     }
 
     async _startSession(accountId) {
-        const authDir = path.join(AUTH_DIR, accountId);
-        const fs = require('fs');
-        if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
-
-        const { state, saveCreds } = await useMultiFileAuthState(authDir);
+        // [FIX-SESSION] استخدام PostgreSQL بدل /tmp — الجلسة تبقى بعد كل Railway deploy
+        const { state, saveCreds } = await usePostgreSQLAuthState(accountId, SystemDB);
         const { version } = await fetchLatestBaileysVersion();
 
         const sock = makeWASocket({
@@ -87,6 +84,11 @@ class WhatsAppManager {
                 await SystemDB.run(
                     `UPDATE accounts SET status='connected', updated_at=NOW() WHERE id=$1`, [accountId]
                 ).catch(() => {});
+                // حفظ الحساب في Redis حتى يستعيده index.js بعد deploy
+                try {
+                    const SessionPersistence = require('../core/SessionPersistence');
+                    await SessionPersistence.save(accountId, { accountId, connectedAt: Date.now() });
+                } catch {}
                 emit('account_status', { accountId, status: 'connected' });
                 console.log(`[WAManager] Account ${accountId} connected.`);
 
@@ -139,6 +141,9 @@ class WhatsAppManager {
                     reconnectAt.delete(accountId);
                     console.log(`[WAManager] Account ${accountId} logged out (statusCode=${statusCode}). Not reconnecting.`);
                     qrData.delete(accountId);
+                    // حذف الجلسة من Redis و PostgreSQL عند logout
+                    try { const SP = require('../core/SessionPersistence'); await SP.delete(accountId); } catch {}
+                    await deletePostgreSQLAuthState(accountId, SystemDB).catch(() => {});
                 }
             }
         });
@@ -198,12 +203,8 @@ class WhatsAppManager {
         connecting.delete(accountId);
         qrData.delete(accountId);
 
-        // 2. احذف ملفات Auth القديمة لإجبار Baileys على توليد QR جديد
-        const fs = require('fs');
-        const authDir = path.join(AUTH_DIR, accountId);
-        if (fs.existsSync(authDir)) {
-            fs.rmSync(authDir, { recursive: true, force: true });
-        }
+        // 2. احذف بيانات Auth من PostgreSQL لإجبار Baileys على توليد QR جديد
+        await deletePostgreSQLAuthState(accountId, SystemDB).catch(() => {});
 
         // 3. ابدأ جلسة جديدة (بدون auth → Baileys سيولّد QR تلقائياً)
         await this.initSession(accountId);
@@ -238,11 +239,8 @@ class WhatsAppManager {
 
     async resetSession(accountId) {
         await this.disconnectAccount(accountId);
-        const fs = require('fs');
-        const authDir = path.join(AUTH_DIR, accountId);
-        if (fs.existsSync(authDir)) {
-            fs.rmSync(authDir, { recursive: true, force: true });
-        }
+        // [FIX-SESSION] حذف من PostgreSQL بدل /tmp
+        await deletePostgreSQLAuthState(accountId, SystemDB).catch(() => {});
         qrData.delete(accountId);
         return { success: true, message: 'Session reset' };
     }
