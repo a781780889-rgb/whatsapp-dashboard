@@ -17,15 +17,23 @@ FROM node:20
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Build tools for native npm modules (baileys / canvas / etc.)
+# Build tools for native npm modules (baileys's sharp peer dep / canvas / etc.)
+# pkg-config + libvips-dev are a fallback in case no prebuilt sharp/libvips
+# binary matches the build architecture and it has to compile from source.
 RUN apt-get update && apt-get install -y \
-    python3 make g++ \
+    python3 make g++ pkg-config libvips-dev \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
-# Install ONLY production backend dependencies
+# Install ONLY production backend dependencies.
+# npm ci (not npm install) — requires package-lock.json to be committed,
+# installs exactly what's locked instead of re-resolving ranges against the
+# registry on every build. This matters here because @whiskeysockets/baileys
+# is pinned to a release-candidate (7.0.0-rc13) with an unpinned peer
+# dependency on "sharp"; without a lockfile, every fresh build re-resolves
+# those versions and can silently pick up a new/broken prerelease.
 COPY backend/package*.json ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 
 # Copy backend source
 COPY backend/ ./
