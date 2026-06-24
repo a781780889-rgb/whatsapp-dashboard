@@ -213,21 +213,43 @@ class GroupController {
             const members    = all.filter(g => g.is_member);
             const nonMembers = all.filter(g => !g.is_member);
 
-            // تصنيف الأعضاء
-            const canPublish  = members.filter(g => g.publish_status === 'green');
-            const restricted  = members.filter(g => g.publish_status === 'yellow');
-            const blocked     = members.filter(g => g.publish_status === 'red');
+            // تصنيف الأعضاء — بالصيغة التي تتوقعها الواجهة
+            const publishable    = members.filter(g => g.publish_status === 'green');
+            const restricted     = members.filter(g => g.publish_status === 'yellow');
+            const nonPublishable = members.filter(g => g.publish_status === 'red');
 
             const stats = this._buildStats(members);
 
+            // بناء التصنيفات بالصيغة الصحيحة (GroupCategories في الواجهة)
+            const categories = {
+                publishable:    { label: 'قابلة للنشر',  count: publishable.length,    groups: publishable    },
+                restricted:     { label: 'مقيدة',         count: restricted.length,     groups: restricted     },
+                nonPublishable: { label: 'غير قابلة',     count: nonPublishable.length, groups: nonPublishable },
+                archived:       { label: 'مؤرشفة',        count: nonMembers.length,     groups: nonMembers     },
+            };
+
+            // إحصائيات بصيغة CategoryStats
+            const categoryStats = {
+                total:          members.length,
+                publishable:    publishable.length,
+                restricted:     restricted.length,
+                nonPublishable: nonPublishable.length,
+                archived:       nonMembers.length,
+                asAdmin:        stats.asAdmin,
+                totalMembers:   stats.members,
+                avgActivity:    stats.avgActivity,
+            };
+
             const fullResponse = {
-                success:      true,
-                total_members: members.length,
-                stats,
-                can_publish:  canPublish,
-                restricted,
-                blocked,
+                success:    true,
+                categories,
+                stats:      categoryStats,
+                // احتفاظ بالمفاتيح القديمة للتوافق
+                can_publish:  publishable,
+                restricted:   restricted,
+                blocked:      nonPublishable,
                 non_members:  nonMembers,
+                total_members: members.length,
             };
 
             // [FIX-22] حفظ الكل في الكاش
@@ -593,23 +615,26 @@ class GroupController {
                 return pBase === mBase || pBase.split('@')[0] === mBase.split('@')[0];
             });
 
+            // [FIX] groupFetchAllParticipating() تُعيد فقط المجموعات التي أنت عضو فيها،
+            //        لذا isMember دائماً true — myParticipant يُستخدم فقط لتحديد is_admin.
+            //        الخطأ السابق: isMember = !!myParticipant كان يجعل كل المجموعات
+            //        is_member=FALSE عند عدم تطابق صيغة JID، مما يجعلها تختفي من الواجهة.
+            const isMember = true; // ← دائماً صحيح (API تضمن العضوية)
             const isAdmin  = myParticipant?.admin === 'admin' || myParticipant?.admin === 'superadmin';
-            const isMember = !!myParticipant;
             const announce = !!meta.announce;
             const canPublish = !announce || isAdmin;
 
-            const canSendText   = isMember && canPublish;
-            const canSendImages = isMember && canPublish;
-            const canSendVideo  = isMember && canPublish;
-            const canSendFiles  = isMember && canPublish;
-            const canSendLinks  = isMember && canPublish;
-            const canBroadcast  = isMember && isAdmin;
+            const canSendText   = canPublish;
+            const canSendImages = canPublish;
+            const canSendVideo  = canPublish;
+            const canSendFiles  = canPublish;
+            const canSendLinks  = canPublish;
+            const canBroadcast  = isAdmin;
 
             let publishStatus;
-            if (!isMember)      publishStatus = 'red';
-            else if (!announce) publishStatus = 'green';
-            else if (isAdmin)   publishStatus = 'yellow';
-            else                publishStatus = 'red';
+            if (!announce)    publishStatus = 'green';  // مجموعة مفتوحة — الجميع ينشر
+            else if (isAdmin) publishStatus = 'yellow'; // مجموعة إعلانات — أنا مشرف
+            else              publishStatus = 'red';    // مجموعة إعلانات — لست مشرفاً
 
             // [FIX] حذف جلب الصورة من المزامنة الرئيسية — كانت تستغرق 132×3ث=396ث
             //        وتتجاوز LIVE_SYNC_TIMEOUT_MS=25ث فتُعيد 0 مجموعة دائماً
