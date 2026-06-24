@@ -798,7 +798,12 @@ function GroupAvatar({ group, size = 'md' }: { group: WaGroup; size?: 'sm' | 'md
 }
 
 /* ─────────────── Group Card ─────────────── */
-function GroupCard({ group, onClick }: { group: WaGroup; onClick: () => void }) {
+function GroupCard({ group, onClick, onQuickPublish }: {
+  group: WaGroup;
+  onClick: () => void;
+  onQuickPublish?: (group: WaGroup) => void;
+}) {
+  const canPublish = group.publish_status !== 'red';
   return (
     <div onClick={onClick}
       className="card p-4 cursor-pointer hover:border-[var(--brand-primary)]/40 transition-all hover:-translate-y-0.5 group">
@@ -841,9 +846,21 @@ function GroupCard({ group, onClick }: { group: WaGroup; onClick: () => void }) 
             </span>
           )}
         </div>
-        <span className="text-xs font-medium text-[var(--brand-primary)] opacity-0 group-hover:opacity-100 transition-opacity">
-          عرض التفاصيل ←
-        </span>
+        <div className="flex items-center gap-2">
+          {canPublish && onQuickPublish && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onQuickPublish(group); }}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 transition-colors opacity-0 group-hover:opacity-100"
+              title="نشر في هذه المجموعة"
+            >
+              <Send className="w-3 h-3" />
+              نشر
+            </button>
+          )}
+          <span className="text-xs font-medium text-[var(--brand-primary)] opacity-0 group-hover:opacity-100 transition-opacity">
+            تفاصيل ←
+          </span>
+        </div>
       </div>
     </div>
   );
@@ -1008,10 +1025,12 @@ function MemberPublishModal({
   accountId,
   groups,
   onClose,
+  preSelectedGroup,
 }: {
   accountId: string;
   groups:    WaGroup[];
   onClose:   () => void;
+  preSelectedGroup?: WaGroup | null;
 }) {
   const [step, setStep] = useState<1|2|3>(1); // 1=إعداد, 2=معاينة, 3=نتيجة
   const [sending, setSending] = useState(false);
@@ -1019,7 +1038,9 @@ function MemberPublishModal({
   const [showExManager, setShowExManager] = useState(false);
 
   // الإعدادات
-  const [selectedGroups,   setSelectedGroups  ] = useState<string[]>([]);
+  const [selectedGroups,   setSelectedGroups  ] = useState<string[]>(
+    preSelectedGroup ? [preSelectedGroup.group_jid] : []
+  );
   const [excludeAdmins,    setExcludeAdmins   ] = useState(false);
   const [customContent,    setCustomContent   ] = useState('');
   const [adId,             setAdId            ] = useState('');
@@ -1527,7 +1548,11 @@ function GroupModal({ group, accountId, onClose }: {
 /* ─────────────── Skeleton Loading ─────────────── */
 
 /* ─────────────── Category View (الجزء الثاني) ─────────────── */
-function CategoryRow({ group, onClick }: { group: WaGroup; onClick: () => void }) {
+function CategoryRow({ group, onClick, onQuickPublish }: {
+  group: WaGroup;
+  onClick: () => void;
+  onQuickPublish?: (group: WaGroup) => void;
+}) {
   const statusConfig = {
     green:  { icon: CheckSquare, cls: 'text-green-400',  bg: 'bg-green-500/10'  },
     yellow: { icon: MinusSquare, cls: 'text-yellow-400', bg: 'bg-yellow-500/10' },
@@ -1535,11 +1560,12 @@ function CategoryRow({ group, onClick }: { group: WaGroup; onClick: () => void }
   };
   const cfg = statusConfig[group.publish_status as keyof typeof statusConfig] || statusConfig.red;
   const StatusIcon = cfg.icon;
+  const canPublish = group.publish_status !== 'red';
 
   return (
     <div
       onClick={onClick}
-      className="flex items-center gap-3 p-3 rounded-xl hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer border border-transparent hover:border-[var(--border-default)]"
+      className="flex items-center gap-3 p-3 rounded-xl hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer border border-transparent hover:border-[var(--border-default)] group"
     >
       <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center shrink-0', cfg.bg)}>
         <StatusIcon className={cn('w-5 h-5', cfg.cls)} />
@@ -1567,9 +1593,21 @@ function CategoryRow({ group, onClick }: { group: WaGroup; onClick: () => void }
           )}
         </div>
       </div>
-      <div className="text-right shrink-0">
-        <p className="text-xs text-[var(--text-muted)]">{group.activity_level}% نشاط</p>
-        <ActivityBar level={group.activity_level} />
+      <div className="flex items-center gap-2 shrink-0">
+        {canPublish && onQuickPublish && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onQuickPublish(group); }}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 transition-colors opacity-0 group-hover:opacity-100"
+            title="نشر في هذه المجموعة"
+          >
+            <Send className="w-3 h-3" />
+            نشر
+          </button>
+        )}
+        <div className="text-right">
+          <p className="text-xs text-[var(--text-muted)]">{group.activity_level}% نشاط</p>
+          <ActivityBar level={group.activity_level} />
+        </div>
       </div>
     </div>
   );
@@ -1578,9 +1616,11 @@ function CategoryRow({ group, onClick }: { group: WaGroup; onClick: () => void }
 function CategoriesPanel({
   accountId,
   onGroupClick,
+  onQuickPublish,
 }: {
   accountId: string;
   onGroupClick: (g: WaGroup) => void;
+  onQuickPublish?: (g: WaGroup) => void;
 }) {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -1715,7 +1755,7 @@ function CategoriesPanel({
         ) : (
           currentGroups.map(g => (
             <div key={g.group_jid} className="px-2">
-              <CategoryRow group={g} onClick={() => onGroupClick(g)} />
+              <CategoryRow group={g} onClick={() => onGroupClick(g)} onQuickPublish={onQuickPublish} />
             </div>
           ))
         )}
@@ -2200,6 +2240,12 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
   const [viewMode,      setViewMode     ] = useState<'grid'|'categories'>('grid');
   // الجزء الخامس
   const [showMemberPublish, setShowMemberPublish] = useState(false);
+  const [quickPublishGroup, setQuickPublishGroup] = useState<WaGroup | null>(null);
+
+  const handleQuickPublish = (group: WaGroup) => {
+    setQuickPublishGroup(group);
+    setShowMemberPublish(true);
+  };
 
   // إعدادات المزامنة — مخزّنة في localStorage
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => {
@@ -2234,459 +2280,4 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     setError(null);
 
     try {
-      const url = `${API}/accounts/${accountId}/groups${forceRefresh ? '?refresh=1' : ''}`;
-      const res  = await authFetch(url);
-      const ct   = res.headers.get('content-type') || '';
-      if (!ct.includes('application/json')) {
-        setError('خطأ في الاتصال بالخادم — تأكد من تشغيل الـ backend');
-        return;
-      }
-      const data = await res.json();
-      if (data.success) {
-        const safeGroups = (data.groups || []).map((g: any) => ({
-          id:              String(g.id              ?? g.group_jid ?? ''),
-          group_jid:       String(g.group_jid       ?? ''),
-          name:            String(g.name            ?? 'مجموعة'),
-          description:     String(g.description     ?? ''),
-          owner:           String(g.owner           ?? ''),
-          members_count:   Number(g.members_count)  || 0,
-          admins_count:    Number(g.admins_count)   || 0,
-          announce:        Boolean(g.announce),
-          restrict:        Boolean(g.restrict),
-          creation_ts:     Number(g.creation_ts)    || 0,
-          avatar_url:      g.avatar_url ? String(g.avatar_url) : null,
-          is_member:       Boolean(g.is_member),
-          is_admin:        Boolean(g.is_admin),
-          publish_status:  (['green','yellow','red'].includes(g.publish_status) ? g.publish_status : 'red') as WaGroup['publish_status'],
-          can_send_text:   Boolean(g.can_send_text),
-          can_send_images: Boolean(g.can_send_images),
-          can_send_video:  Boolean(g.can_send_video),
-          can_send_files:  Boolean(g.can_send_files),
-          can_send_links:  Boolean(g.can_send_links),
-          can_broadcast:   Boolean(g.can_broadcast),
-          activity_level:  Math.min(100, Math.max(0, Number(g.activity_level) || 50)),
-          messages_today:  Number(g.messages_today) || 0,
-          last_sync:       g.last_sync ? String(g.last_sync) : null,
-        }));
-
-        setGroups(safeGroups);
-        const newSyncedAt = data.synced_at ? String(data.synced_at) : null;
-        setSyncedAt(newSyncedAt);
-
-        // ★ تحديث الكاش العالمي
-        globalCache.set(accountId, { groups: safeGroups, syncedAt: newSyncedAt, ts: Date.now() });
-
-        // تحديث إعدادات المزامنة من الخادم إن وُجدت
-        if (data.sync_settings) {
-          const ss: SyncSettings = {
-            interval_minutes:  data.sync_settings.interval_minutes ?? 15,
-            auto_sync_enabled: data.sync_settings.auto_sync_enabled ?? true,
-            last_auto_sync:    data.sync_settings.last_auto_sync ?? null,
-          };
-          saveSyncSettings(ss);
-        }
-
-        if (data.warning) setError(String(data.warning));
-      } else {
-        setError(String(data.error || 'فشل جلب المجموعات'));
-      }
-    } catch (e: any) {
-      setError(String(e?.message || 'خطأ في الاتصال'));
-    } finally {
-      setLoading(false);
-    }
-  }, [accountId, saveSyncSettings]);
-
-  // ── مزامنة يدوية فورية ─────────────────────────────────────────────────
-  const handleSync = async () => {
-    if (!accountId || syncing) return;
-    setSyncing(true);
-    setError(null);
-    try {
-      const res  = await authFetch(`${API}/accounts/${accountId}/groups/sync`, { method: 'POST' });
-      const ct   = res.headers.get('content-type') || '';
-      if (!ct.includes('application/json')) { setError('خطأ في الاتصال'); return; }
-      const data = await res.json();
-      if (data.success) {
-        const safeGroups = (data.groups || []).map((g: any) => ({
-          id:              String(g.id              ?? g.group_jid ?? ''),
-          group_jid:       String(g.group_jid       ?? ''),
-          name:            String(g.name            ?? 'مجموعة'),
-          description:     String(g.description     ?? ''),
-          owner:           String(g.owner           ?? ''),
-          members_count:   Number(g.members_count)  || 0,
-          admins_count:    Number(g.admins_count)   || 0,
-          announce:        Boolean(g.announce),
-          restrict:        Boolean(g.restrict),
-          creation_ts:     Number(g.creation_ts)    || 0,
-          avatar_url:      g.avatar_url ? String(g.avatar_url) : null,
-          is_member:       Boolean(g.is_member),
-          is_admin:        Boolean(g.is_admin),
-          publish_status:  (['green','yellow','red'].includes(g.publish_status) ? g.publish_status : 'red') as WaGroup['publish_status'],
-          can_send_text:   Boolean(g.can_send_text),
-          can_send_images: Boolean(g.can_send_images),
-          can_send_video:  Boolean(g.can_send_video),
-          can_send_files:  Boolean(g.can_send_files),
-          can_send_links:  Boolean(g.can_send_links),
-          can_broadcast:   Boolean(g.can_broadcast),
-          activity_level:  Math.min(100, Math.max(0, Number(g.activity_level) || 50)),
-          messages_today:  Number(g.messages_today) || 0,
-          last_sync:       g.last_sync ? String(g.last_sync) : null,
-        }));
-        const newSyncedAt = data.synced_at ? String(data.synced_at) : new Date().toISOString();
-        setGroups(safeGroups);
-        setSyncedAt(newSyncedAt);
-        globalCache.set(accountId, { groups: safeGroups, syncedAt: newSyncedAt, ts: Date.now() });
-        // إعادة ضبط العداد التنازلي
-        nextSyncRef.current = syncSettings.interval_minutes * 60;
-        setNextSyncIn(nextSyncRef.current);
-      } else {
-        setError(String(data.error || 'فشلت المزامنة'));
-      }
-    } catch (e: any) {
-      setError(String(e?.message || 'خطأ في الاتصال'));
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  // ── تحميل عند تغيير الحساب ─────────────────────────────────────────────
-  useEffect(() => {
-    if (!accountId) return;
-    const existing = globalCache.get(accountId);
-    if (existing) {
-      // عرض الكاش فوراً
-      setGroups(existing.groups);
-      setSyncedAt(existing.syncedAt);
-    }
-    // جلب التحديثات من الخادم في الخلفية (بدون إخفاء البيانات)
-    fetchGroups(false);
-  }, [accountId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── العداد التنازلي ─────────────────────────────────────────────────────
-  useEffect(() => {
-    if (countdownTimer.current) clearInterval(countdownTimer.current);
-    if (!syncSettings.auto_sync_enabled || syncSettings.interval_minutes === 0) {
-      setNextSyncIn(0);
-      return;
-    }
-    nextSyncRef.current = syncSettings.interval_minutes * 60;
-    setNextSyncIn(nextSyncRef.current);
-
-    countdownTimer.current = setInterval(() => {
-      nextSyncRef.current = Math.max(0, nextSyncRef.current - 1);
-      setNextSyncIn(nextSyncRef.current);
-    }, 1000);
-
-    return () => {
-      if (countdownTimer.current) clearInterval(countdownTimer.current);
-    };
-  }, [syncSettings.interval_minutes, syncSettings.auto_sync_enabled]);
-
-  // ── التحديث التلقائي الدوري ─────────────────────────────────────────────
-  useEffect(() => {
-    if (autoRefreshTimer.current) clearInterval(autoRefreshTimer.current);
-    if (!accountId || !syncSettings.auto_sync_enabled || syncSettings.interval_minutes === 0) return;
-
-    const intervalMs = syncSettings.interval_minutes * 60 * 1000;
-    autoRefreshTimer.current = setInterval(async () => {
-      console.log(`[GroupsView] Auto-fetching groups for ${accountId}...`);
-      await fetchGroups(false);
-      nextSyncRef.current = syncSettings.interval_minutes * 60;
-      setNextSyncIn(nextSyncRef.current);
-    }, intervalMs);
-
-    return () => {
-      if (autoRefreshTimer.current) clearInterval(autoRefreshTimer.current);
-    };
-  }, [accountId, syncSettings.interval_minutes, syncSettings.auto_sync_enabled, fetchGroups]);
-
-  // ── فلترة المجموعات ─────────────────────────────────────────────────────
-  const filtered = useMemo(() => {
-    if (!accountId) return [];
-    return groups.filter(g => {
-      if (filter === 'green'    && g.publish_status !== 'green')  return false;
-      if (filter === 'yellow'   && g.publish_status !== 'yellow') return false;
-      if (filter === 'red'      && g.publish_status !== 'red')    return false;
-      if (filter === 'admin'    && !g.is_admin)                   return false;
-      if (filter === 'large'    && g.members_count < 200)         return false;
-      if (filter === 'announce' && !g.announce)                   return false;
-      if (search && !g.name.includes(search) && !g.group_jid.includes(search)) return false;
-      return true;
-    });
-  }, [accountId, groups, filter, search]);
-
-  // ── إحصائيات ────────────────────────────────────────────────────────────
-  const stats = useMemo(() => {
-    if (!accountId) return { total: 0, canPublish: 0, asAdmin: 0, totalMem: 0, restricted: 0, avgAct: 0 };
-    const total      = groups.length;
-    const canPublish = groups.filter(g => g.publish_status !== 'red').length;
-    const asAdmin    = groups.filter(g => g.is_admin).length;
-    const totalMem   = groups.reduce((s, g) => s + g.members_count, 0);
-    const restricted = groups.filter(g => g.publish_status === 'yellow').length;
-    const avgAct     = total ? Math.round(groups.reduce((s, g) => s + g.activity_level, 0) / total) : 0;
-    return { total, canPublish, asAdmin, totalMem, restricted, avgAct };
-  }, [accountId, groups]);
-
-  // ── [GROUPS-LIVE] الوضع الافتراضي: النظرة الشاملة على كل الحسابات المتصلة ──
-  if (mode === 'overview') {
-    return <AllAccountsGroupsOverview onSwitchToDetail={() => setMode('account')} />;
-  }
-
-  // ── حالة: لا يوجد حساب مختار ────────────────────────────────────────────
-  if (!accountId) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-4">
-        <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
-          <Smartphone className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
-          <h3 className="text-lg font-bold text-[var(--text-primary)]">الرجاء اختيار حساب</h3>
-          <p className="text-sm text-[var(--text-secondary)] mt-2">
-            يجب اختيار حساب واتساب نشط لعرض المجموعات الحقيقية، أو يمكنك العودة للنظرة الشاملة على كل الحسابات.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" className="gap-2" onClick={() => setMode('overview')}>
-          ← الرجوع للنظرة الشاملة
-        </Button>
-      </div>
-    );
-  }
-
-  const activeInterval = SYNC_OPTIONS.find(o => o.value === syncSettings.interval_minutes);
-
-  return (
-    <div className="flex flex-col gap-5 h-full">
-
-      {/* ── Header ── */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-[var(--text-primary)]">مجموعاتي على واتساب</h1>
-          <p className="text-[var(--text-secondary)] mt-1 text-sm">
-            بيانات حقيقية مستخرجة مباشرة من الحساب المتصل
-            {syncedAt && (
-              <span className="text-[var(--text-muted)] mr-1">
-                · آخر مزامنة: {timeAgo(syncedAt)}
-              </span>
-            )}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap justify-end">
-
-          {/* [GROUPS-LIVE] الرجوع للنظرة الشاملة على كل الحسابات */}
-          <Button variant="outline" size="sm" className="gap-2 shrink-0" onClick={() => setMode('overview')}>
-            ← النظرة الشاملة
-          </Button>
-
-          {/* مؤشر التحديث التلقائي */}
-          <AutoSyncIndicator
-            enabled={syncSettings.auto_sync_enabled}
-            intervalMinutes={syncSettings.interval_minutes}
-            syncedAt={syncedAt}
-            nextSyncIn={nextSyncIn}
-          />
-
-          {/* زر المزامنة اليدوية */}
-          <Button onClick={handleSync} disabled={syncing} className="gap-2 shrink-0" size="sm">
-            <RefreshCw className={cn('w-4 h-4', syncing && 'animate-spin')} />
-            {syncing ? 'جارٍ المزامنة...' : '🔄 مزامنة'}
-          </Button>
-
-          {/* ★ زر النشر إلى أعضاء المجموعات — الجزء الخامس */}
-          <Button
-            onClick={() => setShowMemberPublish(true)}
-            disabled={groups.length === 0}
-            size="sm"
-            className="gap-2 shrink-0 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white border-0 shadow-lg shadow-violet-500/20"
-          >
-            <SendHorizonal className="w-4 h-4" />
-            النشر إلى أعضاء المجموعات
-          </Button>
-
-          {/* إعدادات المزامنة التلقائية */}
-          <div className="relative">
-            <Button
-              variant="outline" size="sm"
-              className={cn('gap-2 shrink-0', syncSettings.auto_sync_enabled && syncSettings.interval_minutes > 0 && 'border-[var(--brand-primary)]/40')}
-              onClick={() => setShowSyncSettings(!showSyncSettings)}
-            >
-              <Timer className="w-4 h-4" />
-              {activeInterval?.short || 'يدوي'}
-              <ChevronDown className={cn('w-3 h-3 transition-transform', showSyncSettings && 'rotate-180')} />
-            </Button>
-
-            {showSyncSettings && (
-              <SyncSettingsPanel
-                accountId={accountId}
-                settings={syncSettings}
-                onSave={(s) => {
-                  saveSyncSettings(s);
-                  nextSyncRef.current = s.interval_minutes * 60;
-                  setNextSyncIn(nextSyncRef.current);
-                }}
-                onClose={() => setShowSyncSettings(false)}
-              />
-            )}
-          </div>
-
-          {/* تبديل العرض */}
-          <div className="flex gap-1 bg-[var(--bg-elevated)] rounded-xl p-1 border border-[var(--border-default)]">
-            <button
-              onClick={() => setViewMode('grid')}
-              className={cn('p-1.5 rounded-lg transition-colors', viewMode === 'grid' ? 'bg-[var(--brand-primary)] text-white' : 'text-[var(--text-muted)]')}
-              title="عرض شبكي"
-            >
-              <LayoutGrid className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => setViewMode('categories')}
-              className={cn('p-1.5 rounded-lg transition-colors', viewMode === 'categories' ? 'bg-[var(--brand-primary)] text-white' : 'text-[var(--text-muted)]')}
-              title="عرض التصنيفات"
-            >
-              <Filter className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {/* الفلاتر — فقط في العرض الشبكي */}
-          {viewMode === 'grid' && (
-            <Button variant="outline" size="sm" className="gap-2 shrink-0"
-              onClick={() => setShowFilters(!showFilters)}>
-              <Filter className="w-4 h-4" />فلترة
-              {showFilters ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {/* ── شريط حالة المزامنة التلقائية ── */}
-      {syncSettings.auto_sync_enabled && syncSettings.interval_minutes > 0 && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--brand-primary)]/5 border border-[var(--brand-primary)]/20">
-          <div className="w-2 h-2 rounded-full bg-[var(--brand-primary)] animate-pulse" />
-          <p className="text-xs text-[var(--brand-primary)]">
-            التحديث التلقائي مفعّل · {activeInterval?.label}
-          </p>
-          <button
-            onClick={() => saveSyncSettings({ ...syncSettings, auto_sync_enabled: false })}
-            className="mr-auto text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] underline"
-          >
-            إيقاف
-          </button>
-        </div>
-      )}
-
-      {/* ── تحذير / خطأ ── */}
-      {error && (
-        <div className="flex items-center gap-2 p-3 rounded-xl bg-yellow-500/5 border border-yellow-500/20">
-          <AlertCircle className="w-4 h-4 text-yellow-400 shrink-0" />
-          <p className="text-sm text-yellow-400">{error}</p>
-        </div>
-      )}
-
-      {/* ── Stats ── */}
-      <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
-        <StatCard icon={Users}        label="إجمالي المجموعات"    value={stats.total}                    color="text-[var(--brand-primary)]" />
-        <StatCard icon={UserCheck}    label="إجمالي الأعضاء"      value={stats.totalMem.toLocaleString()} color="text-blue-400" />
-        <StatCard icon={CheckCircle2} label="يستطيع النشر"        value={stats.canPublish}                color="text-green-400" />
-        <StatCard icon={Crown}        label="أنت مشرف"            value={stats.asAdmin}                   color="text-yellow-400" />
-        <StatCard icon={Lock}         label="مقيدة جزئياً"        value={stats.restricted}                color="text-orange-400" />
-        <StatCard icon={Zap}          label="معدل النشاط"         value={`${stats.avgAct}%`}              color="text-purple-400" />
-      </div>
-
-      {/* ── عرض التصنيفات ── */}
-      {viewMode === 'categories' ? (
-        <div className="flex-1 overflow-y-auto">
-          <CategoriesPanel accountId={accountId} onGroupClick={setSelectedGroup} />
-        </div>
-      ) : (
-        <>
-          {/* ── Search + Filters ── */}
-          <div className="flex flex-col gap-3">
-            <div className="relative">
-              <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
-              <input
-                className="input pr-10 w-full"
-                placeholder="بحث باسم المجموعة أو المعرّف..."
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-              />
-              {search && (
-                <button onClick={() => setSearch('')} className="absolute left-3 top-1/2 -translate-y-1/2">
-                  <X className="w-4 h-4 text-[var(--text-muted)] hover:text-[var(--text-primary)]" />
-                </button>
-              )}
-            </div>
-            {showFilters && (
-              <div className="flex gap-2 flex-wrap">
-                {FILTERS.map(f => (
-                  <button key={f.id} onClick={() => setFilter(f.id)}
-                    className={cn(
-                      'px-3 py-1.5 rounded-xl text-xs font-medium transition-colors',
-                      filter === f.id
-                        ? 'bg-[var(--brand-primary)] text-white shadow-[var(--shadow-glow)]'
-                        : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-default)]'
-                    )}>
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* ── Groups Grid ── */}
-          <div className="flex-1 overflow-y-auto">
-            {loading && groups.length === 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {[...Array(6)].map((_, i) => <GroupSkeleton key={i} />)}
-              </div>
-            ) : groups.length === 0 && !error ? (
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center p-8 rounded-2xl border-2 border-dashed border-[var(--border-default)] max-w-sm">
-                  <WifiOff className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-4" />
-                  <h3 className="text-lg font-bold text-[var(--text-primary)]">لا توجد مجموعات</h3>
-                  <p className="text-sm text-[var(--text-secondary)] mt-2">
-                    قم بمزامنة حسابك لعرض المجموعات
-                  </p>
-                  <Button onClick={handleSync} disabled={syncing} className="mt-4 gap-2">
-                    <RefreshCw className={cn("w-4 h-4", syncing && "animate-spin")} />
-                    {syncing ? 'جارٍ المزامنة...' : 'مزامنة الآن'}
-                  </Button>
-                </div>
-              </div>
-            ) : error && groups.length === 0 ? (
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center p-8 rounded-2xl border-2 border-dashed border-red-500/20 max-w-sm">
-                  <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
-                  <h3 className="text-lg font-bold text-[var(--text-primary)]">حدث خطأ</h3>
-                  <p className="text-sm text-[var(--text-secondary)] mt-2">{error}</p>
-                  <Button onClick={handleSync} disabled={syncing} className="mt-4 gap-2" variant="outline">
-                    <RefreshCw className={cn("w-4 h-4", syncing && "animate-spin")} />
-                    إعادة المحاولة
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 pb-4">
-                {groups.map(group => (
-                  <GroupCard
-                    key={group.id}
-                    group={group}
-                    onClick={() => setSelectedGroup(group)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        </>
-      )}
-
-      {selectedGroup && (
-        // ✅ FIX: كان هذا يستخدم اسم "GroupDetailDialog" غير المُعرَّف في أي مكان
-        //         بالملف (المكوّن الفعلي اسمه GroupModal) — كان هذا يتسبب بخطأ
-        //         "GroupDetailDialog is not defined" عند فتح أي مجموعة سابقاً.
-        <GroupModal
-          group={selectedGroup}
-          accountId={accountId}
-          onClose={() => setSelectedGroup(null)}
-        />
-      )}
-    </div>
-  );
-}
+      const url = `${API}/accounts/${accountId}/
