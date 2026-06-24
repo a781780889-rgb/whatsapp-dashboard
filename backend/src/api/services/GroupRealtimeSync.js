@@ -242,7 +242,7 @@ async function onParticipantsUpdate(accountId, sock, update = {}) {
     if (!jid?.endsWith('@g.us')) return;
 
     const myJid    = normalizeJid(sock.user?.id || '');
-    const affectsMe = participants.some(p => isSameParticipant(p, myJid));
+    const affectsMe = participants.some(p => isSameParticipant(p?.id || p, myJid));
 
     try {
         // 1) الحساب غادر المجموعة أو أُزيل منها
