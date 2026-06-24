@@ -39,7 +39,7 @@ const MAX_METADATA_CALLS_PER_BATCH = 10;
 /** التأخير بين كل استدعاء groupMetadata() لتجنّب rate-limit */
 const METADATA_CALL_DELAY_MS = 500;
 
-// ── Debounce Queue لـ groups.update ─────────────────────────────────────────
+// ── [DEPRECATED] Debounce Queue — لم تعد مستخدمة بعد إصلاح onGroupsUpdate ──
 // Map<accountId, { timer, pendingJids: Set, sockRef }>
 const _updateQueue = new Map();
 
@@ -252,10 +252,62 @@ async function onGroupsUpsert(accountId, sock, newGroups = []) {
 async function onGroupsUpdate(accountId, sock, updates = []) {
     if (!Array.isArray(updates) || !updates.length) return;
 
-    for (const update of updates) {
-        const jid = update?.id;
-        if (!jid?.endsWith('@g.us')) continue;
-        _scheduleUpdateFlush(accountId, sock, jid);
+    // ── [FIX] استخدام payload الحدث مباشرةً بدلاً من طلب groupMetadata
+    //    حدث groups.update يحتوي مسبقاً على الحقول المتغيّرة (subject/desc/announce/restrict)
+    //    لا حاجة لاستدعاء groupMetadata() على الإطلاق → يتجنّب rate-overlimit تماماً
+    const GroupController = require('../controllers/GroupController');
+    try {
+        const accountDB = await DatabaseManager.getAccountDB(accountId);
+        await GroupController._ensureGroupsTable(accountDB);
+
+        for (const update of updates) {
+            const jid = update?.id;
+            if (!jid?.endsWith('@g.us')) continue;
+
+            // بناء SET ديناميكي من الحقول الموجودة في الـ payload فقط
+            const setClauses = ['last_sync = NOW()'];
+            const params     = [];
+            let   idx        = 1;
+
+            if (update.subject   !== undefined) { setClauses.push(`name = $${idx++}`);          params.push(update.subject); }
+            if (update.desc      !== undefined) { setClauses.push(`description = $${idx++}`);   params.push(update.desc || ''); }
+            if (update.announce  !== undefined) {
+                const ann = Boolean(update.announce);
+                setClauses.push(`announce = $${idx++}`);
+                params.push(ann);
+                // إعادة حساب publish_status بناءً على announce + is_admin الحالي
+                setClauses.push(
+                    `publish_status = CASE
+                        WHEN is_member = FALSE THEN 'red'
+                        WHEN $${idx} = FALSE   THEN 'green'
+                        WHEN is_admin  = TRUE  THEN 'yellow'
+                        ELSE 'red'
+                    END`
+                );
+                params.push(ann); idx++;
+                setClauses.push(
+                    `can_send_text   = (is_member AND ($${idx} = FALSE OR is_admin)),
+                     can_send_images = (is_member AND ($${idx} = FALSE OR is_admin)),
+                     can_send_video  = (is_member AND ($${idx} = FALSE OR is_admin)),
+                     can_send_files  = (is_member AND ($${idx} = FALSE OR is_admin)),
+                     can_send_links  = (is_member AND ($${idx} = FALSE OR is_admin))`
+                );
+                params.push(ann); idx++;
+            }
+            if (update.restrict  !== undefined) { setClauses.push(`restrict_mode = $${idx++}`); params.push(Boolean(update.restrict)); }
+
+            params.push(jid);
+            await accountDB.run(
+                `UPDATE wa_groups SET ${setClauses.join(', ')} WHERE group_jid = $${idx}`,
+                params
+            ).catch(() => {});
+        }
+
+        await CacheService.invalidateAccount(accountId);
+        emitChange(accountId, { reason: 'batch_updated', count: updates.length });
+
+    } catch (err) {
+        console.error(`[GroupRealtimeSync] onGroupsUpdate error (${accountId}):`, err.message);
     }
 }
 
