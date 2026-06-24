@@ -96,7 +96,7 @@ async function _processUpdateBatch(accountId, sock, jids) {
     for (const jid of toFetchMetadata) {
         try {
             const meta = await sock.groupMetadata(jid);
-            built.push(await buildRowFromMetadata(sock, meta));
+            built.push(await buildRowFromMetadata(sock, meta, accountId));
         } catch (err) {
             console.warn(`[GroupRealtimeSync] groupMetadata فشل لـ ${jid}:`, err.message);
         }
@@ -151,15 +151,38 @@ function emitChange(accountId, payload) {
 }
 
 /** بناء صفّ DB كامل من GroupMetadata — بنفس منطق GroupController._syncFromWhatsApp */
-async function buildRowFromMetadata(sock, meta) {
+async function buildRowFromMetadata(sock, meta, accountId = null) {
     const GroupController = require('../controllers/GroupController');
     const myJid = normalizeJid(sock.user?.id || '');
     const jid   = meta.id;
 
     const myParticipant = meta.participants?.find(p => isSameParticipant(p.id, myJid));
-    const isAdmin   = myParticipant?.admin === 'admin' || myParticipant?.admin === 'superadmin';
-    const isMember  = !!myParticipant;
     const announce  = !!meta.announce;
+
+    // ── [FIX] إذا لم يُعثر على الحساب في participants (يحدث في المجموعات الإعلانية
+    //    عند استدعاء groupMetadata من حدث groups.update)، نحافظ على القيم المحفوظة
+    //    في DB بدلاً من الكتابة فوقها بـ isMember=false → publishStatus='red'
+    let isMember, isAdmin;
+    if (myParticipant) {
+        isMember = true;
+        isAdmin  = myParticipant.admin === 'admin' || myParticipant.admin === 'superadmin';
+    } else if (accountId) {
+        try {
+            const accountDB   = await DatabaseManager.getAccountDB(accountId);
+            const existingRow = await accountDB.get(
+                `SELECT is_member, is_admin FROM wa_groups WHERE group_jid = $1`, [jid]
+            );
+            isMember = existingRow ? Boolean(existingRow.is_member) : false;
+            isAdmin  = existingRow ? Boolean(existingRow.is_admin)  : false;
+        } catch (_) {
+            isMember = false;
+            isAdmin  = false;
+        }
+    } else {
+        isMember = false;
+        isAdmin  = false;
+    }
+
     const canPublish = !announce || isAdmin;
 
     let publishStatus;
@@ -213,7 +236,7 @@ async function onGroupsUpsert(accountId, sock, newGroups = []) {
     const built = [];
     for (const meta of newGroups) {
         if (!meta?.id?.endsWith('@g.us')) continue;
-        try { built.push(await buildRowFromMetadata(sock, meta)); } catch (_) {}
+        try { built.push(await buildRowFromMetadata(sock, meta, accountId)); } catch (_) {}
     }
     if (!built.length) return;
 
@@ -260,7 +283,7 @@ async function onParticipantsUpdate(accountId, sock, update = {}) {
         // 2) الحساب أُضيف لمجموعة (أو تغيّر دوره فيها: ترقية/تنزيل إشراف)
         if (affectsMe && (action === 'add' || action === 'promote' || action === 'demote')) {
             const meta  = await sock.groupMetadata(jid);
-            const built = await buildRowFromMetadata(sock, meta);
+            const built = await buildRowFromMetadata(sock, meta, accountId);
             await persistRows(accountId, [built]);
             emitChange(accountId, {
                 reason: action === 'add' ? 'joined' : 'updated',
