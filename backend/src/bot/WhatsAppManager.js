@@ -10,9 +10,10 @@ const DatabaseManager = require('../database/DatabaseManager');
 const SocketBridge = require('../core/SocketBridge');
 
 const AUTH_DIR = path.resolve('/tmp/wa-auth');
-const sessions = new Map();    // accountId → socket
-const qrData   = new Map();    // accountId → { qr, timestamp }
-const connecting = new Set();  // accountId
+const sessions    = new Map();    // accountId → socket
+const qrData      = new Map();    // accountId → { qr, timestamp }
+const connecting  = new Set();    // accountId
+const reconnectAt = new Map();    // accountId → attempt count (exponential backoff)
 
 let _io = null;
 
@@ -81,19 +82,46 @@ class WhatsAppManager {
 
             if (connection === 'open') {
                 connecting.delete(accountId);
+                reconnectAt.delete(accountId); // إعادة ضبط عداد المحاولات عند نجاح الاتصال
                 qrData.delete(accountId);
                 await SystemDB.run(
                     `UPDATE accounts SET status='connected', updated_at=NOW() WHERE id=$1`, [accountId]
                 ).catch(() => {});
                 emit('account_status', { accountId, status: 'connected' });
                 console.log(`[WAManager] Account ${accountId} connected.`);
+
+                // ── مزامنة المجموعات تلقائياً عند الاتصال ─────────────────────
+                // نؤجل 3 ثوانٍ لنضمن استقرار الجلسة قبل استدعاء groupFetchAllParticipating
+                setTimeout(() => {
+                    try {
+                        const GroupSyncService = require('../api/services/GroupSyncService');
+                        GroupSyncService.triggerSync(accountId).then(result => {
+                            if (result?.success) {
+                                console.log(`[WAManager] Auto-sync on connect: ${result.count} مجموعة لـ ${accountId}`);
+                            } else {
+                                console.warn(`[WAManager] Auto-sync on connect failed for ${accountId}:`, result?.error);
+                            }
+                        }).catch(err => {
+                            console.warn(`[WAManager] Auto-sync on connect error (${accountId}):`, err.message);
+                        });
+                    } catch (err) {
+                        console.warn(`[WAManager] GroupSyncService require error:`, err.message);
+                    }
+                }, 3000);
             }
 
             if (connection === 'close') {
                 connecting.delete(accountId);
                 sessions.delete(accountId);
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                // لا تعيد الاتصال لو تم تسجيل الخروج أو حُظر الحساب أو تعارض جلسة
+                const noReconnectCodes = new Set([
+                    DisconnectReason.loggedOut,
+                    DisconnectReason.badSession,
+                    DisconnectReason.forbidden,      // محظور
+                ]);
+                const shouldReconnect = !noReconnectCodes.has(statusCode);
 
                 await SystemDB.run(
                     `UPDATE accounts SET status='disconnected', updated_at=NOW() WHERE id=$1`, [accountId]
@@ -101,10 +129,15 @@ class WhatsAppManager {
                 emit('account_status', { accountId, status: 'disconnected' });
 
                 if (shouldReconnect) {
-                    console.log(`[WAManager] Account ${accountId} disconnected — reconnecting in 5s...`);
-                    setTimeout(() => this._startSession(accountId), 5000);
+                    // Exponential backoff: 5s, 10s, 20s, 40s, 60s (max)
+                    const attempt = (reconnectAt.get(accountId) || 0) + 1;
+                    reconnectAt.set(accountId, attempt);
+                    const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60000);
+                    console.log(`[WAManager] Account ${accountId} disconnected — reconnecting in ${delay / 1000}s... (attempt ${attempt})`);
+                    setTimeout(() => this._startSession(accountId), delay);
                 } else {
-                    console.log(`[WAManager] Account ${accountId} logged out.`);
+                    reconnectAt.delete(accountId);
+                    console.log(`[WAManager] Account ${accountId} logged out (statusCode=${statusCode}). Not reconnecting.`);
                     qrData.delete(accountId);
                 }
             }
