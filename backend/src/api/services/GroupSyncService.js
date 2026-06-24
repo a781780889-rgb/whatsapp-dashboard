@@ -8,6 +8,7 @@
  */
 const WhatsAppManager = require('../../bot/WhatsAppManager');   // ✅ مسار صحيح
 const DatabaseManager = require('../../database/DatabaseManager');
+const CacheService    = require('../../lib/CacheService');
 
 class GroupSyncService {
     constructor() {
@@ -79,6 +80,8 @@ class GroupSyncService {
                                  SET last_auto_sync = NOW(), updated_at = NOW()
                                  WHERE account_id = $1`, [accountId]
                             );
+                            // مسح الكاش حتى تظهر البيانات الجديدة فوراً
+                            await CacheService.invalidateAccount(accountId).catch(() => {});
                             console.log(`[GroupSyncService] ✅ Done: account ${accountId}`);
                         })
                         .catch(err => {
@@ -110,6 +113,7 @@ class GroupSyncService {
             const GroupController = require('../controllers/GroupController');
             const accountDB       = await DatabaseManager.getAccountDB(accountId);
             await GroupController._ensureGroupsTable(accountDB);
+            await GroupController._ensureSyncSettingsTable(accountDB);
 
             this._syncing.add(accountId);
             const groups = await GroupController._syncFromWhatsApp(accountId, sock, accountDB);
@@ -118,6 +122,9 @@ class GroupSyncService {
                 `UPDATE group_sync_settings SET last_auto_sync = NOW() WHERE account_id = $1`,
                 [accountId]
             ).catch(() => {});
+
+            // ── [FIX] مسح الكاش بعد الـ sync حتى يعرض getGroups البيانات الجديدة فوراً
+            await CacheService.invalidateAccount(accountId).catch(() => {});
 
             return { success: true, groups, count: groups.length };
         } catch (err) {
