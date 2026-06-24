@@ -801,7 +801,7 @@ function GroupAvatar({ group, size = 'md' }: { group: WaGroup; size?: 'sm' | 'md
 function GroupCard({ group, onClick, onQuickPublish }: {
   group: WaGroup;
   onClick: () => void;
-  onQuickPublish?: (group: WaGroup) => void;
+  onQuickPublish?: (g: WaGroup) => void;
 }) {
   const canPublish = group.publish_status !== 'red';
   return (
@@ -850,11 +850,10 @@ function GroupCard({ group, onClick, onQuickPublish }: {
           {canPublish && onQuickPublish && (
             <button
               onClick={(e) => { e.stopPropagation(); onQuickPublish(group); }}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 transition-colors opacity-0 group-hover:opacity-100"
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 transition-all opacity-0 group-hover:opacity-100"
               title="نشر في هذه المجموعة"
             >
-              <Send className="w-3 h-3" />
-              نشر
+              <Send className="w-3 h-3" />نشر
             </button>
           )}
           <span className="text-xs font-medium text-[var(--brand-primary)] opacity-0 group-hover:opacity-100 transition-opacity">
@@ -1551,7 +1550,7 @@ function GroupModal({ group, accountId, onClose }: {
 function CategoryRow({ group, onClick, onQuickPublish }: {
   group: WaGroup;
   onClick: () => void;
-  onQuickPublish?: (group: WaGroup) => void;
+  onQuickPublish?: (g: WaGroup) => void;
 }) {
   const statusConfig = {
     green:  { icon: CheckSquare, cls: 'text-green-400',  bg: 'bg-green-500/10'  },
@@ -1597,11 +1596,10 @@ function CategoryRow({ group, onClick, onQuickPublish }: {
         {canPublish && onQuickPublish && (
           <button
             onClick={(e) => { e.stopPropagation(); onQuickPublish(group); }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 transition-colors opacity-0 group-hover:opacity-100"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 transition-all opacity-0 group-hover:opacity-100"
             title="نشر في هذه المجموعة"
           >
-            <Send className="w-3 h-3" />
-            نشر
+            <Send className="w-3 h-3" />نشر
           </button>
         )}
         <div className="text-right">
@@ -2242,10 +2240,10 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
   const [showMemberPublish, setShowMemberPublish] = useState(false);
   const [quickPublishGroup, setQuickPublishGroup] = useState<WaGroup | null>(null);
 
-  const handleQuickPublish = (group: WaGroup) => {
+  const handleQuickPublish = useCallback((group: WaGroup) => {
     setQuickPublishGroup(group);
     setShowMemberPublish(true);
-  };
+  }, []);
 
   // إعدادات المزامنة — مخزّنة في localStorage
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(() => {
@@ -2280,4 +2278,4 @@ export default function GroupsView({ accountId }: { accountId: string | null }) 
     setError(null);
 
     try {
-      const url = `${API}/accounts/${accountId}/
+      const url = `${API}/accounts/${accountId}/groups${forceRefresh ? '?
