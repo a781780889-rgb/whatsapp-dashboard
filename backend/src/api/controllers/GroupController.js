@@ -26,9 +26,9 @@ function parsePagination(query) {
 // مدى الفترة التي نعتبر فيها بيانات حساب ما "حديثة بما يكفي" فنتجنّب إعادة
 // الجلب الحي من واتساب لو طُلبت الصفحة عدة مرات متتالية في ثوانٍ قليلة.
 // أي طلب صريح بـ ?refresh=1 يتجاوز هذا الفحص ويفرض جلباً حيّاً دائماً.
-const LIVE_FRESHNESS_WINDOW_MS   = 15 * 1000;
-const LIVE_SYNC_TIMEOUT_MS       = 25 * 1000;
-const SYNC_ALL_TIMEOUT_MS        = 45 * 1000;
+const LIVE_FRESHNESS_WINDOW_MS   = 30 * 1000;   // 30 ثانية
+const LIVE_SYNC_TIMEOUT_MS       = 60 * 1000;   // [FIX] رُفع من 25 إلى 60 ثانية (بدون جلب صور)
+const SYNC_ALL_TIMEOUT_MS        = 90 * 1000;   // [FIX] رُفع من 45 إلى 90 ثانية
 
 function withTimeout(promise, ms, label = 'TIMEOUT') {
     return Promise.race([
@@ -611,14 +611,10 @@ class GroupController {
             else if (isAdmin)   publishStatus = 'yellow';
             else                publishStatus = 'red';
 
-            // جلب الصورة بـ timeout آمن
-            let avatarUrl = null;
-            try {
-                avatarUrl = await Promise.race([
-                    sock.profilePictureUrl(jid, 'image'),
-                    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000)),
-                ]);
-            } catch (_) {}
+            // [FIX] حذف جلب الصورة من المزامنة الرئيسية — كانت تستغرق 132×3ث=396ث
+            //        وتتجاوز LIVE_SYNC_TIMEOUT_MS=25ث فتُعيد 0 مجموعة دائماً
+            //        الصور تُجلب لاحقاً عند الحاجة أو تُترك فارغة
+            const avatarUrl = null;
 
             const membersCount  = meta.participants?.length || 0;
             const adminsCount   = meta.participants?.filter(p => p.admin).length || 0;
