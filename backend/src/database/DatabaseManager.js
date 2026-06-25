@@ -63,8 +63,25 @@ CREATE TABLE IF NOT EXISTS links (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 CREATE TABLE IF NOT EXISTS schedules (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, status VARCHAR(50) DEFAULT 'active', cron_expr TEXT, ad_library_id UUID, target_groups JSONB DEFAULT '[]', next_run_at TIMESTAMPTZ, last_run_at TIMESTAMPTZ, run_count INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS ad_library (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, content TEXT DEFAULT '', media_paths JSONB DEFAULT '[]', media_types JSONB DEFAULT '[]', links JSONB DEFAULT '[]', format_options JSONB DEFAULT '{}', priority INT DEFAULT 5, tags TEXT DEFAULT '', is_active BOOLEAN DEFAULT TRUE, use_count INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS campaigns (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, status VARCHAR(50) DEFAULT 'pending', target_groups JSONB DEFAULT '[]', ad_library_id UUID, sent_count INT DEFAULT 0, failed_count INT DEFAULT 0, total_targets INT DEFAULT 0, started_at TIMESTAMPTZ, finished_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
-CREATE TABLE IF NOT EXISTS broadcast_schedules (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, status VARCHAR(50) DEFAULT 'active', target_groups JSONB DEFAULT '[]', ad_library_id UUID, interval_minutes INT DEFAULT 60, next_run_at TIMESTAMPTZ, last_run_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
-CREATE TABLE IF NOT EXISTS direct_publish_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), ad_library_id UUID, target_groups JSONB, sent_count INT DEFAULT 0, failed_count INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS broadcast_schedules (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, account_id TEXT, status VARCHAR(50) DEFAULT 'paused', target_group_jids JSONB DEFAULT '[]', ad_library_ids JSONB DEFAULT '[]', rotation_mode VARCHAR(50) DEFAULT 'sequential', active_days JSONB DEFAULT '[0,1,2,3,4,5,6]', publish_times JSONB DEFAULT '[]', max_per_day INT DEFAULT 3, send_to_members BOOLEAN DEFAULT FALSE, exclude_admins BOOLEAN DEFAULT TRUE, next_run_at TIMESTAMPTZ, last_run_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS account_id TEXT;
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS target_group_jids JSONB DEFAULT '[]';
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS ad_library_ids JSONB DEFAULT '[]';
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS rotation_mode VARCHAR(50) DEFAULT 'sequential';
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS active_days JSONB DEFAULT '[0,1,2,3,4,5,6]';
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS publish_times JSONB DEFAULT '[]';
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS max_per_day INT DEFAULT 3;
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS send_to_members BOOLEAN DEFAULT FALSE;
+ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS exclude_admins BOOLEAN DEFAULT TRUE;
+CREATE TABLE IF NOT EXISTS direct_publish_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id TEXT, ad_library_id UUID, target_group_jids JSONB DEFAULT '[]', custom_content TEXT DEFAULT '', status VARCHAR(50) DEFAULT 'sent', send_to_members BOOLEAN DEFAULT FALSE, exclude_admins BOOLEAN DEFAULT TRUE, members_sent INT DEFAULT 0, sent_at TIMESTAMPTZ DEFAULT NOW(), created_at TIMESTAMPTZ DEFAULT NOW());
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS account_id TEXT;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS target_group_jids JSONB DEFAULT '[]';
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS custom_content TEXT DEFAULT '';
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'sent';
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS send_to_members BOOLEAN DEFAULT FALSE;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS exclude_admins BOOLEAN DEFAULT TRUE;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS members_sent INT DEFAULT 0;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ DEFAULT NOW();
 CREATE TABLE IF NOT EXISTS group_exclusions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone TEXT NOT NULL UNIQUE, reason TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS join_queue (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), link_url TEXT NOT NULL, status VARCHAR(50) DEFAULT 'pending', attempts INT DEFAULT 0, last_attempt_at TIMESTAMPTZ, joined_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS link_search_settings (id INT PRIMARY KEY DEFAULT 1, settings JSONB DEFAULT '{}', updated_at TIMESTAMPTZ DEFAULT NOW());
@@ -95,7 +112,21 @@ const DatabaseManager = {
         const p = getPool();
         const client = await p.connect();
         try {
-            await client.query(ACCOUNT_SCHEMA(schemaName));
+            // تشغيل كل statement منفصلاً لضمان تطبيق ALTER TABLE
+            const schemaSQL = ACCOUNT_SCHEMA(schemaName);
+            const statements = schemaSQL
+                .split(';')
+                .map(s => s.trim())
+                .filter(s => s.length > 0);
+            for (const stmt of statements) {
+                try {
+                    await client.query(stmt);
+                } catch (stmtErr) {
+                    if (!stmtErr.message.includes('already exists')) {
+                        console.warn(`[DatabaseManager] stmt warning (${accountId}):`, stmtErr.message);
+                    }
+                }
+            }
         } catch (err) {
             console.error(`[DatabaseManager] Schema error for ${accountId}:`, err.message);
         } finally {
