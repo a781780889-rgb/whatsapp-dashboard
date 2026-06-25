@@ -23,7 +23,7 @@ class BroadcastController {
                 active_days: JSON.parse(b.active_days || '[0,1,2,3,4,5,6]'),
                 publish_times: JSON.parse(b.publish_times || '[]'),
             }));
-            res.json({ success: true, broadcasts: parsed });
+            res.json({ success: true, schedules: parsed, broadcasts: parsed });
         } catch (err) {
             console.error('Broadcast getAll error:', err);
             res.status(500).json({ success: false, error: 'Internal Server Error' });
@@ -70,11 +70,11 @@ class BroadcastController {
 
     async start(req, res) {
         try {
-            const { accountId, broadcastId } = req.params;
+            const { accountId, id } = req.params;
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             await accountDB.run(
                 `UPDATE broadcast_schedules SET status = 'active', updated_at = NOW() WHERE id = $1`,
-                [broadcastId]
+                [id]
             );
             res.json({ success: true, message: 'تم تشغيل الجدولة' });
         } catch (err) {
@@ -84,11 +84,11 @@ class BroadcastController {
 
     async pause(req, res) {
         try {
-            const { accountId, broadcastId } = req.params;
+            const { accountId, id } = req.params;
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             await accountDB.run(
                 `UPDATE broadcast_schedules SET status = 'paused', updated_at = NOW() WHERE id = $1`,
-                [broadcastId]
+                [id]
             );
             res.json({ success: true, message: 'تم إيقاف الجدولة مؤقتاً' });
         } catch (err) {
@@ -98,9 +98,9 @@ class BroadcastController {
 
     async delete(req, res) {
         try {
-            const { accountId, broadcastId } = req.params;
+            const { accountId, id } = req.params;
             const accountDB = await DatabaseManager.getAccountDB(accountId);
-            await accountDB.run(`DELETE FROM broadcast_schedules WHERE id = $1`, [broadcastId]);
+            await accountDB.run(`DELETE FROM broadcast_schedules WHERE id = $1`, [id]);
             res.json({ success: true, message: 'تم حذف الجدولة' });
         } catch (err) {
             res.status(500).json({ success: false, error: 'Internal Server Error' });
