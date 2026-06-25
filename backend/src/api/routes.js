@@ -245,6 +245,11 @@ router.post('/accounts/:accountId/broadcast/schedules/:id/start', auth, subCheck
 router.post('/accounts/:accountId/broadcast/direct',              auth, subCheck, BroadcastController.directPublish.bind(BroadcastController));
 router.get('/accounts/:accountId/broadcast/log',                  auth, subCheck, BroadcastController.getDirectPublishLog.bind(BroadcastController));
 
+// ── Schedule Monitor ──────────────────────────────────────────────────────────
+const ScheduleMonitorController = require('./controllers/ScheduleMonitorController');
+router.get('/accounts/:accountId/broadcast/monitor',              auth, subCheck, ScheduleMonitorController.getMonitor.bind(ScheduleMonitorController));
+router.post('/accounts/:accountId/broadcast/publish-now',         auth, subCheck, ScheduleMonitorController.publishNow.bind(ScheduleMonitorController));
+
 // ══════════════════════════════════════════════════════
 //  AD LIBRARY — FIX: use actual method names
 // ══════════════════════════════════════════════════════
