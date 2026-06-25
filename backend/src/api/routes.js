@@ -233,6 +233,38 @@ router.put('/accounts/:accountId/link-settings/join',   auth, subCheck, LinkSett
 router.post('/accounts/:accountId/link-settings/import', auth, subCheck, LinkSettingsController.importLinks.bind(LinkSettingsController));
 
 // ══════════════════════════════════════════════════════
+//  LINK SCAN ENGINE — البحث التلقائي والانضمام الاحترافي
+// ══════════════════════════════════════════════════════
+const LinkScanController = require('./controllers/LinkScanController');
+
+// بدء / إيقاف / حالة الفحص
+router.post('/accounts/:accountId/links/scan/start',      auth, subCheck, LinkScanController.startScan.bind(LinkScanController));
+router.post('/accounts/:accountId/links/scan/stop',       auth, subCheck, LinkScanController.stopScan.bind(LinkScanController));
+router.get('/accounts/:accountId/links/scan/status',      auth, subCheck, LinkScanController.getScanStatus.bind(LinkScanController));
+router.get('/links/scan/all-status',                      auth,           LinkScanController.getAllScanStatus.bind(LinkScanController));
+router.post('/links/scan/start-all',                      auth,           LinkScanController.startScanAll.bind(LinkScanController));
+
+// الروابط المكتشفة
+router.get('/accounts/:accountId/links/discovered',               auth, subCheck, LinkScanController.getDiscoveredLinks.bind(LinkScanController));
+router.get('/accounts/:accountId/links/discovered/stats',         auth, subCheck, LinkScanController.getDiscoveredStats.bind(LinkScanController));
+router.get('/accounts/:accountId/links/discovered/export/csv',    auth, subCheck, LinkScanController.exportDiscoveredCSV.bind(LinkScanController));
+router.delete('/accounts/:accountId/links/discovered/duplicates', auth, subCheck, LinkScanController.deleteDuplicates.bind(LinkScanController));
+router.delete('/accounts/:accountId/links/discovered/cleanup',    auth, subCheck, LinkScanController.cleanupDisabledLinks.bind(LinkScanController));
+router.delete('/accounts/:accountId/links/discovered/:linkId',    auth, subCheck, LinkScanController.deleteDiscoveredLink.bind(LinkScanController));
+router.patch('/accounts/:accountId/links/discovered/:linkId/status', auth, subCheck, LinkScanController.updateLinkStatus.bind(LinkScanController));
+
+// الانضمام
+router.post('/accounts/:accountId/links/discovered/join',   auth, subCheck, LinkScanController.joinDiscoveredLinks.bind(LinkScanController));
+router.post('/accounts/:accountId/links/discovered/import', auth, subCheck, LinkScanController.importLinks.bind(LinkScanController));
+
+// سجل الانضمام
+router.get('/accounts/:accountId/links/join-history', auth, subCheck, LinkScanController.getJoinHistory.bind(LinkScanController));
+
+// إعدادات الانضمام
+router.get('/accounts/:accountId/links/join-settings', auth, subCheck, LinkScanController.getJoinSettings.bind(LinkScanController));
+router.put('/accounts/:accountId/links/join-settings', auth, subCheck, LinkScanController.updateJoinSettings.bind(LinkScanController));
+
+// ══════════════════════════════════════════════════════
 //  BROADCAST — FIX: use actual method names
 // ══════════════════════════════════════════════════════
 const BroadcastController = require('./controllers/BroadcastController');
