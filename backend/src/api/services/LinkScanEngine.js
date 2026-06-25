@@ -142,7 +142,7 @@ class LinkScanEngine {
   // ══════════════════════════════════════════════════════════════════════════
   async _runScan(accountId, job) {
     try {
-      const sock = WhatsAppManager.getSocket(accountId);
+      const sock = WhatsAppManager.getSession(accountId);
       if (!sock) {
         throw new Error('الحساب غير متصل — لا يمكن الفحص');
       }
