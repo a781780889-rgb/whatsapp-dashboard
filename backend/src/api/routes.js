@@ -265,6 +265,36 @@ router.get('/accounts/:accountId/links/join-settings', auth, subCheck, LinkScanC
 router.put('/accounts/:accountId/links/join-settings', auth, subCheck, LinkScanController.updateJoinSettings.bind(LinkScanController));
 
 // ══════════════════════════════════════════════════════
+//  LINK JOIN SYSTEM — نظام الانضمام بالروابط (متعدد الحسابات)
+// ══════════════════════════════════════════════════════
+const LinkJoinController = require('./controllers/LinkJoinController');
+
+// لوحة التحكم الرئيسية والإحصائيات
+router.get('/links/join/dashboard',        auth, LinkJoinController.getDashboard.bind(LinkJoinController));
+
+// الروابط
+router.get('/links/join/all-links',        auth, LinkJoinController.getAllLinks.bind(LinkJoinController));
+router.get('/links/join/joined-links',     auth, LinkJoinController.getJoinedLinks.bind(LinkJoinController));
+router.get('/links/join/unjoined-links',   auth, LinkJoinController.getUnjoinedLinks.bind(LinkJoinController));
+router.get('/links/join/history',          auth, LinkJoinController.getJoinHistory.bind(LinkJoinController));
+
+// تنفيذ الانضمام
+router.post('/links/join/execute',         auth, LinkJoinController.executeJoin.bind(LinkJoinController));
+router.post('/links/join/add-links',       auth, LinkJoinController.addLinks.bind(LinkJoinController));
+router.get('/links/join/job/:jobId',       auth, LinkJoinController.getJobStatus.bind(LinkJoinController));
+
+// حذف وتحديث
+router.post('/links/join/delete',          auth, LinkJoinController.deleteLinks.bind(LinkJoinController));
+router.patch('/links/join/:accountId/:linkId/status', auth, LinkJoinController.updateLinkStatus.bind(LinkJoinController));
+
+// الوضع التلقائي
+router.get('/links/join/auto-mode',              auth, LinkJoinController.getAutoMode.bind(LinkJoinController));
+router.post('/links/join/auto-mode/start',       auth, LinkJoinController.startAutoMode.bind(LinkJoinController));
+router.post('/links/join/auto-mode/stop',        auth, LinkJoinController.stopAutoMode.bind(LinkJoinController));
+router.get('/links/join/auto-settings',          auth, LinkJoinController.getAutoSettings.bind(LinkJoinController));
+router.put('/links/join/auto-settings',          auth, LinkJoinController.updateAutoSettings.bind(LinkJoinController));
+
+// ══════════════════════════════════════════════════════
 //  BROADCAST — FIX: use actual method names
 // ══════════════════════════════════════════════════════
 const BroadcastController = require('./controllers/BroadcastController');
