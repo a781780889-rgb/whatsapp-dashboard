@@ -240,7 +240,7 @@ class LinkScanController {
         accountDB.all(`SELECT status, COUNT(*) AS cnt FROM discovered_links GROUP BY status`),
         accountDB.all(`SELECT link_type, COUNT(*) AS cnt FROM discovered_links GROUP BY link_type ORDER BY cnt DESC`),
         accountDB.get(`SELECT COUNT(*) AS cnt FROM (
-          SELECT url, COUNT(*) AS c FROM discovered_links GROUP BY url HAVING c > 1
+          SELECT url FROM discovered_links GROUP BY url HAVING COUNT(*) > 1
         ) t`),
         accountDB.get(`SELECT discovered_at FROM discovered_links ORDER BY discovered_at DESC LIMIT 1`),
         accountDB.get(`SELECT COUNT(*) AS cnt FROM discovered_links WHERE status='joined' AND joined_at >= NOW() - INTERVAL '1 day'`),
