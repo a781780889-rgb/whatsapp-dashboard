@@ -10,6 +10,7 @@ import AccountsView         from './views/AccountsView';
 import CampaignsView        from './views/CampaignsView';
 import GroupsView           from './views/GroupsView';
 import LinkDashboardView    from './views/LinkDashboardView';
+import LinkJoinView         from './views/LinkJoinView';
 import ScheduleDashboardView from './views/ScheduleDashboardView';
 import AdLibraryView        from './views/AdLibraryView';
 import DirectPublishView    from './views/DirectPublishView';
@@ -213,6 +214,7 @@ function AppInner() {
           } />
           <Route path="/groups"         element={<GroupsView          accountId={selectedAccountId} />} />
           <Route path="/links"          element={<LinkDashboardView    accountId={selectedAccountId} />} />
+          <Route path="/link-join"      element={<LinkJoinView          accountId={selectedAccountId} accounts={accounts} />} />
           <Route path="/schedules"      element={<ScheduleDashboardView accountId={selectedAccountId} accounts={accounts} />} />
           <Route path="/ad-library"     element={<AdLibraryView        accountId={selectedAccountId} />} />
           <Route path="/direct-publish" element={<DirectPublishView    accountId={selectedAccountId} accounts={accounts} />} />
