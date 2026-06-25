@@ -142,51 +142,68 @@ class LinkScanEngine {
   // ══════════════════════════════════════════════════════════════════════════
   async _runScan(accountId, job) {
     try {
+      // ── [FIX-ROOT] فحص حالة الجلسة بدقة قبل أي شيء ──────────────────────
+      // كانت المشكلة السابقة تُظهر "0 محادثة" حتى لو كانت الجلسة منتهية أو
+      // الـ QR لم يُمسح بعد، لأن الكود القديم لم يكن يُفرّق بين "متصل بدون
+      // محادثات" و "غير متصل أصلاً". الآن نُفرّق بوضوح ونمنع تشغيل فحص
+      // لحساب غير متصل حقيقةً.
+      const isOnline = WhatsAppManager.isOnline(accountId);
       const sock = WhatsAppManager.getSession(accountId);
-      if (!sock) {
-        throw new Error('الحساب غير متصل — لا يمكن الفحص');
+      const qrPending = WhatsAppManager.getQrStatus(accountId);
+
+      console.log(`[LinkScanEngine] ── بدء الفحص ──────────────────────────────`);
+      console.log(`[LinkScanEngine] Account: ${accountId}`);
+      console.log(`[LinkScanEngine] Session Connected: ${isOnline}`);
+      console.log(`[LinkScanEngine] Socket Present: ${!!sock}`);
+      console.log(`[LinkScanEngine] QR Pending: ${!!qrPending}`);
+
+      if (!isOnline || !sock) {
+        const reason = qrPending
+          ? 'الحساب غير متصل — يوجد QR لم يتم مسحه بعد. يرجى مسح QR لإكمال الربط'
+          : 'الحساب غير متصل بواتساب — يرجى إعادة ربط الجلسة';
+        job.status = 'error';
+        job.finishedAt = new Date().toISOString();
+        job.log.push({ ts: new Date().toISOString(), msg: `❌ ${reason}` });
+        console.log(`[LinkScanEngine] ⛔ توقف: ${reason}`);
+        this._emit(accountId, job);
+        return;
       }
 
       const accountDB = await DatabaseManager.getAccountDB(accountId);
       await this._ensureTables(accountDB);
 
-      // جلب قائمة المحادثات
-      job.log.push({ ts: new Date().toISOString(), msg: '📋 جاري جلب قائمة المحادثات...' });
+      // ── جلب المحادثات الحقيقية من واتساب مباشرة ─────────────────────────
+      job.log.push({ ts: new Date().toISOString(), msg: '⏳ جاري تحميل المحادثات...' });
       this._emit(accountId, job);
 
-      let chats = [];
-      try {
-        // Baileys: sock.chats أو sock.store?.chats
-        const store = WhatsAppManager.getStore ? WhatsAppManager.getStore(accountId) : null;
-        if (store && store.chats) {
-          chats = Object.values(store.chats);
-        } else if (sock.chats) {
-          chats = Array.isArray(sock.chats) ? sock.chats : Object.values(sock.chats);
-        }
-      } catch (e) {
-        // fallback: جلب من قاعدة البيانات
-        const rows = await accountDB.all(
-          `SELECT jid, name FROM group_sync_log WHERE status = 'active' LIMIT 500`
-        ).catch(() => []);
-        chats = rows.map(r => ({ id: r.jid, name: r.name }));
-      }
-
-      if (chats.length === 0) {
-        // محاولة جلب المجموعات من جدول المجموعات إذا كان موجوداً
-        const groups = await accountDB.all(
-          `SELECT group_jid AS id, subject AS name FROM groups LIMIT 500`
-        ).catch(() => []);
-        chats = groups;
-      }
+      const { chats, groupsCount, privateCount, excluded, excludedReasons, source }
+        = await this._fetchRealChats(accountId, sock, accountDB);
 
       job.total = chats.length;
-      job.log.push({ ts: new Date().toISOString(), msg: `📊 وُجد ${chats.length} محادثة للفحص` });
+
+      console.log(`[LinkScanEngine] Source: ${source}`);
+      console.log(`[LinkScanEngine] Fetched Chats: ${chats.length}`);
+      console.log(`[LinkScanEngine] Groups: ${groupsCount}`);
+      console.log(`[LinkScanEngine] Private Chats: ${privateCount}`);
+      console.log(`[LinkScanEngine] Excluded: ${excluded}`);
+      if (excluded > 0) {
+        console.log(`[LinkScanEngine] Excluded Reasons: ${JSON.stringify(excludedReasons)}`);
+      }
+      console.log(`[LinkScanEngine] Ready For Scan: ${chats.length}`);
+
+      job.log.push({
+        ts: new Date().toISOString(),
+        msg: `✅ تم العثور على ${chats.length} محادثة — ${groupsCount} مجموعة، ${privateCount} محادثة خاصة`,
+      });
       this._emit(accountId, job);
 
       if (chats.length === 0) {
         job.status = 'finished';
         job.finishedAt = new Date().toISOString();
-        job.log.push({ ts: new Date().toISOString(), msg: '⚠️ لا توجد محادثات متاحة للفحص' });
+        job.log.push({
+          ts: new Date().toISOString(),
+          msg: '⚠️ الحساب متصل لكن لا توجد مجموعات أو محادثات منضم إليها حالياً',
+        });
         this._emit(accountId, job);
         return;
       }
@@ -196,8 +213,8 @@ class LinkScanEngine {
         if (job._abort) break;
 
         const chat = chats[i];
-        const jid = chat.id || chat.jid || '';
-        const name = chat.name || chat.subject || chat.pushName || jid.split('@')[0];
+        const jid = chat.id;
+        const name = chat.name || jid.split('@')[0];
 
         job.scanned = i + 1;
         job.currentChat = name || jid;
@@ -205,25 +222,8 @@ class LinkScanEngine {
         this._emit(accountId, job);
 
         try {
-          // جلب رسائل المحادثة (آخر 100 رسالة)
-          let messages = [];
-          try {
-            const store = WhatsAppManager.getStore ? WhatsAppManager.getStore(accountId) : null;
-            if (store && store.messages && store.messages[jid]) {
-              messages = Array.from(store.messages[jid].values() || []).slice(-100);
-            }
-          } catch (_) {}
-
-          // استخراج الروابط من اسم المجموعة نفسه أيضاً
+          // استخراج الروابط من: اسم المحادثة + الوصف (إن وُجد للمجموعات)
           const textSources = [name, chat.description || ''];
-          messages.forEach(msg => {
-            const body = msg?.message?.conversation
-              || msg?.message?.extendedTextMessage?.text
-              || msg?.message?.imageMessage?.caption
-              || msg?.message?.videoMessage?.caption
-              || '';
-            if (body) textSources.push(body);
-          });
 
           const allText = textSources.join(' ');
           const links = extractLinksFromText(allText);
@@ -245,7 +245,7 @@ class LinkScanEngine {
             }
           }
         } catch (chatErr) {
-          // تجاهل أخطاء المحادثات الفردية
+          console.error(`[LinkScanEngine] خطأ في فحص المحادثة ${jid}:`, chatErr.message);
         }
 
         // انتظار قصير لتجنب إرهاق الموارد
@@ -264,14 +264,124 @@ class LinkScanEngine {
         });
       }
 
+      console.log(`[LinkScanEngine] ── انتهى الفحص: ${job.found} رابط جديد، ${job.duplicates} مكرر ──`);
       this._emit(accountId, job);
 
     } catch (err) {
       job.status = 'error';
       job.finishedAt = new Date().toISOString();
       job.log.push({ ts: new Date().toISOString(), msg: `❌ ${err.message}` });
+      console.error(`[LinkScanEngine] خطأ فادح في الفحص لحساب ${accountId}:`, err.message);
       this._emit(accountId, job);
       throw err;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  [FIX-ROOT] جلب المحادثات الحقيقية من واتساب مباشرة
+  //
+  //  السبب الجذري للمشكلة القديمة: الكود كان يعتمد على `sock.chats` أو
+  //  `WhatsAppManager.getStore(accountId)` كمصدر بيانات، لكن Baileys لا
+  //  يُخزّن قائمة محادثات في الذاكرة من تلقاء نفسه (هذا يتطلب
+  //  makeInMemoryStore منفصلاً لم يكن مُفعّلاً في WhatsAppManager) —
+  //  فكانت النتيجة دائماً مصفوفة فارغة بصرف النظر عن حالة الحساب.
+  //  الـ fallback القديم كان يقرأ أيضاً من جدول `groups` غير الموجود
+  //  (الجدول الحقيقي اسمه `wa_groups`)، فيفشل بصمت ويُعيد 0 دائماً.
+  //
+  //  الحل: الاستدعاء المباشر لـ sock.groupFetchAllParticipating() — وهي
+  //  نفس الدالة الموثوقة المستخدمة فعلياً في GroupController._syncFromWhatsApp
+  //  لمزامنة المجموعات — مع fallback صحيح من جدول wa_groups الحقيقي
+  //  عند فشل الاتصال المباشر بواتساب لأي سبب عارض.
+  // ══════════════════════════════════════════════════════════════════════════
+  async _fetchRealChats(accountId, sock, accountDB) {
+    const excludedReasons = {};
+    let excluded = 0;
+    let source = 'whatsapp_live';
+
+    try {
+      // المصدر الأساسي: جلب مباشر وحي من واتساب (مجموعات أنت عضو فيها فعلاً)
+      const raw = await sock.groupFetchAllParticipating();
+      const entries = Object.entries(raw || {});
+
+      console.log(`[LinkScanEngine] groupFetchAllParticipating returned ${entries.length} entries`);
+
+      const chats = [];
+      for (const [jid, meta] of entries) {
+        if (!jid || !jid.endsWith('@g.us')) {
+          excluded++;
+          excludedReasons['not_a_group'] = (excludedReasons['not_a_group'] || 0) + 1;
+          continue;
+        }
+        chats.push({
+          id: jid,
+          name: meta.subject || jid.split('@')[0],
+          description: meta.desc || '',
+          isGroup: true,
+        });
+      }
+
+      // محاولة إضافة محادثات خاصة من السجل التاريخي (تقريبية وليست حية)
+      // ── ملاحظة صدق تقنية: Baileys لا يكشف قائمة محادثات خاصة بدون
+      // makeInMemoryStore دائم (غير مُفعَّل في هذا النظام). الجدول التالي
+      // قد لا يكون موجوداً إن لم يُسجَّل أي تدفق رسائل بعد — هذا متوقع
+      // وليس خطأ، ويُعامَل كمصدر تكميلي تقريبي لا كمصدر أساسي موثوق.
+      let privateRows = [];
+      try {
+        const tableExists = await accountDB.get(
+          `SELECT EXISTS (
+             SELECT 1 FROM information_schema.tables
+             WHERE table_name = 'baileys_message_flow'
+           ) AS exists`
+        );
+        if (tableExists?.exists) {
+          privateRows = await accountDB.all(
+            `SELECT DISTINCT jid AS id, jid AS name
+             FROM baileys_message_flow
+             WHERE account_id = $1 AND jid IS NOT NULL AND jid LIKE '%@s.whatsapp.net'
+             LIMIT 1000`,
+            [accountId]
+          ).catch(() => []);
+        } else {
+          console.log('[LinkScanEngine] جدول baileys_message_flow غير موجود — لا توجد محادثات خاصة تقريبية متاحة');
+        }
+      } catch (privErr) {
+        console.warn(`[LinkScanEngine] تعذّر فحص جدول المحادثات الخاصة: ${privErr.message}`);
+      }
+
+      const privateCount = privateRows.length;
+      for (const row of privateRows) {
+        chats.push({ id: row.id, name: row.name, description: '', isGroup: false });
+      }
+
+      return {
+        chats,
+        groupsCount: chats.length - privateCount,
+        privateCount,
+        excluded,
+        excludedReasons,
+        source,
+      };
+
+    } catch (liveErr) {
+      // المصدر الاحتياطي: قراءة من جدول wa_groups الحقيقي (آخر مزامنة محفوظة)
+      console.warn(`[LinkScanEngine] فشل الجلب المباشر من واتساب: ${liveErr.message} — التحويل لـ wa_groups`);
+      source = 'wa_groups_fallback';
+
+      const rows = await accountDB.all(
+        `SELECT group_jid AS id, name, description FROM wa_groups WHERE is_member = TRUE LIMIT 2000`
+      ).catch((dbErr) => {
+        console.error(`[LinkScanEngine] فشل أيضاً قراءة wa_groups: ${dbErr.message}`);
+        return [];
+      });
+
+      return {
+        chats: rows,
+        groupsCount: rows.length,
+        privateCount: 0,
+        excluded,
+        excludedReasons,
+        source,
+      };
     }
   }
 
