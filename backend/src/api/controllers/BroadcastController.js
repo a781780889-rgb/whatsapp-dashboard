@@ -11,17 +11,26 @@ class BroadcastController {
             const { accountId } = req.params;
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             const broadcasts = await accountDB.all(
-                `SELECT b.*, 
-                 (SELECT COUNT(*) FROM direct_publish_log d WHERE d.account_id = $1) as total_sent
-                 FROM broadcast_schedules b WHERE b.account_id = $2 ORDER BY b.created_at DESC`,
-                [accountId, accountId]
+                `SELECT b.id, b.name, b.status, b.created_at, b.updated_at,
+                 COALESCE(b.target_group_jids, '[]') as target_group_jids,
+                 COALESCE(b.ad_library_ids, '[]') as ad_library_ids,
+                 COALESCE(b.active_days, '[0,1,2,3,4,5,6]') as active_days,
+                 COALESCE(b.publish_times, '[]') as publish_times,
+                 COALESCE(b.max_per_day, 3) as max_per_day,
+                 COALESCE(b.rotation_mode, 'sequential') as rotation_mode,
+                 COALESCE(b.send_to_members, false) as send_to_members,
+                 COALESCE(b.exclude_admins, true) as exclude_admins
+                 FROM broadcast_schedules b
+                 WHERE (b.account_id = $1 OR b.account_id IS NULL)
+                 ORDER BY b.created_at DESC`,
+                [accountId]
             );
             const parsed = broadcasts.map(b => ({
                 ...b,
-                target_group_jids: JSON.parse(b.target_group_jids || '[]'),
-                ad_library_ids: JSON.parse(b.ad_library_ids || '[]'),
-                active_days: JSON.parse(b.active_days || '[0,1,2,3,4,5,6]'),
-                publish_times: JSON.parse(b.publish_times || '[]'),
+                target_group_jids: typeof b.target_group_jids === 'string' ? JSON.parse(b.target_group_jids || '[]') : (b.target_group_jids || []),
+                ad_library_ids: typeof b.ad_library_ids === 'string' ? JSON.parse(b.ad_library_ids || '[]') : (b.ad_library_ids || []),
+                active_days: typeof b.active_days === 'string' ? JSON.parse(b.active_days || '[0,1,2,3,4,5,6]') : (b.active_days || [0,1,2,3,4,5,6]),
+                publish_times: typeof b.publish_times === 'string' ? JSON.parse(b.publish_times || '[]') : (b.publish_times || []),
             }));
             res.json({ success: true, schedules: parsed, broadcasts: parsed });
         } catch (err) {
