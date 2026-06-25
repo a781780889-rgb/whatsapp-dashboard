@@ -12,16 +12,16 @@ interface Schedule {
   id: string;
   name: string;
   status: string;
-  ad_library_id?: string;
-  ad_name?: string;
-  target_groups: string[];
-  cron_expr?: string;
-  next_run_at?: string;
-  run_count: number;
+  ad_library_ids?: string[];
+  target_group_jids: string[];
+  active_days?: number[];
+  publish_times?: string[];
+  max_per_day?: number;
+  run_count?: number;
   created_at: string;
 }
 
-interface Ad { id: string; name: string; content: string; }
+interface Ad { id: string; name: string; content: string; is_active?: boolean; }
 interface Group { id: string; name: string; }
 
 const DAYS_AR = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
@@ -35,11 +35,11 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // نموذج الجدولة
+  // نموذج الجدولة — يدعم عدة إعلانات وعدة مجموعات
   const [form, setForm] = useState({
     name: '',
-    ad_library_id: '',
-    target_groups: [] as string[],
+    ad_library_ids: [] as string[],       // مصفوفة إعلانات
+    target_group_jids: [] as string[],    // مصفوفة مجموعات
     times: ['09:00'],
     days: [] as number[],
     send_to_members: false,
@@ -58,7 +58,8 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
         authFetch(`${API}/accounts/${accountId}/groups`),
       ]);
       const [schData, adData, grpData] = await Promise.all([schRes.json(), adRes.json(), grpRes.json()]);
-      if (schData.success) setSchedules(schData.schedules || []);
+      // الـ backend يرجع broadcasts وليس schedules
+      if (schData.success) setSchedules(schData.broadcasts || schData.schedules || []);
       if (adData.success) setAds(adData.ads || []);
       if (grpData.success) setGroups(grpData.groups || []);
     } catch (e) {
@@ -70,39 +71,49 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  const resetForm = () => {
+    setForm({
+      name: '',
+      ad_library_ids: [],
+      target_group_jids: [],
+      times: ['09:00'],
+      days: [],
+      send_to_members: false,
+      exclude_admins: true,
+      daily_limit: 500,
+    });
+    setNewTime('09:00');
+    setError('');
+  };
+
   const handleCreate = async () => {
     if (!accountId) return;
     if (!form.name.trim()) { setError('اسم الجدولة مطلوب'); return; }
-    if (!form.ad_library_id) { setError('يجب اختيار إعلان'); return; }
-    if (form.target_groups.length === 0) { setError('يجب اختيار مجموعة واحدة على الأقل'); return; }
+    if (form.ad_library_ids.length === 0) { setError('يجب اختيار إعلان واحد على الأقل'); return; }
+    if (form.target_group_jids.length === 0) { setError('يجب اختيار مجموعة واحدة على الأقل'); return; }
+
     setSaving(true);
     setError('');
     try {
-      // بناء cron من الأيام والأوقات
-      const daysStr = form.days.length > 0 ? form.days.join(',') : '*';
-      const firstTime = form.times[0] || '09:00';
-      const [hh, mm] = firstTime.split(':');
-      const cron = `${mm} ${hh} * * ${daysStr}`;
-
       const res = await authFetch(`${API}/accounts/${accountId}/broadcast/schedules`, {
         method: 'POST',
         body: JSON.stringify({
           name: form.name,
-          ad_library_id: form.ad_library_id,
-          target_groups: form.target_groups,
-          cron_expr: cron,
+          ad_library_ids: form.ad_library_ids,         // مصفوفة إعلانات
+          target_group_jids: form.target_group_jids,   // مصفوفة مجموعات
+          active_days: form.days.length > 0 ? form.days : [0,1,2,3,4,5,6],
+          publish_times: form.times,
+          max_per_day: form.daily_limit,
           send_to_members: form.send_to_members,
           exclude_admins: form.exclude_admins,
-          daily_limit: form.daily_limit,
-          times: form.times,
-          days: form.days,
+          rotation_mode: 'sequential',
         }),
       });
       const data = await res.json();
       if (data.success) {
         setIsModalOpen(false);
+        resetForm();
         await loadData();
-        setForm({ name: '', ad_library_id: '', target_groups: [], times: ['09:00'], days: [], send_to_members: false, exclude_admins: true, daily_limit: 500 });
       } else {
         setError(data.error || 'حدث خطأ أثناء الحفظ');
       }
@@ -138,10 +149,42 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
     }));
   };
 
+  // تبديل مجموعة (إضافة/إزالة)
   const toggleGroup = (id: string) => {
     setForm(f => ({
       ...f,
-      target_groups: f.target_groups.includes(id) ? f.target_groups.filter(x => x !== id) : [...f.target_groups, id],
+      target_group_jids: f.target_group_jids.includes(id)
+        ? f.target_group_jids.filter(x => x !== id)
+        : [...f.target_group_jids, id],
+    }));
+  };
+
+  // تبديل إعلان (إضافة/إزالة) — يدعم عدة إعلانات
+  const toggleAd = (id: string) => {
+    setForm(f => ({
+      ...f,
+      ad_library_ids: f.ad_library_ids.includes(id)
+        ? f.ad_library_ids.filter(x => x !== id)
+        : [...f.ad_library_ids, id],
+    }));
+  };
+
+  // اختيار / إلغاء اختيار كل الإعلانات
+  const toggleAllAds = () => {
+    const activeAds = ads.filter(a => a.is_active !== false);
+    const allSelected = activeAds.every(a => form.ad_library_ids.includes(a.id));
+    setForm(f => ({
+      ...f,
+      ad_library_ids: allSelected ? [] : activeAds.map(a => a.id),
+    }));
+  };
+
+  // اختيار / إلغاء اختيار كل المجموعات
+  const toggleAllGroups = () => {
+    const allSelected = groups.every(g => form.target_group_jids.includes(g.id));
+    setForm(f => ({
+      ...f,
+      target_group_jids: allSelected ? [] : groups.map(g => g.id),
     }));
   };
 
@@ -167,6 +210,10 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
   const active = schedules.filter(s => s.status === 'active').length;
   const paused = schedules.filter(s => s.status !== 'active').length;
 
+  const activeAds = ads.filter(a => a.is_active !== false);
+  const allAdsSelected = activeAds.length > 0 && activeAds.every(a => form.ad_library_ids.includes(a.id));
+  const allGroupsSelected = groups.length > 0 && groups.every(g => form.target_group_jids.includes(g.id));
+
   return (
     <div className="flex flex-col gap-6 h-full">
       <div className="flex justify-between items-center">
@@ -174,7 +221,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
           <h1 className="text-2xl font-bold text-[var(--text-primary)]">النشر المجدول</h1>
           <p className="text-[var(--text-secondary)] mt-1">جدولة نشر الإعلانات آلياً حسب الأيام والأوقات</p>
         </div>
-        <Button onClick={() => { setError(''); setIsModalOpen(true); }}>
+        <Button onClick={() => { resetForm(); setIsModalOpen(true); }}>
           <Plus className="w-4 h-4" />
           <span>جدولة جديدة</span>
         </Button>
@@ -206,7 +253,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               <div className="text-center">
                 <Calendar className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-3" />
                 <p className="text-[var(--text-secondary)]">لا توجد جداول بعد</p>
-                <Button className="mt-4" onClick={() => setIsModalOpen(true)}>
+                <Button className="mt-4" onClick={() => { resetForm(); setIsModalOpen(true); }}>
                   <Plus className="w-4 h-4" /> إنشاء جدولة
                 </Button>
               </div>
@@ -226,9 +273,15 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               </TableHeader>
               <TableBody>
                 {schedules.map(sch => {
-                  const targetGroups = Array.isArray(sch.target_groups)
-                    ? sch.target_groups
-                    : (typeof sch.target_groups === 'string' ? JSON.parse(sch.target_groups || '[]') : []);
+                  const targetGroups = Array.isArray(sch.target_group_jids)
+                    ? sch.target_group_jids
+                    : (typeof sch.target_group_jids === 'string' ? JSON.parse(sch.target_group_jids || '[]') : []);
+                  const adIds = Array.isArray(sch.ad_library_ids)
+                    ? sch.ad_library_ids
+                    : (typeof sch.ad_library_ids === 'string' ? JSON.parse(sch.ad_library_ids || '[]') : []);
+                  const publishTimes = Array.isArray(sch.publish_times)
+                    ? sch.publish_times
+                    : (typeof sch.publish_times === 'string' ? JSON.parse(sch.publish_times || '[]') : []);
                   return (
                     <TableRow key={sch.id} className="border-[var(--border-default)] group">
                       <TableCell className="font-medium text-[var(--text-primary)] py-4">
@@ -239,7 +292,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
                           {sch.name}
                         </div>
                       </TableCell>
-                      <TableCell className="text-[var(--text-secondary)] text-sm">{sch.ad_name || '—'}</TableCell>
+                      <TableCell className="text-[var(--text-secondary)] text-sm">{adIds.length} إعلان</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5 text-[var(--text-secondary)] text-sm">
                           <Users className="w-4 h-4" />
@@ -248,11 +301,15 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
                       </TableCell>
                       <TableCell>
                         <span className="px-2 py-0.5 bg-[var(--bg-elevated)] rounded border border-[var(--border-default)] text-xs dir-ltr font-mono text-[var(--text-primary)]">
-                          {sch.cron_expr || '—'}
+                          {publishTimes.length > 0 ? `${publishTimes.length} وقت` : '—'}
                         </span>
                       </TableCell>
                       <TableCell className="text-[var(--text-secondary)] text-sm">
-                        {sch.next_run_at ? new Date(sch.next_run_at).toLocaleDateString('ar') : '—'}
+                        {Array.isArray(sch.active_days) && sch.active_days.length === 7
+                          ? 'يومياً'
+                          : Array.isArray(sch.active_days)
+                          ? `${sch.active_days.length} أيام`
+                          : '—'}
                       </TableCell>
                       <TableCell>
                         <Badge variant="outline" className={cn(
@@ -288,27 +345,55 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
         </div>
       </Card>
 
-      <Dialog open={isModalOpen} onOpenChange={v => { if (!saving) setIsModalOpen(v); }}>
+      <Dialog open={isModalOpen} onOpenChange={v => { if (!saving) { setIsModalOpen(v); if (!v) resetForm(); } }}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>جدولة نشر جديدة</DialogTitle>
           </DialogHeader>
           <div className="flex flex-col gap-6 py-4 max-h-[70vh] overflow-y-auto pr-2">
+
+            {/* اسم الجدولة */}
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">اسم الجدولة <span className="text-red-500">*</span></label>
               <input className="input" placeholder="مثال: النشرة الصباحية اليومية" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
             </div>
 
+            {/* اختيار الإعلانات (متعدد) والحد اليومي */}
             <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col gap-2">
-                <label className="text-sm font-medium">اختيار الإعلان <span className="text-red-500">*</span></label>
-                <select className="input" value={form.ad_library_id} onChange={e => setForm(f => ({ ...f, ad_library_id: e.target.value }))}>
-                  <option value="">— اختر إعلاناً —</option>
-                  {ads.filter(a => a.is_active !== false).map(a => (
-                    <option key={a.id} value={a.id}>{a.name}</option>
-                  ))}
-                </select>
-                {ads.length === 0 && <p className="text-xs text-yellow-500">لا توجد إعلانات. أضف إعلاناً أولاً.</p>}
+                <label className="text-sm font-medium">اختيار الإعلانات <span className="text-red-500">*</span></label>
+                <div className="border border-[var(--border-default)] rounded-xl overflow-auto max-h-44">
+                  {activeAds.length === 0 ? (
+                    <p className="p-3 text-sm text-yellow-500">لا توجد إعلانات. أضف إعلاناً أولاً.</p>
+                  ) : (
+                    <>
+                      {/* اختيار الكل */}
+                      <label className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] hover:bg-[var(--bg-elevated)] cursor-pointer bg-[var(--bg-elevated)]">
+                        <input
+                          type="checkbox"
+                          checked={allAdsSelected}
+                          onChange={toggleAllAds}
+                          className="w-4 h-4 rounded"
+                        />
+                        <span className="text-sm font-semibold text-[var(--brand-primary)]">اختيار الكل ({activeAds.length})</span>
+                      </label>
+                      {activeAds.map(a => (
+                        <label key={a.id} className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] last:border-0 hover:bg-[var(--bg-elevated)] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={form.ad_library_ids.includes(a.id)}
+                            onChange={() => toggleAd(a.id)}
+                            className="w-4 h-4 rounded"
+                          />
+                          <span className="text-sm text-[var(--text-primary)]">{a.name}</span>
+                        </label>
+                      ))}
+                    </>
+                  )}
+                </div>
+                {form.ad_library_ids.length > 0 && (
+                  <p className="text-xs text-[var(--brand-primary)]">تم اختيار {form.ad_library_ids.length} إعلان</p>
+                )}
               </div>
               <div className="flex flex-col gap-2">
                 <label className="text-sm font-medium">الحد الأقصى يومياً</label>
@@ -316,25 +401,44 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               </div>
             </div>
 
+            {/* المجموعات المستهدفة (متعددة) */}
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">المجموعات المستهدفة <span className="text-red-500">*</span></label>
               <div className="border border-[var(--border-default)] rounded-xl overflow-auto max-h-48">
                 {groups.length === 0 ? (
                   <p className="p-3 text-sm text-[var(--text-muted)]">لا توجد مجموعات متاحة</p>
-                ) : groups.map(g => (
-                  <label key={g.id} className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] last:border-0 hover:bg-[var(--bg-elevated)] cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={form.target_groups.includes(g.id)}
-                      onChange={() => toggleGroup(g.id)}
-                      className="w-4 h-4 rounded"
-                    />
-                    <span className="text-sm text-[var(--text-primary)]">{g.name}</span>
-                  </label>
-                ))}
+                ) : (
+                  <>
+                    {/* اختيار الكل */}
+                    <label className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] hover:bg-[var(--bg-elevated)] cursor-pointer bg-[var(--bg-elevated)]">
+                      <input
+                        type="checkbox"
+                        checked={allGroupsSelected}
+                        onChange={toggleAllGroups}
+                        className="w-4 h-4 rounded"
+                      />
+                      <span className="text-sm font-semibold text-[var(--brand-primary)]">اختيار الكل ({groups.length})</span>
+                    </label>
+                    {groups.map(g => (
+                      <label key={g.id} className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] last:border-0 hover:bg-[var(--bg-elevated)] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={form.target_group_jids.includes(g.id)}
+                          onChange={() => toggleGroup(g.id)}
+                          className="w-4 h-4 rounded"
+                        />
+                        <span className="text-sm text-[var(--text-primary)]">{g.name}</span>
+                      </label>
+                    ))}
+                  </>
+                )}
               </div>
+              {form.target_group_jids.length > 0 && (
+                <p className="text-xs text-[var(--brand-primary)]">تم اختيار {form.target_group_jids.length} مجموعة</p>
+              )}
             </div>
 
+            {/* أيام النشر */}
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">أيام النشر</label>
               <div className="flex flex-wrap gap-2">
@@ -355,6 +459,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               <p className="text-xs text-[var(--text-muted)]">اتركها فارغة للنشر يومياً</p>
             </div>
 
+            {/* أوقات النشر */}
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">أوقات النشر</label>
               <div className="flex items-center gap-2">
@@ -375,6 +480,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               </div>
             </div>
 
+            {/* خيارات الإرسال */}
             <div className="flex flex-col gap-3">
               <h4 className="text-sm font-semibold text-[var(--text-primary)] border-b border-[var(--border-default)] pb-2">خيارات الإرسال</h4>
               <label className="flex items-center justify-between p-3 border border-[var(--border-default)] rounded-xl bg-[var(--bg-elevated)] cursor-pointer hover:border-[var(--brand-primary)] transition-colors" onClick={() => setForm(f => ({ ...f, send_to_members: !f.send_to_members }))}>
@@ -400,7 +506,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
             {error && <p className="text-sm text-red-500 bg-red-500/10 p-3 rounded-lg">{error}</p>}
 
             <div className="pt-4 border-t border-[var(--border-default)] flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsModalOpen(false)} disabled={saving}>إلغاء</Button>
+              <Button variant="outline" onClick={() => { setIsModalOpen(false); resetForm(); }} disabled={saving}>إلغاء</Button>
               <Button onClick={handleCreate} disabled={saving}>
                 {saving ? <><Loader2 className="w-4 h-4 animate-spin ml-2" />جارٍ الحفظ...</> : 'حفظ الجدولة'}
               </Button>
