@@ -410,7 +410,7 @@ class LinkScanController {
       const targetAccountId = accountIds[i % accountIds.length];
 
       try {
-        const sock = WhatsAppManager.getSocket(targetAccountId);
+        const sock = WhatsAppManager.getSession(targetAccountId);
         if (!sock) {
           await this._recordJoin(accountDB, link.id, link.url, targetAccountId, 'failed', 'الحساب غير متصل');
           continue;
