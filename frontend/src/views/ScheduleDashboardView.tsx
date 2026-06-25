@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/utils/cn';
 import { authFetch, API } from '@/utils/api';
+import ScheduleMonitorPanel from '@/components/ScheduleMonitorPanel';
 
 interface Schedule {
   id: string;
@@ -23,10 +24,17 @@ interface Schedule {
 
 interface Ad { id: string; name: string; content: string; is_active?: boolean; }
 interface Group { id: string; name: string; }
+interface AccountInfo { id: string; name?: string; phone?: string; status?: string; }
 
 const DAYS_AR = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
 
-export default function ScheduleDashboardView({ accountId }: { accountId: string | null }) {
+export default function ScheduleDashboardView({
+  accountId,
+  accounts = [],
+}: {
+  accountId: string | null;
+  accounts?: AccountInfo[];
+}) {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [ads, setAds] = useState<Ad[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -38,8 +46,8 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
   // نموذج الجدولة — يدعم عدة إعلانات وعدة مجموعات
   const [form, setForm] = useState({
     name: '',
-    ad_library_ids: [] as string[],       // مصفوفة إعلانات
-    target_group_jids: [] as string[],    // مصفوفة مجموعات
+    ad_library_ids: [] as string[],
+    target_group_jids: [] as string[],
     times: ['09:00'],
     days: [] as number[],
     send_to_members: false,
@@ -58,7 +66,6 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
         authFetch(`${API}/accounts/${accountId}/groups`),
       ]);
       const [schData, adData, grpData] = await Promise.all([schRes.json(), adRes.json(), grpRes.json()]);
-      // الـ backend يرجع broadcasts وليس schedules
       if (schData.success) setSchedules(schData.broadcasts || schData.schedules || []);
       if (adData.success) setAds(adData.ads || []);
       if (grpData.success) setGroups(grpData.groups || []);
@@ -99,8 +106,8 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
         method: 'POST',
         body: JSON.stringify({
           name: form.name,
-          ad_library_ids: form.ad_library_ids,         // مصفوفة إعلانات
-          target_group_jids: form.target_group_jids,   // مصفوفة مجموعات
+          ad_library_ids: form.ad_library_ids,
+          target_group_jids: form.target_group_jids,
           active_days: form.days.length > 0 ? form.days : [0,1,2,3,4,5,6],
           publish_times: form.times,
           max_per_day: form.daily_limit,
@@ -149,7 +156,6 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
     }));
   };
 
-  // تبديل مجموعة (إضافة/إزالة)
   const toggleGroup = (id: string) => {
     setForm(f => ({
       ...f,
@@ -159,7 +165,6 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
     }));
   };
 
-  // تبديل إعلان (إضافة/إزالة) — يدعم عدة إعلانات
   const toggleAd = (id: string) => {
     setForm(f => ({
       ...f,
@@ -169,7 +174,6 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
     }));
   };
 
-  // اختيار / إلغاء اختيار كل الإعلانات
   const toggleAllAds = () => {
     const activeAds = ads.filter(a => a.is_active !== false);
     const allSelected = activeAds.every(a => form.ad_library_ids.includes(a.id));
@@ -179,7 +183,6 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
     }));
   };
 
-  // اختيار / إلغاء اختيار كل المجموعات
   const toggleAllGroups = () => {
     const allSelected = groups.every(g => form.target_group_jids.includes(g.id));
     setForm(f => ({
@@ -206,16 +209,22 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
     );
   }
 
-  const total = schedules.length;
+  const total  = schedules.length;
   const active = schedules.filter(s => s.status === 'active').length;
   const paused = schedules.filter(s => s.status !== 'active').length;
 
-  const activeAds = ads.filter(a => a.is_active !== false);
-  const allAdsSelected = activeAds.length > 0 && activeAds.every(a => form.ad_library_ids.includes(a.id));
+  const activeAds       = ads.filter(a => a.is_active !== false);
+  const allAdsSelected  = activeAds.length > 0 && activeAds.every(a => form.ad_library_ids.includes(a.id));
   const allGroupsSelected = groups.length > 0 && groups.every(g => form.target_group_jids.includes(g.id));
+
+  // حسابات للـ monitor panel: إذا كان accounts فارغاً نبني من accountId الحالي
+  const monitorAccounts: AccountInfo[] = accounts.length > 0
+    ? accounts
+    : [{ id: accountId, name: accountId }];
 
   return (
     <div className="flex flex-col gap-6 h-full">
+      {/* ── الرأس ──────────────────────────────────────────────────────────── */}
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-bold text-[var(--text-primary)]">النشر المجدول</h1>
@@ -227,11 +236,12 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
         </Button>
       </div>
 
+      {/* ── إحصائيات سريعة ─────────────────────────────────────────────────── */}
       <div className="grid grid-cols-3 gap-4">
         {[
-          { label: 'إجمالي الجداول', value: total, color: 'text-blue-500' },
-          { label: 'جداول نشطة', value: active, color: 'text-green-500' },
-          { label: 'جداول موقوفة', value: paused, color: 'text-yellow-500' },
+          { label: 'إجمالي الجداول', value: total,  color: 'text-blue-500' },
+          { label: 'جداول نشطة',     value: active, color: 'text-green-500' },
+          { label: 'جداول موقوفة',   value: paused, color: 'text-yellow-500' },
         ].map((stat, i) => (
           <Card key={i} className="card">
             <CardContent className="p-4 flex items-center justify-between">
@@ -242,6 +252,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
         ))}
       </div>
 
+      {/* ── جدول الجداول ───────────────────────────────────────────────────── */}
       <Card className="card flex-1 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-auto">
           {loading ? (
@@ -345,6 +356,12 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
         </div>
       </Card>
 
+      {/* ══════════════════════════════════════════════════════════════════════ */}
+      {/* لوحة متابعة النشر المباشرة — تظهر أسفل الجدول لكل الحسابات          */}
+      {/* ══════════════════════════════════════════════════════════════════════ */}
+      <ScheduleMonitorPanel accounts={monitorAccounts} />
+
+      {/* ── Modal إنشاء جدولة ────────────────────────────────────────────── */}
       <Dialog open={isModalOpen} onOpenChange={v => { if (!saving) { setIsModalOpen(v); if (!v) resetForm(); } }}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
@@ -358,7 +375,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               <input className="input" placeholder="مثال: النشرة الصباحية اليومية" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
             </div>
 
-            {/* اختيار الإعلانات (متعدد) والحد اليومي */}
+            {/* اختيار الإعلانات والحد اليومي */}
             <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col gap-2">
                 <label className="text-sm font-medium">اختيار الإعلانات <span className="text-red-500">*</span></label>
@@ -367,24 +384,13 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
                     <p className="p-3 text-sm text-yellow-500">لا توجد إعلانات. أضف إعلاناً أولاً.</p>
                   ) : (
                     <>
-                      {/* اختيار الكل */}
                       <label className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] hover:bg-[var(--bg-elevated)] cursor-pointer bg-[var(--bg-elevated)]">
-                        <input
-                          type="checkbox"
-                          checked={allAdsSelected}
-                          onChange={toggleAllAds}
-                          className="w-4 h-4 rounded"
-                        />
+                        <input type="checkbox" checked={allAdsSelected} onChange={toggleAllAds} className="w-4 h-4 rounded" />
                         <span className="text-sm font-semibold text-[var(--brand-primary)]">اختيار الكل ({activeAds.length})</span>
                       </label>
                       {activeAds.map(a => (
                         <label key={a.id} className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] last:border-0 hover:bg-[var(--bg-elevated)] cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={form.ad_library_ids.includes(a.id)}
-                            onChange={() => toggleAd(a.id)}
-                            className="w-4 h-4 rounded"
-                          />
+                          <input type="checkbox" checked={form.ad_library_ids.includes(a.id)} onChange={() => toggleAd(a.id)} className="w-4 h-4 rounded" />
                           <span className="text-sm text-[var(--text-primary)]">{a.name}</span>
                         </label>
                       ))}
@@ -401,7 +407,7 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
               </div>
             </div>
 
-            {/* المجموعات المستهدفة (متعددة) */}
+            {/* المجموعات المستهدفة */}
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium">المجموعات المستهدفة <span className="text-red-500">*</span></label>
               <div className="border border-[var(--border-default)] rounded-xl overflow-auto max-h-48">
@@ -409,24 +415,13 @@ export default function ScheduleDashboardView({ accountId }: { accountId: string
                   <p className="p-3 text-sm text-[var(--text-muted)]">لا توجد مجموعات متاحة</p>
                 ) : (
                   <>
-                    {/* اختيار الكل */}
                     <label className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] hover:bg-[var(--bg-elevated)] cursor-pointer bg-[var(--bg-elevated)]">
-                      <input
-                        type="checkbox"
-                        checked={allGroupsSelected}
-                        onChange={toggleAllGroups}
-                        className="w-4 h-4 rounded"
-                      />
+                      <input type="checkbox" checked={allGroupsSelected} onChange={toggleAllGroups} className="w-4 h-4 rounded" />
                       <span className="text-sm font-semibold text-[var(--brand-primary)]">اختيار الكل ({groups.length})</span>
                     </label>
                     {groups.map(g => (
                       <label key={g.id} className="flex items-center gap-3 p-3 border-b border-[var(--border-default)] last:border-0 hover:bg-[var(--bg-elevated)] cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={form.target_group_jids.includes(g.id)}
-                          onChange={() => toggleGroup(g.id)}
-                          className="w-4 h-4 rounded"
-                        />
+                        <input type="checkbox" checked={form.target_group_jids.includes(g.id)} onChange={() => toggleGroup(g.id)} className="w-4 h-4 rounded" />
                         <span className="text-sm text-[var(--text-primary)]">{g.name}</span>
                       </label>
                     ))}
