@@ -68,7 +68,8 @@ class AccountController {
     // ── listAccounts — [FIX-22] Cache + [FIX-23] Pagination ─────────────────
     async listAccounts(req, res) {
         try {
-            const isAdmin = req.user?.role === 'admin';
+            const ADMIN_ROLES_SET = new Set(['super_admin', 'superadmin', 'admin', 'owner']);
+            const isAdmin = ADMIN_ROLES_SET.has(req.user?.role);
             const userId  = req.user?.id || req.user?.userId;
 
             if (!isAdmin && !userId) {
@@ -110,12 +111,12 @@ class AccountController {
                                messages_sent_today, created_at, updated_at,
                                connection_type
                         FROM accounts
-                        WHERE user_id = $1 OR user_id IS NULL
+                        WHERE user_id = $1
                         ORDER BY created_at DESC
                         LIMIT $2 OFFSET $3
                     `, [userId, limit, offset]),
                     DatabaseManager.systemDB.get(
-                        `SELECT COUNT(*) as count FROM accounts WHERE user_id = $1 OR user_id IS NULL`, [userId]
+                        `SELECT COUNT(*) as count FROM accounts WHERE user_id = $1`, [userId]
                     ),
                 ]);
             }
@@ -151,9 +152,10 @@ class AccountController {
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
 
-            const isAdmin = req.user?.role === 'admin';
+            const ADMIN_ROLES_SET = new Set(['super_admin', 'superadmin', 'admin', 'owner']);
+            const isAdmin = ADMIN_ROLES_SET.has(req.user?.role);
             const userId  = req.user?.id || req.user?.userId;
-            if (!isAdmin && account.user_id !== userId && account.user_id !== null) {
+            if (!isAdmin && account.user_id !== userId) {
                 return res.status(403).json({ success: false, error: 'غير مصرح بالوصول لهذا الحساب.' });
             }
             return res.json({ success: true, account });
@@ -302,14 +304,15 @@ class AccountController {
     async deleteAccount(req, res) {
         try {
             const { id } = req.params;
-            const isAdmin = req.user?.role === 'admin';
+            const ADMIN_ROLES_SET = new Set(['super_admin', 'superadmin', 'admin', 'owner']);
+            const isAdmin = ADMIN_ROLES_SET.has(req.user?.role);
             const userId  = req.user?.id || req.user?.userId;
 
             const account = await DatabaseManager.systemDB.get(
                 `SELECT * FROM accounts WHERE id = $1`, [id]
             );
             if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
-            if (!isAdmin && account.user_id !== userId && account.user_id !== null) {
+            if (!isAdmin && account.user_id !== userId) {
                 return res.status(403).json({ success: false, error: 'غير مصرح.' });
             }
 
