@@ -46,7 +46,7 @@ class SubscriptionController {
     async createSubscriber(req, res) {
         const {
             username, password, fullName,
-            duration, maxAccounts,
+            duration, maxAccounts, enableTelegram,
         } = req.body || {};
 
         // ── التحقق من البيانات ────────────────────────────────────────────────
@@ -97,9 +97,9 @@ class SubscriptionController {
 
             // ── إنشاء الاشتراك ─────────────────────────────────────────────────
             await SystemDB.run(
-                `INSERT INTO subscriptions (id, user_id, plan_type, status, max_accounts, expires_at)
-                 VALUES ($1, $2, $3, 'active', $4, $5)`,
-                [subId, userId, duration, maxAcc, expiresAt]
+                `INSERT INTO subscriptions (id, user_id, plan_type, status, max_accounts, expires_at, enable_telegram)
+                 VALUES ($1, $2, $3, 'active', $4, $5, $6)`,
+                [subId, userId, duration, maxAcc, expiresAt, enableTelegram === true]
             );
 
             await SystemDB.log(req.user.id, req.user.username, 'CREATE_SUBSCRIBER',
@@ -161,6 +161,7 @@ class SubscriptionController {
                     s.status      AS sub_status,
                     s.max_accounts,
                     s.expires_at,
+                    s.enable_telegram,
                     s.created_at  AS sub_created_at,
                     (SELECT COUNT(*) FROM accounts a WHERE a.user_id = u.id) AS used_accounts
                 FROM users u
@@ -228,6 +229,7 @@ class SubscriptionController {
                     s.status      AS sub_status,
                     s.max_accounts,
                     s.expires_at,
+                    s.enable_telegram,
                     s.created_at  AS sub_created_at,
                     (SELECT COUNT(*) FROM accounts a WHERE a.user_id = u.id) AS used_accounts
                 FROM users u
@@ -282,7 +284,7 @@ class SubscriptionController {
     // ══════════════════════════════════════════════════════
     async updateSubscriber(req, res) {
         const { id } = req.params;
-        const { fullName, password, maxAccounts, duration } = req.body || {};
+        const { fullName, password, maxAccounts, duration, enableTelegram } = req.body || {};
 
         try {
             const user = await SystemDB.get(`SELECT id FROM users WHERE id=$1`, [id]);
@@ -307,6 +309,9 @@ class SubscriptionController {
                         return res.status(400).json({ success: false, error: 'عدد الحسابات غير صالح.' });
                     }
                     await SystemDB.run(`UPDATE subscriptions SET max_accounts=$1, updated_at=NOW() WHERE id=$2`, [maxAcc, sub.id]);
+                }
+                if (enableTelegram !== undefined) {
+                    await SystemDB.run(`UPDATE subscriptions SET enable_telegram=$1, updated_at=NOW() WHERE id=$2`, [enableTelegram === true, sub.id]);
                 }
                 if (duration) {
                     if (!DURATION_MAP[duration]) return res.status(400).json({ success: false, error: 'مدة غير صالحة.' });
@@ -475,7 +480,7 @@ class SubscriptionController {
         const userId = req.user.id;
         try {
             const sub = await SystemDB.get(`
-                SELECT id, plan_type, status, max_accounts, expires_at, created_at
+                SELECT id, plan_type, status, max_accounts, expires_at, created_at, enable_telegram
                 FROM subscriptions
                 WHERE user_id=$1 AND status='active'
                 ORDER BY created_at DESC LIMIT 1
@@ -513,6 +518,7 @@ class SubscriptionController {
                         daysRemaining,
                         isExpired,
                         createdAt:       sub.created_at,
+                        enableTelegram:  sub.enable_telegram === true,
                     }
                     : null,
             });
