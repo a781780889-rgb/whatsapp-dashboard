@@ -19,9 +19,6 @@ import ProtectionView      from './views/ProtectionView';
 import AIAutomationView    from './views/AIAutomationView';
 // Admin views
 import DiagnosticsDashboardView from './views/DiagnosticsDashboardView';
-import UsersView            from './views/UsersView';
-import SubscriptionsView    from './views/SubscriptionsView';
-import LicensesView         from './views/LicensesView';
 import TelegramView         from './views/TelegramView';
 import AdminStatsView       from './views/AdminStatsView';
 
@@ -162,31 +159,6 @@ function AppInner() {
     return <LoginPage onLogin={handleLogin} />;
   }
 
-  /* Subscription expired for regular users */
-  const isExpired =
-    currentUser.subscriptionStatus === 'expired' &&
-    !['super_admin', 'admin'].includes(currentUser.role);
-
-  if (isExpired) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[var(--bg-app)]">
-        <div className="text-center max-w-md p-8 bg-[var(--bg-surface)] border border-[var(--border-default)] rounded-3xl">
-          <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-4">
-            <span className="text-3xl">⚠️</span>
-          </div>
-          <h2 className="text-xl font-bold mb-2">انتهى اشتراكك</h2>
-          <p className="text-[var(--text-muted)] mb-6 text-sm">يرجى التواصل مع المسؤول لتجديد اشتراكك والمتابعة.</p>
-          <button
-            onClick={handleLogout}
-            className="px-6 py-2.5 rounded-xl bg-[var(--brand-primary)] text-white font-bold hover:brightness-110 transition-all"
-          >
-            تسجيل الخروج
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     // FIX 2: All required AppLayout props now provided
     <AppLayout
@@ -228,21 +200,7 @@ function AppInner() {
             <ProtectedRoute adminOnly currentUser={currentUser}>
               <AdminStatsView />
             </ProtectedRoute>} />
-          <Route path="/admin/users"   element={
-            <ProtectedRoute adminOnly currentUser={currentUser}>
-              <UsersView />
-            </ProtectedRoute>} />
-          <Route path="/admin/subscriptions" element={
-            <ProtectedRoute adminOnly currentUser={currentUser}>
-              <SubscriptionsView />
-            </ProtectedRoute>} />
           <Route path="/telegram"        element={<TelegramView />} />
-
-          {/* Admin-only routes */}
-          <Route path="/admin/licenses" element={
-            <ProtectedRoute adminOnly currentUser={currentUser}>
-              <LicensesView />
-            </ProtectedRoute>} />
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
