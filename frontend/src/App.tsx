@@ -21,6 +21,7 @@ import AIAutomationView    from './views/AIAutomationView';
 import DiagnosticsDashboardView from './views/DiagnosticsDashboardView';
 import TelegramView         from './views/TelegramView';
 import AdminStatsView       from './views/AdminStatsView';
+import SubscriptionsView    from './views/SubscriptionsView';
 
 import { ErrorBoundary } from './components/ErrorBoundary';
 import {
@@ -199,6 +200,10 @@ function AppInner() {
           <Route path="/admin/stats"   element={
             <ProtectedRoute adminOnly currentUser={currentUser}>
               <AdminStatsView />
+            </ProtectedRoute>} />
+          <Route path="/admin/subscriptions" element={
+            <ProtectedRoute adminOnly currentUser={currentUser}>
+              <SubscriptionsView />
             </ProtectedRoute>} />
           <Route path="/telegram"        element={<TelegramView />} />
 
