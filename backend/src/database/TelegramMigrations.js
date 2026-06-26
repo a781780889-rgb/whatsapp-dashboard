@@ -4,7 +4,7 @@
  * إنشاء جداول نظام تيليجرام في قاعدة البيانات
  */
 
-const { query } = require('../../lib/postgres');
+const { query } = require('../lib/postgres');
 
 const TelegramMigrations = {
     async run() {
