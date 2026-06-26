@@ -172,6 +172,10 @@ const SystemDB = {
             )
         `);
 
+        // ── Telegram System Tables ────────────────────────────────────────
+        const TelegramMigrations = require('../../database/TelegramMigrations');
+        await TelegramMigrations.run();
+
         console.log('[SystemDB] Schema initialized.');
     },
 
