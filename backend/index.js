@@ -48,6 +48,7 @@ const DatabaseManager    = require('./src/database/DatabaseManager');
 const SystemDB           = require('./src/database/SystemDB');
 const WhatsAppManager    = require('./src/bot/WhatsAppManager');
 const JobScheduler       = require('./src/scheduler/JobScheduler');
+const TelegramService    = require('./src/api/services/TelegramService');
 const AccountRoleEngine  = require('./src/api/services/AccountRoleEngine');
 // [FIX-2] Global Socket Layer
 const SocketBridge       = require('./src/core/SocketBridge');
@@ -325,6 +326,9 @@ async function bootstrap() {
 
         // 5. Start BullMQ Scheduler
         await JobScheduler.start();
+
+    // ── Telegram Workers ──────────────────────────────────────────────────────
+    TelegramService.initAllWorkers().catch(err => console.error('[Telegram] Init error:', err.message));
 
         // 5b. [FIX-20] Start QueueManager — نظام Queue المركزي
         // تسجيل handlers قبل start()
