@@ -3,6 +3,8 @@ const express  = require('express');
 const router   = express.Router();
 const auth     = require('./middleware/auth');
 const role     = require('./middleware/roleCheck');
+const subscriptionCheck = require('./middleware/subscriptionCheck');
+const accountLimitCheck = require('./middleware/accountLimitCheck');
 
 // ── [FIX-15] Per-Route Rate Limiters ─────────────────────────────────────────
 const {
@@ -38,6 +40,23 @@ router.post('/auth/change-password', auth, validate(schemas.changePassword),    
 router.post('/auth/mfa/setup',  auth, AuthController.setupMFA.bind(AuthController));
 router.post('/auth/mfa/verify', auth, AuthController.verifyMFA.bind(AuthController));
 router.delete('/auth/mfa',      auth, AuthController.disableMFA.bind(AuthController));
+
+// ══════════════════════════════════════════════════════
+//  SUBSCRIPTION MANAGEMENT
+// ══════════════════════════════════════════════════════
+const SubscriptionController = require('./controllers/SubscriptionController');
+
+// Admin — إدارة المشتركين
+router.post  ('/admin/subscriptions',             auth, role('admin'), SubscriptionController.createSubscriber.bind(SubscriptionController));
+router.get   ('/admin/subscriptions',             auth, role('admin'), SubscriptionController.listSubscribers.bind(SubscriptionController));
+router.get   ('/admin/subscriptions/:id',         auth, role('admin'), SubscriptionController.getSubscriber.bind(SubscriptionController));
+router.patch ('/admin/subscriptions/:id',         auth, role('admin'), SubscriptionController.updateSubscriber.bind(SubscriptionController));
+router.post  ('/admin/subscriptions/:id/extend',  auth, role('admin'), SubscriptionController.extendSubscription.bind(SubscriptionController));
+router.patch ('/admin/subscriptions/:id/status',  auth, role('admin'), SubscriptionController.setSubscriptionStatus.bind(SubscriptionController));
+router.delete('/admin/subscriptions/:id',         auth, role('admin'), SubscriptionController.deleteSubscriber.bind(SubscriptionController));
+
+// User — بيانات اشتراكي
+router.get('/subscription/me', auth, SubscriptionController.mySubscription.bind(SubscriptionController));
 
 // ══════════════════════════════════════════════════════
 //  ADMIN — Stats
@@ -84,23 +103,23 @@ router.get('/admin/accounts/:id/qr-debug', auth, role('admin'), async (req, res)
 //  ACCOUNTS
 // ══════════════════════════════════════════════════════
 const AccountController = require('./controllers/AccountController');
-router.post('/accounts',                   auth, AccountController.createAccount.bind(AccountController));
-router.get('/accounts',                    auth, listAccountsLimiter, AccountController.listAccounts.bind(AccountController));
-router.get('/accounts/summary',            auth, AccountController.getSummary.bind(AccountController));
-router.get('/accounts/:id',                auth, AccountController.getAccountDetails.bind(AccountController));
-router.get('/accounts/:id/stats',          auth, AccountController.getAccountStats.bind(AccountController));
-router.get('/accounts/:id/logs',           auth, AccountController.getLogs.bind(AccountController));
-router.post('/accounts/:id/connect',       auth, AccountController.connectAccount.bind(AccountController));
-router.get('/accounts/:id/qr-status',      auth, AccountController.getQrStatus.bind(AccountController));
-router.post('/accounts/:id/connect-pairing', auth, AccountController.connectWithPairing.bind(AccountController));
-router.post('/accounts/:id/reset',         auth, AccountController.resetSession.bind(AccountController));
-router.post('/accounts/:id/disconnect',    auth, AccountController.disconnectAccount.bind(AccountController));
-router.delete('/accounts/:id',             auth, AccountController.deleteAccount.bind(AccountController));
-router.patch('/accounts/:id/role',         auth, AccountController.updateRole.bind(AccountController));
-router.post('/accounts/:id/start',         auth, AccountController.startTasks.bind(AccountController));
-router.post('/accounts/:id/stop',          auth, AccountController.stopTasks.bind(AccountController));
-router.post('/accounts/:id/restart',       auth, AccountController.restartTasks.bind(AccountController));
-router.post('/accounts/:id/test',          auth, AccountController.testConnection.bind(AccountController));
+router.post('/accounts',                   auth, subscriptionCheck, accountLimitCheck, AccountController.createAccount.bind(AccountController));
+router.get('/accounts',                    auth, subscriptionCheck, listAccountsLimiter, AccountController.listAccounts.bind(AccountController));
+router.get('/accounts/summary',            auth, subscriptionCheck, AccountController.getSummary.bind(AccountController));
+router.get('/accounts/:id',                auth, subscriptionCheck, AccountController.getAccountDetails.bind(AccountController));
+router.get('/accounts/:id/stats',          auth, subscriptionCheck, AccountController.getAccountStats.bind(AccountController));
+router.get('/accounts/:id/logs',           auth, subscriptionCheck, AccountController.getLogs.bind(AccountController));
+router.post('/accounts/:id/connect',       auth, subscriptionCheck, AccountController.connectAccount.bind(AccountController));
+router.get('/accounts/:id/qr-status',      auth, subscriptionCheck, AccountController.getQrStatus.bind(AccountController));
+router.post('/accounts/:id/connect-pairing', auth, subscriptionCheck, AccountController.connectWithPairing.bind(AccountController));
+router.post('/accounts/:id/reset',         auth, subscriptionCheck, AccountController.resetSession.bind(AccountController));
+router.post('/accounts/:id/disconnect',    auth, subscriptionCheck, AccountController.disconnectAccount.bind(AccountController));
+router.delete('/accounts/:id',             auth, subscriptionCheck, AccountController.deleteAccount.bind(AccountController));
+router.patch('/accounts/:id/role',         auth, subscriptionCheck, AccountController.updateRole.bind(AccountController));
+router.post('/accounts/:id/start',         auth, subscriptionCheck, AccountController.startTasks.bind(AccountController));
+router.post('/accounts/:id/stop',          auth, subscriptionCheck, AccountController.stopTasks.bind(AccountController));
+router.post('/accounts/:id/restart',       auth, subscriptionCheck, AccountController.restartTasks.bind(AccountController));
+router.post('/accounts/:id/test',          auth, subscriptionCheck, AccountController.testConnection.bind(AccountController));
 
 // ── Business API Settings ─────────────────────────────────────────────────────
 const BusinessAPIController = require('./controllers/BusinessAPIController');
