@@ -66,10 +66,10 @@ const SystemDB = {
         await p.query(`
             CREATE TABLE IF NOT EXISTS subscriptions (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id UUID,
+                user_id UUID UNIQUE NOT NULL,
                 plan_type VARCHAR(100) NOT NULL,
                 status VARCHAR(50) DEFAULT 'active',
-                max_accounts INT DEFAULT 3,
+                max_accounts INT DEFAULT 1,
                 expires_at TIMESTAMPTZ,
                 notes TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -175,6 +175,27 @@ const SystemDB = {
         // ── Telegram System Tables ────────────────────────────────────────
         const TelegramMigrations = require('./TelegramMigrations');
         await TelegramMigrations.run();
+
+        // ── Indexes for Multi-Tenant Performance ──────────────────────────────
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id)`).catch(() => {});
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)`).catch(() => {});
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status, expires_at)`).catch(() => {});
+        // Migrate existing subscriptions table if UNIQUE constraint missing
+        await p.query(`
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'subscriptions_user_id_key'
+                ) THEN
+                    -- Remove duplicate subscriptions, keep latest per user
+                    DELETE FROM subscriptions s1
+                    USING subscriptions s2
+                    WHERE s1.user_id = s2.user_id AND s1.created_at < s2.created_at;
+                    -- Add unique constraint
+                    ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_user_id_key UNIQUE (user_id);
+                END IF;
+            END $$;
+        `).catch(() => {});
 
         console.log('[SystemDB] Schema initialized.');
     },
