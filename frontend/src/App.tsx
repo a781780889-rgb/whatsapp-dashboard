@@ -22,6 +22,7 @@ import DiagnosticsDashboardView from './views/DiagnosticsDashboardView';
 import UsersView            from './views/UsersView';
 import SubscriptionsView    from './views/SubscriptionsView';
 import LicensesView         from './views/LicensesView';
+import TelegramView         from './views/TelegramView';
 import AdminStatsView       from './views/AdminStatsView';
 
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -235,6 +236,9 @@ function AppInner() {
             <ProtectedRoute adminOnly currentUser={currentUser}>
               <SubscriptionsView />
             </ProtectedRoute>} />
+          <Route path="/telegram"        element={<TelegramView />} />
+
+          {/* Admin-only routes */}
           <Route path="/admin/licenses" element={
             <ProtectedRoute adminOnly currentUser={currentUser}>
               <LicensesView />
