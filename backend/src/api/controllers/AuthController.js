@@ -102,6 +102,35 @@ class AuthController {
                 }
             }
 
+            // ── Subscription Check (non-admin users only) ─────────────────────
+            const nonAdminRoles = new Set(['user', 'moderator', 'support']);
+            if (nonAdminRoles.has(normalizeRole(user.role))) {
+                const sub = await SystemDB.get(
+                    `SELECT id, status, expires_at FROM subscriptions
+                     WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1`,
+                    [user.id]
+                ).catch(() => null);
+
+                if (!sub || sub.status !== 'active') {
+                    await SystemDB.recordAttempt(username, ip, false);
+                    return res.status(403).json({
+                        success: false,
+                        error: 'اشتراكك غير فعّال. يرجى التواصل مع المدير.',
+                        code: 'SUBSCRIPTION_INACTIVE',
+                    });
+                }
+
+                if (sub.expires_at && new Date(sub.expires_at) <= new Date()) {
+                    await SystemDB.recordAttempt(username, ip, false);
+                    return res.status(403).json({
+                        success: false,
+                        error: 'انتهت مدة اشتراكك. يرجى التواصل مع المدير لتجديد الاشتراك.',
+                        code: 'SUBSCRIPTION_EXPIRED',
+                        expiresAt: sub.expires_at,
+                    });
+                }
+            }
+
             // ── Record Success ───────────────────────────────────────────────
             await SystemDB.recordAttempt(username, ip, true);
             await SystemDB.run(`UPDATE users SET last_login = NOW() WHERE id = $1`, [user.id]);
