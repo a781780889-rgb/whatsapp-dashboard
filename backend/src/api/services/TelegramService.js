@@ -2,9 +2,14 @@
 /**
  * TelegramService — إدارة الـ Workers لمراقبة حسابات تيليجرام
  *
- * نظراً لعدم وجود مكتبة Telegram MTProto في المشروع الحالي،
- * يعتمد هذا النظام على نمط polling قابل للتوسع مع واجهة webhook.
- * يمكن ربطه بـ Telegram Bot API أو MTProto لاحقاً.
+ * الإصلاح الحاسم:
+ *  - startWorker أصبحت async → تُعيد Promise بدلاً من undefined
+ *    مما يُصلح خطأ: "Cannot read properties of undefined (reading 'catch')"
+ *
+ * نظراً لعدم توافر مكتبة Telegram MTProto مباشرةً في Node.js،
+ * يعتمد النظام على:
+ *   1) polling داخلي كل 30 ثانية (قابل للاستبدال بـ MTProto)
+ *   2) endpoint خارجي لاستقبال الرسائل من سكريبت Python (telethon/pyrogram)
  */
 
 const { query, queryOne, queryAll } = require('../../lib/postgres');
@@ -15,12 +20,13 @@ const SocketBridge = require('../../core/SocketBridge');
 const WA_LINK_PATTERN = /https?:\/\/(?:chat\.whatsapp\.com|wa\.me|api\.whatsapp\.com\/send)[^\s\])"'>]*/gi;
 
 // ── خريطة الـ Workers النشطة ──────────────────────────────────────────────────
-const activeWorkers = new Map(); // accountId → { intervalId, account, status }
+const activeWorkers = new Map(); // accountId → { intervalId, account, status, ... }
 
 const TelegramService = {
 
-    // ── تشغيل worker لحساب واحد ─────────────────────────────────────────
-    startWorker(account) {
+    // ── تشغيل worker لحساب واحد ─────────────────────────────────────────────
+    // [FIX] async → تُعيد Promise بدلاً من undefined
+    async startWorker(account) {
         const id = account.id;
 
         if (activeWorkers.has(id)) {
@@ -32,34 +38,34 @@ const TelegramService = {
 
         const workerState = {
             account,
-            status: 'running',
-            startedAt: new Date(),
+            status:     'running',
+            startedAt:  new Date(),
             linksFound: 0,
-            lastCheck: null,
-            error: null,
+            lastCheck:  null,
+            error:      null,
         };
 
         // تحديث الحالة في قاعدة البيانات
-        query(
+        await query(
             `UPDATE telegram_accounts SET status='connected', last_activity_at=NOW() WHERE id=$1`,
             [id]
-        ).catch(() => {});
+        ).catch(err => console.error('[TelegramService] DB update error:', err.message));
 
         // إرسال إشعار Socket.IO
         SocketBridge.emit('telegram:worker_started', {
-            accountId: id,
+            accountId:   id,
             accountName: account.name,
         });
 
-        // محاكاة polling كل 30 ثانية
-        // في الإنتاج: استبدل هذا بـ Telegram MTProto client أو Bot API updates
+        // polling كل 30 ثانية
+        // في الإنتاج: يمكن استبدال هذا بـ Telegram MTProto client أو Bot API getUpdates
         const intervalId = setInterval(async () => {
             try {
                 workerState.lastCheck = new Date();
                 await TelegramService._pollAccount(account, workerState);
             } catch (err) {
                 workerState.error = err.message;
-                console.error(`[TelegramService] Worker ${id} error:`, err.message);
+                console.error(`[TelegramService] Worker ${id} poll error:`, err.message);
             }
         }, 30_000);
 
@@ -67,7 +73,7 @@ const TelegramService = {
         activeWorkers.set(id, workerState);
     },
 
-    // ── إيقاف worker ─────────────────────────────────────────────────────
+    // ── إيقاف worker ─────────────────────────────────────────────────────────
     stopWorker(accountId) {
         const worker = activeWorkers.get(accountId);
         if (!worker) return;
@@ -84,49 +90,79 @@ const TelegramService = {
         console.log(`[TelegramService] Worker stopped: ${accountId}`);
     },
 
-    // ── إيقاف جميع الـ workers ───────────────────────────────────────────
+    // ── إيقاف جميع الـ workers ───────────────────────────────────────────────
     stopAll() {
         for (const [id] of activeWorkers) {
             this.stopWorker(id);
         }
     },
 
-    // ── حالة جميع الـ workers ────────────────────────────────────────────
+    // ── حالة جميع الـ workers ────────────────────────────────────────────────
     getAllWorkersStatus() {
         const result = [];
         for (const [id, state] of activeWorkers) {
             result.push({
-                accountId: id,
+                accountId:   id,
                 accountName: state.account.name,
-                status: state.status,
-                startedAt: state.startedAt,
-                linksFound: state.linksFound,
-                lastCheck: state.lastCheck,
-                error: state.error,
+                status:      state.status,
+                startedAt:   state.startedAt,
+                linksFound:  state.linksFound,
+                lastCheck:   state.lastCheck,
+                error:       state.error,
             });
         }
         return result;
     },
 
-    // ── استقبال رسالة من Telegram (webhook أو bot update) ────────────────
+    // ── استقبال رسالة واحدة (webhook / سكريبت خارجي / bot) ─────────────────
     async processIncomingMessage(accountId, accountName, channelOrGroup, message) {
+        if (!message || typeof message !== 'string') return;
         try {
             const links = message.match(WA_LINK_PATTERN) || [];
-            for (const link of links) {
-                const cleanLink = link.trim().replace(/[.,;:!?'")\]}]+$/, '');
-                await TelegramService.saveLink({
-                    whatsapp_link: cleanLink,
-                    source_account_id: accountId,
-                    source_account_name: accountName,
-                    source_group: channelOrGroup,
+            let saved = 0;
+            for (const raw of links) {
+                const link = raw.trim().replace(/[.,;:!?'")\]}]+$/, '');
+                const result = await TelegramService.saveLink({
+                    whatsapp_link:        link,
+                    source_account_id:    accountId,
+                    source_account_name:  accountName,
+                    source_group:         channelOrGroup,
                 });
+                if (!result.isDuplicate) saved++;
             }
+
+            // تحديث عداد الـ worker النشط إن وُجد
+            const worker = activeWorkers.get(accountId);
+            if (worker && saved > 0) worker.linksFound += saved;
+
+            return { linksFound: links.length, linksSaved: saved };
         } catch (err) {
             console.error('[TelegramService.processIncomingMessage]', err.message);
+            return { linksFound: 0, linksSaved: 0 };
         }
     },
 
-    // ── حفظ رابط مع منع التكرار ─────────────────────────────────────────
+    // ── معالجة تحديث Telegram Bot API (webhook) ─────────────────────────────
+    async processBotUpdate(accountId, update) {
+        try {
+            const account = await queryOne(
+                `SELECT id, name FROM telegram_accounts WHERE id = $1`, [accountId]
+            );
+            if (!account) return;
+
+            const msg = update.message || update.channel_post || update.edited_message;
+            if (!msg?.text) return;
+
+            const group = msg.chat?.title || msg.chat?.username || String(msg.chat?.id || '');
+            await TelegramService.processIncomingMessage(
+                accountId, account.name, group, msg.text
+            );
+        } catch (err) {
+            console.error('[TelegramService.processBotUpdate]', err.message);
+        }
+    },
+
+    // ── حفظ رابط مع منع التكرار ─────────────────────────────────────────────
     async saveLink({ whatsapp_link, source_account_id, source_account_name, source_group }) {
         try {
             // التحقق من وجود الرابط مسبقاً
@@ -136,25 +172,22 @@ const TelegramService = {
             );
 
             if (existing) {
-                // تحديث السجل الموجود
                 await query(
                     `UPDATE whatsapp_links SET
-                     duplicate_count = duplicate_count + 1,
-                     last_seen = NOW(),
-                     source_account_id = $2,
-                     source_account_name = $3,
-                     source_group = $4,
-                     updated_at = NOW()
+                     duplicate_count    = duplicate_count + 1,
+                     last_seen          = NOW(),
+                     source_account_id  = $2,
+                     source_account_name= $3,
+                     source_group       = $4,
+                     updated_at         = NOW()
                      WHERE id = $1`,
                     [existing.id, source_account_id, source_account_name, source_group]
                 );
-
                 SocketBridge.emit('telegram:link_duplicate', {
-                    linkId: existing.id,
+                    linkId:          existing.id,
                     whatsapp_link,
                     duplicate_count: existing.duplicate_count + 1,
                 });
-
                 return { isDuplicate: true, id: existing.id };
             }
 
@@ -175,8 +208,10 @@ const TelegramService = {
 
             // تحديث عداد الحساب
             if (source_account_id) {
-                await query(
-                    `UPDATE telegram_accounts SET links_collected = links_collected + 1, last_activity_at=NOW() WHERE id=$1`,
+                query(
+                    `UPDATE telegram_accounts
+                     SET links_collected = links_collected + 1, last_activity_at = NOW()
+                     WHERE id = $1`,
                     [source_account_id]
                 ).catch(() => {});
             }
@@ -188,26 +223,29 @@ const TelegramService = {
         }
     },
 
-    // ── polling داخلي (يُستبدل بـ MTProto في الإنتاج) ────────────────────
+    // ── polling داخلي (يُستبدل بـ MTProto في الإنتاج) ────────────────────────
     async _pollAccount(account, workerState) {
-        // هنا يتم استدعاء Telegram API لجلب الرسائل الجديدة
-        // مثال: Bot API getUpdates أو Telegram MTProto getMessage
-        // حالياً: تحديث last_activity فقط
+        // تحديث last_activity فقط — الرسائل الحقيقية تأتي عبر:
+        //   - سكريبت Python (telethon/pyrogram) → POST /api/telegram/ingest/:accountId
+        //   - Telegram Bot API webhook         → POST /api/telegram/webhook/:accountId
         await query(
-            `UPDATE telegram_accounts SET last_activity_at=NOW() WHERE id=$1`,
+            `UPDATE telegram_accounts SET last_activity_at = NOW() WHERE id = $1`,
             [account.id]
         ).catch(() => {});
     },
 
-    // ── تشغيل جميع الحسابات المتصلة عند بدء الخادم ──────────────────────
+    // ── تشغيل جميع الحسابات عند بدء الخادم ──────────────────────────────────
     async initAllWorkers() {
         try {
             const accounts = await queryAll(
-                `SELECT * FROM telegram_accounts WHERE session_string IS NOT NULL AND status != 'disabled'`
+                `SELECT * FROM telegram_accounts
+                 WHERE session_string IS NOT NULL AND status != 'disabled'`
             );
             for (const acc of accounts) {
-                this.startWorker(acc);
-                await new Promise(r => setTimeout(r, 500)); // تأخير بسيط بين الحسابات
+                await this.startWorker(acc).catch(err =>
+                    console.error(`[TelegramService] Failed to start worker for ${acc.name}:`, err.message)
+                );
+                await new Promise(r => setTimeout(r, 500));
             }
             console.log(`[TelegramService] Initialized ${accounts.length} workers`);
         } catch (err) {
