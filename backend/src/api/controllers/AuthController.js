@@ -102,27 +102,6 @@ class AuthController {
                 }
             }
 
-            // ── Subscription Check ───────────────────────────────────────────
-            let subscriptionStatus = 'active';
-            let daysRemaining = -1;
-            let planType = 'lifetime';
-
-            if (!['super_admin','admin'].includes(normalizeRole(user.role))) {
-                const sub = await SystemDB.getActiveSubscription(user.id);
-                if (!sub) {
-                    subscriptionStatus = 'expired';
-                } else {
-                    daysRemaining = await SystemDB.getDaysRemaining(sub);
-                    planType = sub.plan_type;
-                    if (daysRemaining === 0 && planType !== 'lifetime') subscriptionStatus = 'expired';
-                }
-                if (subscriptionStatus === 'expired') {
-                    await SystemDB.recordAttempt(username, ip, false);
-                    await SystemDB.log(user.id, username, 'LOGIN_BLOCKED', 'Subscription expired', ip);
-                    return res.status(403).json({ success: false, error: 'انتهى اشتراكك. يرجى التجديد للمتابعة.' });
-                }
-            }
-
             // ── Record Success ───────────────────────────────────────────────
             await SystemDB.recordAttempt(username, ip, true);
             await SystemDB.run(`UPDATE users SET last_login = NOW() WHERE id = $1`, [user.id]);
@@ -153,9 +132,6 @@ class AuthController {
                     fullName: user.full_name,
                     role: normalizedRole,
                     mfaEnabled: !!user.mfa_enabled,
-                    subscriptionStatus,
-                    daysRemaining,
-                    planType
                 }
             });
 
@@ -264,17 +240,11 @@ class AuthController {
         ).catch(() => null);
         if (!user) return res.status(401).json({ success: false, error: 'User not found.' });
 
-        const sub          = await SystemDB.getActiveSubscription(user.id);
-        const daysRemaining = await SystemDB.getDaysRemaining(sub);
-
         res.json({
             success: true,
             user: {
                 ...user,
                 role: normalizeRole(user.role),
-                subscriptionStatus: sub ? 'active' : 'expired',
-                daysRemaining,
-                planType: sub?.plan_type
             }
         });
     }
