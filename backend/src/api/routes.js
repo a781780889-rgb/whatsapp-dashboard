@@ -492,6 +492,30 @@ router.get ('/admin/infra/redis/keys',       auth, role('admin'),  Infrastructur
 router.get ('/admin/infra/bullmq',           auth, role('admin'),  InfrastructureController.getBullMQStats.bind(InfrastructureController));
 router.get ('/admin/infra/process',          auth, role('admin'),  InfrastructureController.getProcessInfo.bind(InfrastructureController));
 
+
+// ══════════════════════════════════════════════════════
+//  TELEGRAM SYSTEM
+// ══════════════════════════════════════════════════════
+const TelegramController = require("./controllers/TelegramController");
+
+// حسابات تيليجرام
+router.post  ("/telegram/accounts",                    auth, subCheck, TelegramController.addAccount.bind(TelegramController));
+router.get   ("/telegram/accounts",                    auth, subCheck, TelegramController.listAccounts.bind(TelegramController));
+router.get   ("/telegram/accounts/workers",            auth, subCheck, TelegramController.getWorkersStatus.bind(TelegramController));
+router.get   ("/telegram/accounts/stats",              auth, subCheck, TelegramController.getStats.bind(TelegramController));
+router.get   ("/telegram/accounts/:id",               auth, subCheck, TelegramController.getAccount.bind(TelegramController));
+router.put   ("/telegram/accounts/:id",               auth, subCheck, TelegramController.updateAccount.bind(TelegramController));
+router.delete("/telegram/accounts/:id",               auth, subCheck, TelegramController.deleteAccount.bind(TelegramController));
+router.post  ("/telegram/accounts/:id/start",         auth, subCheck, TelegramController.startWorker.bind(TelegramController));
+router.post  ("/telegram/accounts/:id/stop",          auth, subCheck, TelegramController.stopWorker.bind(TelegramController));
+
+// روابط واتساب المكتشفة
+router.get   ("/telegram/links",                       auth, subCheck, TelegramController.listLinks.bind(TelegramController));
+router.get   ("/telegram/links/export",                auth, subCheck, TelegramController.exportLinks.bind(TelegramController));
+router.patch ("/telegram/links/:id",                  auth, subCheck, TelegramController.updateLinkStatus.bind(TelegramController));
+router.delete("/telegram/links/:id",                  auth, subCheck, TelegramController.deleteLink.bind(TelegramController));
+router.post  ("/telegram/links/bulk-delete",           auth, subCheck, TelegramController.bulkDeleteLinks.bind(TelegramController));
+
 module.exports = router;
 
 
