@@ -81,6 +81,19 @@ function AppInner() {
         const merged = { ...currentUser, ...d.user };
         setCurrentUser(merged);
         localStorage.setItem(USER_KEY, JSON.stringify(merged));
+
+        // جلب حالة تيلجرام للمشتركين العاديين
+        if (!['super_admin', 'admin'].includes(d.user?.role)) {
+          fetch(`${API}/subscription/me`, { headers: { Authorization: `Bearer ${token}` } })
+            .then(r2 => r2.json())
+            .then(s => {
+              if (cancelled || !s.success) return;
+              const withTg = { ...merged, enableTelegram: s.subscription?.enableTelegram === true };
+              setCurrentUser(withTg);
+              localStorage.setItem(USER_KEY, JSON.stringify(withTg));
+            })
+            .catch(() => {});
+        }
       })
       .catch(() => { if (!cancelled) setIsConnected(false); });
 
