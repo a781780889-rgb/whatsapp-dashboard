@@ -73,7 +73,17 @@ export function Sidebar({ isCollapsed, setIsCollapsed, currentUser, onLogout }: 
     }
   ] : [];
 
-  const allSections = [...navItems, ...adminItems];
+  // زر تيلجرام للمشتركين العاديين (يظهر فقط إذا فعّله الأدمن)
+  const telegramUserItems = (!isAdmin && currentUser?.enableTelegram) ? [
+    {
+      section: 'التيلجرام التفاعلي',
+      items: [
+        { to: '/telegram', icon: MessageCircle, label: '📱 تيليجرام' },
+      ]
+    }
+  ] : [];
+
+  const allSections = [...navItems, ...telegramUserItems, ...adminItems];
 
   const roleLabel = { super_admin: 'Super Admin', admin: 'Admin', moderator: 'Moderator', user: 'User' }[currentUser?.role] || 'User';
   const roleColor = { super_admin: '#f59e0b', admin: '#8b5cf6', moderator: '#3b82f6', user: '#6b7280' }[currentUser?.role] || '#6b7280';
