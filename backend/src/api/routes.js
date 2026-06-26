@@ -498,23 +498,35 @@ router.get ('/admin/infra/process',          auth, role('admin'),  Infrastructur
 // ══════════════════════════════════════════════════════
 const TelegramController = require("./controllers/TelegramController");
 
-// حسابات تيليجرام
+// ── حسابات تيليجرام (تتطلب مصادقة) ────────────────
+// ⚠️ المسارات الثابتة أولاً (workers/stats) قبل /:id
 router.post  ("/telegram/accounts",                    auth, subCheck, TelegramController.addAccount.bind(TelegramController));
 router.get   ("/telegram/accounts",                    auth, subCheck, TelegramController.listAccounts.bind(TelegramController));
 router.get   ("/telegram/accounts/workers",            auth, subCheck, TelegramController.getWorkersStatus.bind(TelegramController));
 router.get   ("/telegram/accounts/stats",              auth, subCheck, TelegramController.getStats.bind(TelegramController));
-router.get   ("/telegram/accounts/:id",               auth, subCheck, TelegramController.getAccount.bind(TelegramController));
-router.put   ("/telegram/accounts/:id",               auth, subCheck, TelegramController.updateAccount.bind(TelegramController));
-router.delete("/telegram/accounts/:id",               auth, subCheck, TelegramController.deleteAccount.bind(TelegramController));
-router.post  ("/telegram/accounts/:id/start",         auth, subCheck, TelegramController.startWorker.bind(TelegramController));
-router.post  ("/telegram/accounts/:id/stop",          auth, subCheck, TelegramController.stopWorker.bind(TelegramController));
+router.get   ("/telegram/accounts/:id",                auth, subCheck, TelegramController.getAccount.bind(TelegramController));
+router.put   ("/telegram/accounts/:id",                auth, subCheck, TelegramController.updateAccount.bind(TelegramController));
+router.delete("/telegram/accounts/:id",                auth, subCheck, TelegramController.deleteAccount.bind(TelegramController));
+router.post  ("/telegram/accounts/:id/start",          auth, subCheck, TelegramController.startWorker.bind(TelegramController));
+router.post  ("/telegram/accounts/:id/stop",           auth, subCheck, TelegramController.stopWorker.bind(TelegramController));
 
-// روابط واتساب المكتشفة
+// ── روابط واتساب المكتشفة (تتطلب مصادقة) ───────────
+// ⚠️ المسارات الثابتة (export / bulk-delete) قبل /:id
 router.get   ("/telegram/links",                       auth, subCheck, TelegramController.listLinks.bind(TelegramController));
 router.get   ("/telegram/links/export",                auth, subCheck, TelegramController.exportLinks.bind(TelegramController));
-router.patch ("/telegram/links/:id",                  auth, subCheck, TelegramController.updateLinkStatus.bind(TelegramController));
-router.delete("/telegram/links/:id",                  auth, subCheck, TelegramController.deleteLink.bind(TelegramController));
 router.post  ("/telegram/links/bulk-delete",           auth, subCheck, TelegramController.bulkDeleteLinks.bind(TelegramController));
+router.patch ("/telegram/links/:id",                   auth, subCheck, TelegramController.updateLinkStatus.bind(TelegramController));
+router.delete("/telegram/links/:id",                   auth, subCheck, TelegramController.deleteLink.bind(TelegramController));
+
+// ── استقبال رسائل خارجية (بدون مصادقة JWT — تأمين بـ secret) ──────────────
+// يُستخدم من سكريبت Python (telethon/pyrogram) أو أي Telegram bot
+// POST /api/telegram/ingest/:accountId
+// Body: { messages: [{text, group_name}], secret } أو { text, group_name, secret }
+router.post("/telegram/ingest/:accountId", TelegramController.receiveIngest.bind(TelegramController));
+
+// ── Telegram Bot API Webhook (بدون مصادقة — يُرسَل من Telegram) ─────────────
+// يجب تفعيله عبر: https://api.telegram.org/bot{TOKEN}/setWebhook?url=.../api/telegram/webhook/:accountId
+router.post("/telegram/webhook/:accountId", TelegramController.receiveBotWebhook.bind(TelegramController));
 
 module.exports = router;
 
