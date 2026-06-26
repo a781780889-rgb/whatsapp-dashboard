@@ -3,7 +3,8 @@ import {
   Users, Plus, Search, RefreshCw, Edit2, Trash2,
   Clock, CheckCircle, XCircle, AlertTriangle,
   ChevronLeft, ChevronRight, X, Eye, EyeOff,
-  Calendar, Shield, Hash, ToggleLeft, ToggleRight
+  Calendar, Shield, Hash, ToggleLeft, ToggleRight,
+  Send
 } from 'lucide-react';
 import { authFetch, API } from '../utils/api';
 import { useToast } from '../components/ui/ToastProvider';
@@ -47,6 +48,54 @@ function StatusBadge({ status, isExpired }: { status: string; isExpired?: boolea
   );
 }
 
+// ── مكوّن Toggle تيلجرام ──────────────────────────────────────────────────────
+function TelegramToggle({
+  enabled,
+  onChange,
+  showLabel = false,
+}: {
+  enabled: boolean;
+  onChange: (val: boolean) => void;
+  showLabel?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!enabled)}
+      className={`
+        relative inline-flex items-center gap-2 transition-all
+        ${showLabel ? 'w-full justify-between px-3 py-2.5 rounded-xl border' : ''}
+        ${showLabel && enabled
+          ? 'bg-blue-500/10 border-blue-500/30'
+          : showLabel
+          ? 'bg-[var(--bg-elevated)] border-[var(--border-default)] hover:border-blue-500/30'
+          : ''}
+      `}
+    >
+      {showLabel && (
+        <span className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+          <Send className="w-4 h-4 text-blue-400" />
+          تفعيل زر التيلجرام للمشترك
+        </span>
+      )}
+      {/* مفتاح Toggle */}
+      <span
+        className={`
+          relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200
+          ${enabled ? 'bg-blue-500' : 'bg-zinc-600'}
+        `}
+      >
+        <span
+          className={`
+            inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform duration-200
+            ${enabled ? 'translate-x-4' : 'translate-x-0.5'}
+          `}
+        />
+      </span>
+    </button>
+  );
+}
+
 // ── Modal إنشاء / تعديل ───────────────────────────────────────────────────────
 interface ModalProps {
   mode: 'create' | 'edit' | 'extend' | 'view';
@@ -61,12 +110,13 @@ function SubscriberModal({ mode, subscriber, onClose, onSuccess }: ModalProps) {
   const [showPass, setShowPass] = useState(false);
 
   const [form, setForm] = useState({
-    username:    subscriber?.username    || '',
-    password:    '',
-    fullName:    subscriber?.full_name   || '',
-    duration:    subscriber?.duration    || 'month',
-    maxAccounts: subscriber?.max_accounts ?? 1,
-    note:        '',
+    username:        subscriber?.username       || '',
+    password:        '',
+    fullName:        subscriber?.full_name      || '',
+    duration:        subscriber?.duration       || 'month',
+    maxAccounts:     subscriber?.max_accounts   ?? 1,
+    enableTelegram:  subscriber?.enable_telegram ?? false,
+    note:            '',
   });
 
   const isCreate = mode === 'create';
@@ -82,11 +132,22 @@ function SubscriberModal({ mode, subscriber, onClose, onSuccess }: ModalProps) {
       let body: any = {};
 
       if (isCreate) {
-        body = { username: form.username, password: form.password, fullName: form.fullName, duration: form.duration, maxAccounts: Number(form.maxAccounts) };
+        body = {
+          username: form.username,
+          password: form.password,
+          fullName: form.fullName,
+          duration: form.duration,
+          maxAccounts: Number(form.maxAccounts),
+          enableTelegram: form.enableTelegram,
+        };
       } else if (isEdit) {
         url    = `${API}/admin/subscriptions/${subscriber.user_id}`;
         method = 'PATCH';
-        body   = { fullName: form.fullName, maxAccounts: Number(form.maxAccounts) };
+        body   = {
+          fullName: form.fullName,
+          maxAccounts: Number(form.maxAccounts),
+          enableTelegram: form.enableTelegram,
+        };
         if (form.password) body.password = form.password;
         if (form.duration) body.duration = form.duration;
       } else if (isExtend) {
@@ -134,6 +195,7 @@ function SubscriberModal({ mode, subscriber, onClose, onSuccess }: ModalProps) {
             <InfoRow label="تاريخ الانتهاء" value={subscriber.expires_at ? new Date(subscriber.expires_at).toLocaleDateString('ar-SA') : '—'} />
             <InfoRow label="الأيام المتبقية" value={subscriber.daysRemaining !== null ? `${subscriber.daysRemaining} يوم` : '—'} />
             <InfoRow label="الحسابات" value={`${subscriber.usedAccounts} / ${subscriber.maxAccounts === null ? '∞' : subscriber.maxAccounts}`} />
+            <InfoRow label="زر التيلجرام" value={subscriber.enable_telegram ? '✅ مفعّل' : '❌ معطّل'} />
             <InfoRow label="آخر دخول" value={subscriber.last_login ? new Date(subscriber.last_login).toLocaleString('ar-SA') : 'لم يسجّل دخولاً بعد'} />
           </div>
         ) : (
@@ -167,7 +229,7 @@ function SubscriberModal({ mode, subscriber, onClose, onSuccess }: ModalProps) {
                 </div>
               </Field>
             )}
-            {!isEdit && (
+            {!isEdit && !isExtend && (
               <Field label="مدة الاشتراك *">
                 <select className="input" value={form.duration} onChange={e => setForm(f => ({...f, duration: e.target.value}))}>
                   {DURATIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
@@ -183,11 +245,33 @@ function SubscriberModal({ mode, subscriber, onClose, onSuccess }: ModalProps) {
             )}
             {(isCreate || isEdit) && (
               <Field label="الحد الأقصى للحسابات *">
-                <select className="input" value={form.maxAccounts} onChange={e => setForm(f => ({...f, maxAccounts: Number(e.target.value)}))}>
+                <select
+                  className="input"
+                  value={form.maxAccounts}
+                  onChange={e => setForm(f => ({...f, maxAccounts: Number(e.target.value)}))}
+                >
                   {ACCOUNT_LIMITS.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
                 </select>
               </Field>
             )}
+
+            {/* ── خيار تيلجرام (إنشاء / تعديل فقط) ── */}
+            {(isCreate || isEdit) && (
+              <Field label="ميزات إضافية">
+                <TelegramToggle
+                  enabled={form.enableTelegram}
+                  onChange={val => setForm(f => ({...f, enableTelegram: val}))}
+                  showLabel
+                />
+                {form.enableTelegram && (
+                  <p className="text-xs text-blue-400 mt-1 flex items-center gap-1">
+                    <Send className="w-3 h-3" />
+                    سيظهر زر «التيلجرام التفاعلي» في لوحة هذا المشترك
+                  </p>
+                )}
+              </Field>
+            )}
+
             {isExtend && (
               <>
                 <div className="p-3 rounded-xl bg-[var(--bg-elevated)] text-sm text-[var(--text-secondary)]">
@@ -374,6 +458,7 @@ export default function SubscriptionsView() {
                   <th className="text-right py-3 px-4 font-medium">الاشتراك</th>
                   <th className="text-right py-3 px-4 font-medium">الحسابات</th>
                   <th className="text-right py-3 px-4 font-medium">الانتهاء</th>
+                  <th className="text-right py-3 px-4 font-medium">تيلجرام</th>
                   <th className="text-right py-3 px-4 font-medium">الحالة</th>
                   <th className="text-right py-3 px-4 font-medium">إجراءات</th>
                 </tr>
@@ -412,6 +497,18 @@ export default function SubscriptionsView() {
                         <div className="text-xs text-[var(--text-muted)] mt-0.5">
                           {sub.daysRemaining === 0 ? 'اليوم الأخير' : `${sub.daysRemaining} يوم`}
                         </div>
+                      )}
+                    </td>
+                    {/* عمود تيلجرام */}
+                    <td className="py-3 px-4">
+                      {sub.enable_telegram ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-500/15 text-blue-400 border border-blue-500/25">
+                          <Send className="w-3 h-3" /> مفعّل
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-500/10 text-zinc-500 border border-zinc-500/20">
+                          معطّل
+                        </span>
                       )}
                     </td>
                     <td className="py-3 px-4">
@@ -505,4 +602,3 @@ export default function SubscriptionsView() {
     </div>
   );
 }
-
