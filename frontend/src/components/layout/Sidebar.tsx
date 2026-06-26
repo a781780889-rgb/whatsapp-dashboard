@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Library, Send, Calendar,
   Megaphone, Link as LinkIcon, LogOut, ChevronRight,
   UsersRound, BarChart3, Crown, Shield, Rocket, Brain, Activity,
-  GitMerge, MessageCircle
+  GitMerge, MessageCircle, CreditCard
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 
@@ -66,7 +66,8 @@ export function Sidebar({ isCollapsed, setIsCollapsed, currentUser, onLogout }: 
       section: 'الإدارة',
       admin: true,
       items: [
-        { to: '/admin/stats',         icon: BarChart3,   label: 'الإحصائيات'   },
+        { to: '/admin/stats',         icon: BarChart3,     label: 'الإحصائيات'   },
+        { to: '/admin/subscriptions', icon: CreditCard,    label: 'الاشتراكات'   },
         { to: '/telegram',            icon: MessageCircle, label: '📱 تيليجرام'  },
       ]
     }
