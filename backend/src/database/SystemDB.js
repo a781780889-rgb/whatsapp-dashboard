@@ -197,6 +197,18 @@ const SystemDB = {
             END $$;
         `).catch(() => {});
 
+        // ── Migration: إضافة حقل enable_telegram لجدول subscriptions ────────
+        await p.query(`
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='subscriptions' AND column_name='enable_telegram'
+                ) THEN
+                    ALTER TABLE subscriptions ADD COLUMN enable_telegram BOOLEAN DEFAULT FALSE;
+                END IF;
+            END $$;
+        `).catch(() => {});
+
         console.log('[SystemDB] Schema initialized.');
     },
 
