@@ -1,0 +1,340 @@
+'use strict';
+const TelegramService = require('../services/TelegramService');
+const { queryAll, queryOne, query } = require('../../lib/postgres');
+const { v4: uuidv4 } = require('uuid');
+
+const TelegramController = {
+
+    // ── إضافة حساب تيليجرام ──────────────────────────────────────────────
+    async addAccount(req, res) {
+        try {
+            const { name, phone_number, api_id, api_hash, session_string, notes } = req.body;
+            const userId = req.user.id;
+
+            if (!name || !phone_number) {
+                return res.status(400).json({ success: false, error: 'الاسم ورقم الهاتف مطلوبان' });
+            }
+
+            const existing = await queryOne(
+                `SELECT id FROM telegram_accounts WHERE phone_number = $1 AND user_id = $2`,
+                [phone_number, userId]
+            );
+            if (existing) {
+                return res.status(409).json({ success: false, error: 'رقم الهاتف مسجّل مسبقاً' });
+            }
+
+            const id = uuidv4();
+            await query(
+                `INSERT INTO telegram_accounts
+                 (id, user_id, name, phone_number, api_id, api_hash, session_string, notes, status)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'disconnected')`,
+                [id, userId, name, phone_number, api_id || null, api_hash || null, session_string || null, notes || null]
+            );
+
+            const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+
+            // بدء المراقبة تلقائياً إذا توفّر session_string
+            if (session_string) {
+                TelegramService.startWorker(account).catch(() => {});
+            }
+
+            return res.json({ success: true, account });
+        } catch (err) {
+            console.error('[TelegramController.addAccount]', err.message);
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── قائمة الحسابات ────────────────────────────────────────────────────
+    async listAccounts(req, res) {
+        try {
+            const userId  = req.user.id;
+            const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
+
+            const accounts = isAdmin
+                ? await queryAll(`SELECT * FROM telegram_accounts ORDER BY created_at DESC`)
+                : await queryAll(`SELECT * FROM telegram_accounts WHERE user_id = $1 ORDER BY created_at DESC`, [userId]);
+
+            return res.json({ success: true, accounts });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── تفاصيل حساب واحد ─────────────────────────────────────────────────
+    async getAccount(req, res) {
+        try {
+            const { id } = req.params;
+            const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+            if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
+            return res.json({ success: true, account });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── تعديل حساب ───────────────────────────────────────────────────────
+    async updateAccount(req, res) {
+        try {
+            const { id } = req.params;
+            const { name, phone_number, api_id, api_hash, session_string, notes } = req.body;
+
+            const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+            if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
+
+            await query(
+                `UPDATE telegram_accounts SET
+                 name=$1, phone_number=$2, api_id=$3, api_hash=$4,
+                 session_string=$5, notes=$6, updated_at=NOW()
+                 WHERE id=$7`,
+                [
+                    name || account.name,
+                    phone_number || account.phone_number,
+                    api_id || account.api_id,
+                    api_hash || account.api_hash,
+                    session_string || account.session_string,
+                    notes !== undefined ? notes : account.notes,
+                    id
+                ]
+            );
+
+            // إعادة تشغيل الـ worker إذا تغيّر الـ session
+            if (session_string && session_string !== account.session_string) {
+                TelegramService.stopWorker(id);
+                const updated = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+                TelegramService.startWorker(updated).catch(() => {});
+            }
+
+            const updated = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+            return res.json({ success: true, account: updated });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── حذف حساب ─────────────────────────────────────────────────────────
+    async deleteAccount(req, res) {
+        try {
+            const { id } = req.params;
+            const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+            if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
+
+            TelegramService.stopWorker(id);
+            await query(`DELETE FROM telegram_accounts WHERE id = $1`, [id]);
+
+            return res.json({ success: true, message: 'تم حذف الحساب' });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── تشغيل/إيقاف worker ───────────────────────────────────────────────
+    async startWorker(req, res) {
+        try {
+            const { id } = req.params;
+            const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+            if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
+            if (!account.session_string) return res.status(400).json({ success: false, error: 'لا يوجد session_string للحساب' });
+
+            TelegramService.startWorker(account);
+            return res.json({ success: true, message: 'تم تشغيل المراقبة' });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    async stopWorker(req, res) {
+        try {
+            const { id } = req.params;
+            TelegramService.stopWorker(id);
+            return res.json({ success: true, message: 'تم إيقاف المراقبة' });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── روابط واتساب المكتشفة ────────────────────────────────────────────
+    async listLinks(req, res) {
+        try {
+            const { page = 1, limit = 50, status, account_id, date_from, date_to, search } = req.query;
+            const offset = (parseInt(page) - 1) * parseInt(limit);
+
+            let conditions = [];
+            let params = [];
+            let pIdx = 1;
+
+            if (status)      { conditions.push(`wl.status = $${pIdx++}`);        params.push(status); }
+            if (account_id)  { conditions.push(`wl.source_account_id = $${pIdx++}`); params.push(account_id); }
+            if (date_from)   { conditions.push(`wl.discovered_at >= $${pIdx++}`); params.push(date_from); }
+            if (date_to)     { conditions.push(`wl.discovered_at <= $${pIdx++}`); params.push(date_to); }
+            if (search)      { conditions.push(`wl.whatsapp_link ILIKE $${pIdx++}`); params.push(`%${search}%`); }
+
+            const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+            const total = await queryOne(
+                `SELECT COUNT(*) as cnt FROM whatsapp_links wl ${where}`,
+                params
+            );
+
+            const links = await queryAll(
+                `SELECT wl.*, ta.name as account_name, ta.phone_number as account_phone
+                 FROM whatsapp_links wl
+                 LEFT JOIN telegram_accounts ta ON ta.id = wl.source_account_id
+                 ${where}
+                 ORDER BY wl.discovered_at DESC
+                 LIMIT $${pIdx++} OFFSET $${pIdx++}`,
+                [...params, parseInt(limit), offset]
+            );
+
+            return res.json({
+                success: true,
+                links,
+                total: parseInt(total?.cnt || 0),
+                page: parseInt(page),
+                limit: parseInt(limit),
+            });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── تحديث حالة رابط ──────────────────────────────────────────────────
+    async updateLinkStatus(req, res) {
+        try {
+            const { id } = req.params;
+            const { status, joined, copied, notes } = req.body;
+
+            const sets = [];
+            const params = [];
+            let idx = 1;
+
+            if (status !== undefined) { sets.push(`status=$${idx++}`); params.push(status); }
+            if (joined !== undefined) { sets.push(`joined=$${idx++}`); params.push(joined); }
+            if (copied !== undefined) { sets.push(`copied=$${idx++}`); params.push(copied); }
+            if (notes  !== undefined) { sets.push(`notes=$${idx++}`);  params.push(notes); }
+
+            if (!sets.length) return res.status(400).json({ success: false, error: 'لا توجد بيانات للتحديث' });
+
+            params.push(id);
+            await query(`UPDATE whatsapp_links SET ${sets.join(',')} WHERE id=$${idx}`, params);
+
+            return res.json({ success: true });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── حذف رابط ─────────────────────────────────────────────────────────
+    async deleteLink(req, res) {
+        try {
+            const { id } = req.params;
+            await query(`UPDATE whatsapp_links SET deleted=true, status='deleted' WHERE id=$1`, [id]);
+            return res.json({ success: true });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── حذف متعدد ────────────────────────────────────────────────────────
+    async bulkDeleteLinks(req, res) {
+        try {
+            const { ids, deleteJoined } = req.body;
+
+            if (deleteJoined) {
+                await query(`UPDATE whatsapp_links SET deleted=true, status='deleted' WHERE joined=true`);
+                return res.json({ success: true });
+            }
+            if (ids && Array.isArray(ids) && ids.length) {
+                await query(
+                    `UPDATE whatsapp_links SET deleted=true, status='deleted' WHERE id = ANY($1::uuid[])`,
+                    [ids]
+                );
+                return res.json({ success: true });
+            }
+            return res.status(400).json({ success: false, error: 'يرجى تحديد روابط للحذف' });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── تصدير CSV ────────────────────────────────────────────────────────
+    async exportLinks(req, res) {
+        try {
+            const { status, account_id } = req.query;
+            let conditions = ['deleted = false'];
+            let params = [];
+            let pIdx = 1;
+
+            if (status)     { conditions.push(`status = $${pIdx++}`);         params.push(status); }
+            if (account_id) { conditions.push(`source_account_id = $${pIdx++}`); params.push(account_id); }
+
+            const links = await queryAll(
+                `SELECT whatsapp_link, source_account_name, source_group, discovered_at, status, duplicate_count, joined
+                 FROM whatsapp_links WHERE ${conditions.join(' AND ')} ORDER BY discovered_at DESC`,
+                params
+            );
+
+            const header = 'رابط واتساب,الحساب المصدر,المجموعة/القناة,تاريخ الاكتشاف,الحالة,عدد التكرار,تم الانضمام';
+            const rows = links.map(l =>
+                `"${l.whatsapp_link}","${l.source_account_name || ''}","${l.source_group || ''}","${l.discovered_at}","${l.status}","${l.duplicate_count}","${l.joined ? 'نعم' : 'لا'}"`
+            );
+            const csv = '\uFEFF' + [header, ...rows].join('\n');
+
+            res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+            res.setHeader('Content-Disposition', 'attachment; filename=whatsapp_links.csv');
+            return res.send(csv);
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── إحصائيات ─────────────────────────────────────────────────────────
+    async getStats(req, res) {
+        try {
+            const totalAccounts   = await queryOne(`SELECT COUNT(*) as cnt FROM telegram_accounts`);
+            const connectedAccounts = await queryOne(`SELECT COUNT(*) as cnt FROM telegram_accounts WHERE status='connected'`);
+            const totalLinks      = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=false`);
+            const newLinks        = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=false AND discovered_at >= NOW() - INTERVAL '24 hours'`);
+            const joinedLinks     = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE joined=true AND deleted=false`);
+            const deletedLinks    = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=true`);
+            const duplicateLinks  = await queryOne(`SELECT COALESCE(SUM(duplicate_count),0) as cnt FROM whatsapp_links WHERE duplicate_count > 0`);
+
+            const perAccount = await queryAll(
+                `SELECT ta.id, ta.name, ta.phone_number, COUNT(wl.id) as links_count
+                 FROM telegram_accounts ta
+                 LEFT JOIN whatsapp_links wl ON wl.source_account_id = ta.id AND wl.deleted=false
+                 GROUP BY ta.id, ta.name, ta.phone_number
+                 ORDER BY links_count DESC`
+            );
+
+            return res.json({
+                success: true,
+                stats: {
+                    totalAccounts:    parseInt(totalAccounts?.cnt || 0),
+                    connectedAccounts:parseInt(connectedAccounts?.cnt || 0),
+                    disconnectedAccounts: parseInt(totalAccounts?.cnt || 0) - parseInt(connectedAccounts?.cnt || 0),
+                    totalLinks:       parseInt(totalLinks?.cnt || 0),
+                    newLinks:         parseInt(newLinks?.cnt || 0),
+                    joinedLinks:      parseInt(joinedLinks?.cnt || 0),
+                    deletedLinks:     parseInt(deletedLinks?.cnt || 0),
+                    duplicateLinks:   parseInt(duplicateLinks?.cnt || 0),
+                    perAccount,
+                }
+            });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+
+    // ── حالة الـ workers ──────────────────────────────────────────────────
+    async getWorkersStatus(req, res) {
+        try {
+            const status = TelegramService.getAllWorkersStatus();
+            return res.json({ success: true, workers: status });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
+    },
+};
+
+module.exports = TelegramController;
