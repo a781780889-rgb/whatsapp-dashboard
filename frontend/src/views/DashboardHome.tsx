@@ -3,6 +3,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { AreaChart, Area, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { Activity, Users, Send, MousePointerClick, Zap, Calendar, Link as LinkIcon, Code2, Phone } from 'lucide-react';
 import { cn } from '@/utils/cn';
+import SubscriptionStatusCard from '../components/SubscriptionStatusCard';
 
 const mockData = [
   { name: 'السبت',    messages: 4000, clicks: 2400 },
@@ -32,6 +33,9 @@ export default function DashboardHome({ accounts = [] }: { accounts?: any[] }) {
 
   return (
     <div className="flex flex-col gap-6 animate-fade-in">
+
+      {/* ─── Subscription Status Card (for regular users) ─── */}
+      <SubscriptionStatusCard />
 
       {/* ─── Developer Attribution Banner ─── */}
       <div className="relative flex items-center justify-between px-5 py-4 rounded-2xl overflow-hidden border border-[var(--border-default)] hover:border-[var(--brand-primary)]/40 transition-all duration-300 group bg-gradient-to-l from-[var(--brand-primary)]/6 via-[var(--bg-surface)] to-[var(--bg-surface)]">
