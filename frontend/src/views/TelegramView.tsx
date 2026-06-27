@@ -16,7 +16,8 @@ import { cn } from '@/utils/cn';
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface TelegramAccount {
   id: string; name: string; phone_number: string; api_id: string;
-  api_hash: string; session_string: string; status: string;
+  api_hash: string; session_string: string; bot_token: string;
+  bot_username: string; status: string;
   last_activity_at: string; links_collected: number;
   channels_monitored: number; notes: string; created_at: string;
 }
@@ -59,6 +60,7 @@ function AccountModal({ account, onClose, onSave }:
   const [form, setForm] = useState({
     name: account?.name || '',
     phone_number: account?.phone_number || '',
+    bot_token: '',
     api_id: account?.api_id || '',
     api_hash: account?.api_hash || '',
     session_string: account?.session_string || '',
@@ -70,8 +72,11 @@ function AccountModal({ account, onClose, onSave }:
   function set(k: string, v: string) { setForm(p => ({ ...p, [k]: v })); }
 
   async function submit() {
-    if (!form.name.trim() || !form.phone_number.trim()) {
-      addToast({ title: 'خطأ', description: 'الاسم ورقم الهاتف مطلوبان', type: 'error' }); return;
+    if (!form.name.trim()) {
+      addToast({ title: 'خطأ', description: 'اسم الحساب مطلوب', type: 'error' }); return;
+    }
+    if (!form.bot_token.trim() && !form.session_string.trim()) {
+      addToast({ title: 'خطأ', description: 'Bot Token مطلوب للمراقبة الحقيقية', type: 'error' }); return;
     }
     setLoading(true);
     try {
@@ -106,38 +111,27 @@ function AccountModal({ account, onClose, onSave }:
         </div>
 
         <div className="p-6 space-y-4">
+          {/* Bot Token — الحقل الأساسي */}
+          <div>
+            <label className={labelCls}>🤖 Bot Token * <span className="text-[var(--brand-primary)] font-bold">(مطلوب)</span></label>
+            <input className={inputCls} value={form.bot_token} onChange={e => set('bot_token', e.target.value)}
+              placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ" dir="ltr" />
+            <p className="text-xs text-[var(--text-muted)] mt-1">
+              احصل على Bot Token من <strong>@BotFather</strong> في تيليجرام، ثم أضف البوت للقنوات/المجموعات المراد مراقبتها
+            </p>
+          </div>
+
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelCls}>اسم الحساب *</label>
               <input className={inputCls} value={form.name} onChange={e => set('name', e.target.value)}
-                placeholder="مثال: حساب مراقبة 1" />
+                placeholder="مثال: بوت مراقبة 1" />
             </div>
             <div>
-              <label className={labelCls}>رقم الهاتف *</label>
+              <label className={labelCls}>رقم الهاتف</label>
               <input className={inputCls} value={form.phone_number} onChange={e => set('phone_number', e.target.value)}
-                placeholder="+966xxxxxxxxx" dir="ltr" />
+                placeholder="+966xxxxxxxxx (اختياري)" dir="ltr" />
             </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className={labelCls}>API ID</label>
-              <input className={inputCls} value={form.api_id} onChange={e => set('api_id', e.target.value)}
-                placeholder="12345678" dir="ltr" />
-            </div>
-            <div>
-              <label className={labelCls}>API Hash</label>
-              <input className={inputCls} value={form.api_hash} onChange={e => set('api_hash', e.target.value)}
-                placeholder="abc123def456..." dir="ltr" />
-            </div>
-          </div>
-          <div>
-            <label className={labelCls}>Session String</label>
-            <textarea className={cn(inputCls, "min-h-[80px] resize-none font-mono text-xs")}
-              value={form.session_string} onChange={e => set('session_string', e.target.value)}
-              placeholder="BQA..." dir="ltr" />
-            <p className="text-xs text-[var(--text-muted)] mt-1">
-              احصل على الـ session string من telethon أو pyrogram
-            </p>
           </div>
           <div>
             <label className={labelCls}>ملاحظات</label>
@@ -461,7 +455,7 @@ export default function TelegramView() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[var(--border-default)] text-[var(--text-muted)]">
-                    {['الاسم', 'رقم الهاتف', 'الحالة', 'آخر نشاط', 'الروابط المجمّعة', 'القنوات', 'الإجراءات'].map(h => (
+                    {['الاسم', 'البوت / الهاتف', 'الحالة', 'آخر نشاط', 'الروابط المجمّعة', 'القنوات', 'الإجراءات'].map(h => (
                       <th key={h} className="text-right px-4 py-3 font-semibold text-xs uppercase tracking-wide">{h}</th>
                     ))}
                   </tr>
@@ -480,7 +474,12 @@ export default function TelegramView() {
                           </div>
                         </div>
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs" dir="ltr">{acc.phone_number}</td>
+                      <td className="px-4 py-3 text-xs" dir="ltr">
+                          {acc.bot_username
+                            ? <span className="text-[#2CA5E0] font-semibold">@{acc.bot_username}</span>
+                            : <span className="text-[var(--text-muted)]">{acc.phone_number || '—'}</span>
+                          }
+                        </td>
                       <td className="px-4 py-3">
                         <span className={cn('px-2.5 py-1 rounded-full text-xs font-bold',
                           acc.status === 'connected' ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400')}>
