@@ -1,7 +1,7 @@
 'use strict';
 /**
  * Telegram System Migrations
- * إنشاء جداول نظام تيليجرام في قاعدة البيانات
+ * إنشاء/تحديث جداول نظام تيليجرام في قاعدة البيانات
  */
 
 const { query } = require('../lib/postgres');
@@ -15,10 +15,12 @@ const TelegramMigrations = {
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID,
                     name VARCHAR(200) NOT NULL,
-                    phone_number VARCHAR(50) NOT NULL,
+                    phone_number VARCHAR(50),
                     api_id VARCHAR(100),
                     api_hash VARCHAR(200),
                     session_string TEXT,
+                    bot_token TEXT,
+                    bot_username VARCHAR(100),
                     status VARCHAR(50) DEFAULT 'disconnected',
                     last_activity_at TIMESTAMPTZ,
                     links_collected INT DEFAULT 0,
@@ -28,6 +30,16 @@ const TelegramMigrations = {
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             `);
+
+            // ── إضافة أعمدة جديدة إذا كان الجدول موجوداً مسبقاً ────────
+            const alterCmds = [
+                `ALTER TABLE telegram_accounts ADD COLUMN IF NOT EXISTS bot_token TEXT`,
+                `ALTER TABLE telegram_accounts ADD COLUMN IF NOT EXISTS bot_username VARCHAR(100)`,
+                `ALTER TABLE telegram_accounts ALTER COLUMN phone_number DROP NOT NULL`,
+            ];
+            for (const cmd of alterCmds) {
+                await query(cmd).catch(() => {}); // تجاهل أخطاء "already exists"
+            }
 
             // ── جدول روابط واتساب المكتشفة ──────────────────────────────
             await query(`
@@ -52,16 +64,20 @@ const TelegramMigrations = {
             `);
 
             // ── Indexes للأداء ────────────────────────────────────────────
-            await query(`CREATE INDEX IF NOT EXISTS idx_whatsapp_links_status ON whatsapp_links(status)`);
-            await query(`CREATE INDEX IF NOT EXISTS idx_whatsapp_links_discovered ON whatsapp_links(discovered_at DESC)`);
-            await query(`CREATE INDEX IF NOT EXISTS idx_whatsapp_links_account ON whatsapp_links(source_account_id)`);
-            await query(`CREATE INDEX IF NOT EXISTS idx_whatsapp_links_deleted ON whatsapp_links(deleted)`);
-            await query(`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user ON telegram_accounts(user_id)`);
-            await query(`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_status ON telegram_accounts(status)`);
+            const indexes = [
+                `CREATE INDEX IF NOT EXISTS idx_whatsapp_links_status ON whatsapp_links(status)`,
+                `CREATE INDEX IF NOT EXISTS idx_whatsapp_links_discovered ON whatsapp_links(discovered_at DESC)`,
+                `CREATE INDEX IF NOT EXISTS idx_whatsapp_links_account ON whatsapp_links(source_account_id)`,
+                `CREATE INDEX IF NOT EXISTS idx_whatsapp_links_deleted ON whatsapp_links(deleted)`,
+                `CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user ON telegram_accounts(user_id)`,
+                `CREATE INDEX IF NOT EXISTS idx_telegram_accounts_status ON telegram_accounts(status)`,
+            ];
+            for (const idx of indexes) {
+                await query(idx).catch(() => {});
+            }
 
-            console.log('[TelegramMigrations] Tables created successfully');
+            console.log('[TelegramMigrations] Tables ready');
         } catch (err) {
-            // تجاهل أخطاء "already exists"
             if (!err.message?.includes('already exists')) {
                 console.error('[TelegramMigrations] Error:', err.message);
             }
