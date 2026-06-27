@@ -263,7 +263,7 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
   const selectedAccount = accounts.find(a => a.id === accountId);
 
   return (
-    <div className="flex flex-col gap-4 h-full flex-1">
+    <div className="flex flex-col gap-4">
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-bold text-[var(--text-primary)]">النشر المباشر</h1>
@@ -271,10 +271,10 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
         </div>
       </div>
 
-      <div className="flex flex-col lg:flex-row gap-6 flex-1 overflow-hidden">
+      <div className="flex flex-col lg:flex-row gap-6" style={{ height: 'calc(100vh - 64px - 48px - 80px)' }}>
 
         {/* Left: Groups */}
-        <Card className="card w-full lg:w-1/3 flex flex-col overflow-hidden">
+        <Card className="card w-full lg:w-1/3 flex flex-col overflow-hidden h-full">
           <div className="p-4 border-b border-[var(--border-default)] bg-[var(--bg-app)]">
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-bold text-[var(--text-primary)] flex items-center gap-2">
@@ -372,7 +372,7 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
         </Card>
 
         {/* Right: Message + Options */}
-        <Card className="card w-full lg:w-2/3 flex flex-col overflow-hidden">
+        <Card className="card w-full lg:w-2/3 flex flex-col overflow-hidden h-full">
           <div className="p-6 flex-1 overflow-y-auto flex flex-col gap-6">
 
             {/* محتوى الرسالة */}
