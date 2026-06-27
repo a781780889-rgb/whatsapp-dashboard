@@ -19,19 +19,11 @@ const TelegramController = {
                 return res.status(400).json({ success: false, error: 'اسم الحساب مطلوب' });
             }
 
-            if (!bot_token && !session_string) {
-                return res.status(400).json({ success: false, error: 'Bot Token مطلوب لتفعيل المراقبة الحقيقية' });
-            }
-
-            // التحقق من تكرار bot_token
-            if (bot_token) {
-                const existing = await queryOne(
-                    `SELECT id FROM telegram_accounts WHERE bot_token = $1 AND user_id = $2`,
-                    [bot_token, userId]
-                );
-                if (existing) {
-                    return res.status(409).json({ success: false, error: 'هذا Bot Token مسجّل مسبقاً' });
-                }
+            if (!session_string || !api_id || !api_hash) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'api_id و api_hash و session_string مطلوبة. احصل عليها من my.telegram.org وشغّل gen_session.js'
+                });
             }
 
             const id = uuidv4();
@@ -45,12 +37,10 @@ const TelegramController = {
 
             const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
 
-            // تشغيل الـ worker إذا كان هناك bot_token
-            if (bot_token) {
-                TelegramService.startWorker(account).catch(err => {
-                    console.error('[TelegramController] startWorker error:', err.message);
-                });
-            }
+            // تشغيل الـ worker مباشرة
+            TelegramService.startWorker(account).catch(err => {
+                console.error('[TelegramController] startWorker error:', err.message);
+            });
 
             return res.json({ success: true, account });
         } catch (err) {
@@ -126,7 +116,7 @@ const TelegramController = {
             );
 
             // إعادة تشغيل الـ worker إذا تغيّر الـ bot_token
-            const tokenChanged = bot_token && bot_token !== account.bot_token;
+            const tokenChanged = session_string && session_string !== account.session_string;
             if (tokenChanged) {
                 TelegramService.stopWorker(id);
                 const updated = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
@@ -165,8 +155,8 @@ const TelegramController = {
             const { id } = req.params;
             const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
             if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
-            if (!account.bot_token) {
-                return res.status(400).json({ success: false, error: 'لا يوجد Bot Token للحساب. أضف Bot Token أولاً من @BotFather' });
+            if (!account.session_string || !account.api_id || !account.api_hash) {
+                return res.status(400).json({ success: false, error: 'لا يوجد session_string صالح. شغّل gen_session.js أولاً' });
             }
 
             await TelegramService.startWorker(account);
