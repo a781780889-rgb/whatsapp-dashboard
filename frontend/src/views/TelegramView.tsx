@@ -60,10 +60,9 @@ function AccountModal({ account, onClose, onSave }:
   const [form, setForm] = useState({
     name: account?.name || '',
     phone_number: account?.phone_number || '',
-    bot_token: '',
     api_id: account?.api_id || '',
     api_hash: account?.api_hash || '',
-    session_string: account?.session_string || '',
+    session_string: '',
     notes: account?.notes || '',
   });
   const [loading, setLoading] = useState(false);
@@ -75,8 +74,11 @@ function AccountModal({ account, onClose, onSave }:
     if (!form.name.trim()) {
       addToast({ title: 'خطأ', description: 'اسم الحساب مطلوب', type: 'error' }); return;
     }
-    if (!form.bot_token.trim() && !form.session_string.trim()) {
-      addToast({ title: 'خطأ', description: 'Bot Token مطلوب للمراقبة الحقيقية', type: 'error' }); return;
+    if (!form.api_id.trim() || !form.api_hash.trim()) {
+      addToast({ title: 'خطأ', description: 'api_id و api_hash مطلوبان من my.telegram.org', type: 'error' }); return;
+    }
+    if (!form.session_string.trim()) {
+      addToast({ title: 'خطأ', description: 'Session String مطلوب — شغّل gen_session.js أولاً', type: 'error' }); return;
     }
     setLoading(true);
     try {
@@ -111,27 +113,46 @@ function AccountModal({ account, onClose, onSave }:
         </div>
 
         <div className="p-6 space-y-4">
-          {/* Bot Token — الحقل الأساسي */}
-          <div>
-            <label className={labelCls}>🤖 Bot Token * <span className="text-[var(--brand-primary)] font-bold">(مطلوب)</span></label>
-            <input className={inputCls} value={form.bot_token} onChange={e => set('bot_token', e.target.value)}
-              placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ" dir="ltr" />
-            <p className="text-xs text-[var(--text-muted)] mt-1">
-              احصل على Bot Token من <strong>@BotFather</strong> في تيليجرام، ثم أضف البوت للقنوات/المجموعات المراد مراقبتها
-            </p>
+          {/* إشعار توضيحي */}
+          <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-xs text-blue-300 space-y-1">
+            <p className="font-bold text-blue-200">📌 كيفية الحصول على البيانات:</p>
+            <p>1. اذهب إلى <span className="font-mono font-bold">my.telegram.org</span> ← API Development Tools</p>
+            <p>2. أنشئ تطبيقاً جديداً للحصول على <strong>api_id</strong> و <strong>api_hash</strong></p>
+            <p>3. شغّل سكريبت <span className="font-mono font-bold">gen_session.js</span> في مجلد backend للحصول على Session String</p>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelCls}>اسم الحساب *</label>
               <input className={inputCls} value={form.name} onChange={e => set('name', e.target.value)}
-                placeholder="مثال: بوت مراقبة 1" />
+                placeholder="مثال: حساب مراقبة 1" />
             </div>
             <div>
               <label className={labelCls}>رقم الهاتف</label>
               <input className={inputCls} value={form.phone_number} onChange={e => set('phone_number', e.target.value)}
-                placeholder="+966xxxxxxxxx (اختياري)" dir="ltr" />
+                placeholder="+966xxxxxxxxx" dir="ltr" />
             </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>API ID * <span className="text-[var(--text-muted)] font-normal normal-case">(من my.telegram.org)</span></label>
+              <input className={inputCls} value={form.api_id} onChange={e => set('api_id', e.target.value)}
+                placeholder="12345678" dir="ltr" />
+            </div>
+            <div>
+              <label className={labelCls}>API Hash *</label>
+              <input className={inputCls} value={form.api_hash} onChange={e => set('api_hash', e.target.value)}
+                placeholder="0123456789abcdef..." dir="ltr" />
+            </div>
+          </div>
+          <div>
+            <label className={labelCls}>Session String * <span className="text-[var(--text-muted)] font-normal normal-case">(من gen_session.js)</span></label>
+            <textarea className={cn(inputCls, "min-h-[90px] resize-none font-mono text-xs")}
+              value={form.session_string} onChange={e => set('session_string', e.target.value)}
+              placeholder="1BQANOTEuMTg1LjE3Ni43NAAAAAQAAAA..." dir="ltr" />
+            <p className="text-xs text-[var(--text-muted)] mt-1">
+              شغّل: <span className="font-mono bg-[var(--bg-elevated)] px-1 rounded">node gen_session.js</span> في مجلد backend
+            </p>
           </div>
           <div>
             <label className={labelCls}>ملاحظات</label>
