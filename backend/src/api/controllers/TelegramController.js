@@ -1,13 +1,6 @@
 'use strict';
 /**
- * TelegramController
- *
- * الإصلاح:
- *  - استدعاء TelegramService.startWorker(account).catch(() => {}) يعمل الآن
- *    لأن startWorker أصبحت async وتُعيد Promise.
- *
- *  - إضافة receiveIngest  → لاستقبال رسائل من سكريبت Python (telethon/pyrogram)
- *  - إضافة receiveBotWebhook → لاستقبال تحديثات Telegram Bot API
+ * TelegramController — يدعم Bot Token + Real Long Polling
  */
 
 const TelegramService = require('../services/TelegramService');
@@ -19,33 +12,41 @@ const TelegramController = {
     // ── إضافة حساب تيليجرام ──────────────────────────────────────────────────
     async addAccount(req, res) {
         try {
-            const { name, phone_number, api_id, api_hash, session_string, notes } = req.body;
+            const { name, phone_number, api_id, api_hash, session_string, bot_token, notes } = req.body;
             const userId = req.user.id;
 
-            if (!name || !phone_number) {
-                return res.status(400).json({ success: false, error: 'الاسم ورقم الهاتف مطلوبان' });
+            if (!name) {
+                return res.status(400).json({ success: false, error: 'اسم الحساب مطلوب' });
             }
 
-            const existing = await queryOne(
-                `SELECT id FROM telegram_accounts WHERE phone_number = $1 AND user_id = $2`,
-                [phone_number, userId]
-            );
-            if (existing) {
-                return res.status(409).json({ success: false, error: 'رقم الهاتف مسجّل مسبقاً' });
+            if (!bot_token && !session_string) {
+                return res.status(400).json({ success: false, error: 'Bot Token مطلوب لتفعيل المراقبة الحقيقية' });
+            }
+
+            // التحقق من تكرار bot_token
+            if (bot_token) {
+                const existing = await queryOne(
+                    `SELECT id FROM telegram_accounts WHERE bot_token = $1 AND user_id = $2`,
+                    [bot_token, userId]
+                );
+                if (existing) {
+                    return res.status(409).json({ success: false, error: 'هذا Bot Token مسجّل مسبقاً' });
+                }
             }
 
             const id = uuidv4();
             await query(
                 `INSERT INTO telegram_accounts
-                 (id, user_id, name, phone_number, api_id, api_hash, session_string, notes, status)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'disconnected')`,
-                [id, userId, name, phone_number, api_id || null, api_hash || null, session_string || null, notes || null]
+                 (id, user_id, name, phone_number, api_id, api_hash, session_string, bot_token, notes, status)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'disconnected')`,
+                [id, userId, name, phone_number || null, api_id || null, api_hash || null,
+                 session_string || null, bot_token || null, notes || null]
             );
 
             const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
 
-            // [FIX] startWorker الآن async → .catch() يعمل بشكل صحيح
-            if (session_string) {
+            // تشغيل الـ worker إذا كان هناك bot_token
+            if (bot_token) {
                 TelegramService.startWorker(account).catch(err => {
                     console.error('[TelegramController] startWorker error:', err.message);
                 });
@@ -71,7 +72,14 @@ const TelegramController = {
                     [userId]
                   );
 
-            return res.json({ success: true, accounts });
+            // إخفاء bot_token الكامل من الاستجابة (أمان)
+            const safe = accounts.map(a => ({
+                ...a,
+                bot_token: a.bot_token ? `${a.bot_token.slice(0, 10)}...` : null,
+                session_string: a.session_string ? '***' : null,
+            }));
+
+            return res.json({ success: true, accounts: safe });
         } catch (err) {
             return res.status(500).json({ success: false, error: err.message });
         }
@@ -83,6 +91,8 @@ const TelegramController = {
             const { id } = req.params;
             const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
             if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
+            // إخفاء bot_token
+            account.bot_token = account.bot_token ? `${account.bot_token.slice(0, 10)}...` : null;
             return res.json({ success: true, account });
         } catch (err) {
             return res.status(500).json({ success: false, error: err.message });
@@ -93,7 +103,7 @@ const TelegramController = {
     async updateAccount(req, res) {
         try {
             const { id } = req.params;
-            const { name, phone_number, api_id, api_hash, session_string, notes } = req.body;
+            const { name, phone_number, api_id, api_hash, session_string, bot_token, notes } = req.body;
 
             const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
             if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
@@ -101,30 +111,32 @@ const TelegramController = {
             await query(
                 `UPDATE telegram_accounts SET
                  name=$1, phone_number=$2, api_id=$3, api_hash=$4,
-                 session_string=$5, notes=$6, updated_at=NOW()
-                 WHERE id=$7`,
+                 session_string=$5, bot_token=$6, notes=$7, updated_at=NOW()
+                 WHERE id=$8`,
                 [
-                    name             || account.name,
-                    phone_number     || account.phone_number,
-                    api_id           || account.api_id,
-                    api_hash         || account.api_hash,
-                    session_string   || account.session_string,
-                    notes !== undefined ? notes : account.notes,
+                    name           || account.name,
+                    phone_number   !== undefined ? phone_number   : account.phone_number,
+                    api_id         !== undefined ? api_id         : account.api_id,
+                    api_hash       !== undefined ? api_hash       : account.api_hash,
+                    session_string !== undefined ? session_string : account.session_string,
+                    bot_token      !== undefined ? bot_token      : account.bot_token,
+                    notes          !== undefined ? notes          : account.notes,
                     id,
                 ]
             );
 
-            // إعادة تشغيل الـ worker إذا تغيّر الـ session
-            if (session_string && session_string !== account.session_string) {
+            // إعادة تشغيل الـ worker إذا تغيّر الـ bot_token
+            const tokenChanged = bot_token && bot_token !== account.bot_token;
+            if (tokenChanged) {
                 TelegramService.stopWorker(id);
                 const updated = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
-                // [FIX] startWorker الآن async → .catch() يعمل بشكل صحيح
                 TelegramService.startWorker(updated).catch(err => {
                     console.error('[TelegramController] startWorker error (update):', err.message);
                 });
             }
 
             const updated = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
+            updated.bot_token = updated.bot_token ? `${updated.bot_token.slice(0, 10)}...` : null;
             return res.json({ success: true, account: updated });
         } catch (err) {
             return res.status(500).json({ success: false, error: err.message });
@@ -153,12 +165,12 @@ const TelegramController = {
             const { id } = req.params;
             const account = await queryOne(`SELECT * FROM telegram_accounts WHERE id = $1`, [id]);
             if (!account) return res.status(404).json({ success: false, error: 'الحساب غير موجود' });
-            if (!account.session_string) {
-                return res.status(400).json({ success: false, error: 'لا يوجد session_string للحساب' });
+            if (!account.bot_token) {
+                return res.status(400).json({ success: false, error: 'لا يوجد Bot Token للحساب. أضف Bot Token أولاً من @BotFather' });
             }
 
             await TelegramService.startWorker(account);
-            return res.json({ success: true, message: 'تم تشغيل المراقبة' });
+            return res.json({ success: true, message: 'تم تشغيل المراقبة الحقيقية' });
         } catch (err) {
             return res.status(500).json({ success: false, error: err.message });
         }
@@ -176,14 +188,11 @@ const TelegramController = {
     },
 
     // ── استقبال رسائل من سكريبت Python (telethon/pyrogram) ─────────────────
-    // POST /api/telegram/ingest/:accountId
-    // Body: { messages: [{ text, group_name }], secret }
     async receiveIngest(req, res) {
         try {
             const { accountId } = req.params;
             const { messages = [], secret, text, group_name } = req.body;
 
-            // التحقق من المفتاح السري (اختياري — يُعيَّن عبر TELEGRAM_INGEST_SECRET)
             const expectedSecret = process.env.TELEGRAM_INGEST_SECRET;
             if (expectedSecret && secret !== expectedSecret) {
                 return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -197,8 +206,6 @@ const TelegramController = {
             }
 
             let totalLinks = 0;
-
-            // دعم كلا الشكلين: رسالة واحدة أو مصفوفة
             const items = messages.length > 0
                 ? messages
                 : (text ? [{ text, group_name: group_name || '' }] : []);
@@ -222,17 +229,12 @@ const TelegramController = {
     },
 
     // ── استقبال تحديثات Telegram Bot API (webhook) ──────────────────────────
-    // POST /api/telegram/webhook/:accountId
-    // يُرسَل تلقائياً من Telegram عند إعداد setWebhook
     async receiveBotWebhook(req, res) {
-        // يجب الرد فوراً بـ 200 لإعلام Telegram بنجاح الاستلام
         res.json({ ok: true });
-
         try {
             const { accountId } = req.params;
             const update = req.body;
             if (!update) return;
-
             await TelegramService.processBotUpdate(accountId, update);
         } catch (err) {
             console.error('[TelegramController.receiveBotWebhook]', err.message);
@@ -249,7 +251,6 @@ const TelegramController = {
             const params     = [];
             let pIdx = 1;
 
-            // فلتر الحذف: استبعاد المحذوفة دائماً ما لم يُطلب خلاف ذلك
             conditions.push(`wl.deleted = false`);
 
             if (status)     { conditions.push(`wl.status = $${pIdx++}`);             params.push(status); }
@@ -386,34 +387,38 @@ const TelegramController = {
     // ── إحصائيات ─────────────────────────────────────────────────────────────
     async getStats(req, res) {
         try {
-            const totalAccounts    = await queryOne(`SELECT COUNT(*) as cnt FROM telegram_accounts`);
-            const connectedAccounts= await queryOne(`SELECT COUNT(*) as cnt FROM telegram_accounts WHERE status='connected'`);
-            const totalLinks       = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=false`);
-            const newLinks         = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=false AND discovered_at >= NOW() - INTERVAL '24 hours'`);
-            const joinedLinks      = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE joined=true AND deleted=false`);
-            const deletedLinks     = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=true`);
-            const duplicateLinks   = await queryOne(`SELECT COALESCE(SUM(duplicate_count),0) as cnt FROM whatsapp_links WHERE duplicate_count > 0`);
+            const totalAccounts     = await queryOne(`SELECT COUNT(*) as cnt FROM telegram_accounts`);
+            const connectedAccounts = await queryOne(`SELECT COUNT(*) as cnt FROM telegram_accounts WHERE status='connected'`);
+            const totalLinks        = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=false`);
+            const newLinks          = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=false AND discovered_at >= NOW() - INTERVAL '24 hours'`);
+            const joinedLinks       = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE joined=true AND deleted=false`);
+            const deletedLinks      = await queryOne(`SELECT COUNT(*) as cnt FROM whatsapp_links WHERE deleted=true`);
+            const duplicateLinks    = await queryOne(`SELECT COALESCE(SUM(duplicate_count),0) as cnt FROM whatsapp_links WHERE duplicate_count > 0`);
 
             const perAccount = await queryAll(
-                `SELECT ta.id, ta.name, ta.phone_number, COUNT(wl.id) as links_count
+                `SELECT ta.id, ta.name, ta.phone_number, ta.bot_username, COUNT(wl.id) as links_count
                  FROM telegram_accounts ta
                  LEFT JOIN whatsapp_links wl ON wl.source_account_id = ta.id AND wl.deleted=false
-                 GROUP BY ta.id, ta.name, ta.phone_number
+                 GROUP BY ta.id, ta.name, ta.phone_number, ta.bot_username
                  ORDER BY links_count DESC`
             );
+
+            // حالة الـ workers النشطة
+            const workers = TelegramService.getAllWorkersStatus();
 
             return res.json({
                 success: true,
                 stats: {
-                    totalAccounts:        parseInt(totalAccounts?.cnt   || 0),
+                    totalAccounts:        parseInt(totalAccounts?.cnt    || 0),
                     connectedAccounts:    parseInt(connectedAccounts?.cnt || 0),
-                    disconnectedAccounts: parseInt(totalAccounts?.cnt   || 0) - parseInt(connectedAccounts?.cnt || 0),
-                    totalLinks:           parseInt(totalLinks?.cnt      || 0),
-                    newLinks:             parseInt(newLinks?.cnt        || 0),
-                    joinedLinks:          parseInt(joinedLinks?.cnt     || 0),
-                    deletedLinks:         parseInt(deletedLinks?.cnt    || 0),
-                    duplicateLinks:       parseInt(duplicateLinks?.cnt  || 0),
+                    disconnectedAccounts: parseInt(totalAccounts?.cnt    || 0) - parseInt(connectedAccounts?.cnt || 0),
+                    totalLinks:           parseInt(totalLinks?.cnt       || 0),
+                    newLinks:             parseInt(newLinks?.cnt         || 0),
+                    joinedLinks:          parseInt(joinedLinks?.cnt      || 0),
+                    deletedLinks:         parseInt(deletedLinks?.cnt     || 0),
+                    duplicateLinks:       parseInt(duplicateLinks?.cnt   || 0),
                     perAccount,
+                    activeWorkers:        workers.length,
                 },
             });
         } catch (err) {
