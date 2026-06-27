@@ -163,12 +163,50 @@ class GroupController {
             }
 
             // قراءة من DB
-            const [{ groups, total }, settings] = await Promise.all([
+            let [{ groups, total }, settings] = await Promise.all([
                 this._getCachedGroupsPaginated(accountDB, limit, offset),
                 accountDB.get(`SELECT * FROM group_sync_settings WHERE account_id = $1`, [accountId]),
             ]);
 
             console.log(`[GroupController] getGroups: DB read — ${total} groups for account ${accountId}`);
+
+            // [FIX-DIRECT-PUBLISH-1] إذا كان الكاش فارغاً (لم تتم أي مزامنة سابقة لهذا
+            // الحساب) والحساب متصل بواتساب، نقوم بمزامنة فورية تلقائياً بدل إعادة
+            // قائمة فارغة. هذا يحل مشكلة "المجموعات لا تظهر" لحساب لم يُزامَن قبلاً.
+            if (total === 0) {
+                const sock = WhatsAppManager.getSession(accountId);
+                if (sock) {
+                    try {
+                        console.log(`[GroupController] getGroups: empty cache — auto-syncing account ${accountId}`);
+                        const allSynced = await withTimeout(
+                            this._syncFromWhatsApp(accountId, sock, accountDB),
+                            LIVE_SYNC_TIMEOUT_MS
+                        );
+                        await accountDB.run(
+                            `UPDATE group_sync_settings SET last_auto_sync = NOW() WHERE account_id = $1`,
+                            [accountId]
+                        ).catch(() => {});
+                        await CacheService.invalidateAccount(accountId);
+
+                        total  = allSynced.length;
+                        groups = allSynced.slice(offset, offset + limit);
+
+                        return res.json({
+                            success:    true,
+                            groups,
+                            count:      groups.length,
+                            total,
+                            pagination: this._buildPagination(page, limit, total),
+                            source:     'whatsapp',
+                            synced_at:  new Date().toISOString(),
+                            auto_synced: true,
+                        });
+                    } catch (autoSyncErr) {
+                        console.warn(`[GroupController] getGroups: auto-sync failed for ${accountId}:`, autoSyncErr.message);
+                        // نتابع بإعادة النتيجة الفارغة من DB بدل فشل الطلب بالكامل
+                    }
+                }
+            }
 
             const response = {
                 success:       true,
@@ -239,9 +277,26 @@ class GroupController {
             }
 
             // جلب كل المجموعات من DB
-            const allRows = await accountDB.all(
+            let allRows = await accountDB.all(
                 `SELECT * FROM wa_groups ORDER BY members_count DESC`
             );
+
+            // [FIX-DIRECT-PUBLISH-1] نفس إصلاح getGroups: مزامنة تلقائية إذا كان
+            // الكاش فارغاً تماماً (لم تتم أي مزامنة من قبل) والحساب متصل.
+            if (allRows.length === 0 && !forceRefresh) {
+                const sock = WhatsAppManager.getSession(accountId);
+                if (sock) {
+                    try {
+                        console.log(`[GroupController] getGroupsByCategory: empty cache — auto-syncing account ${accountId}`);
+                        await this._syncFromWhatsApp(accountId, sock, accountDB);
+                        await CacheService.invalidateAccount(accountId);
+                        allRows = await accountDB.all(`SELECT * FROM wa_groups ORDER BY members_count DESC`);
+                    } catch (autoSyncErr) {
+                        console.warn(`[GroupController] getGroupsByCategory: auto-sync failed for ${accountId}:`, autoSyncErr.message);
+                    }
+                }
+            }
+
             const all = allRows.map(r => this._formatGroup(r));
 
             const members    = all.filter(g => g.is_member);
