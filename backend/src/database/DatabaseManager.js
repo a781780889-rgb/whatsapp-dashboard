@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS group_members (group_id TEXT, phone TEXT NOT NULL, na
 CREATE TABLE IF NOT EXISTS links (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), url TEXT NOT NULL, group_id TEXT, source_message TEXT, category TEXT DEFAULT 'general', is_spam BOOLEAN DEFAULT FALSE, extracted_at TIMESTAMPTZ DEFAULT NOW(), created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS schedules (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, status VARCHAR(50) DEFAULT 'active', cron_expr TEXT, ad_library_id UUID, target_groups JSONB DEFAULT '[]', next_run_at TIMESTAMPTZ, last_run_at TIMESTAMPTZ, run_count INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS ad_library (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, content TEXT DEFAULT '', media_paths JSONB DEFAULT '[]', media_types JSONB DEFAULT '[]', links JSONB DEFAULT '[]', format_options JSONB DEFAULT '{}', priority INT DEFAULT 5, tags TEXT DEFAULT '', is_active BOOLEAN DEFAULT TRUE, use_count INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
+ALTER TABLE ad_library ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS campaigns (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, status VARCHAR(50) DEFAULT 'pending', target_groups JSONB DEFAULT '[]', ad_library_id UUID, sent_count INT DEFAULT 0, failed_count INT DEFAULT 0, total_targets INT DEFAULT 0, started_at TIMESTAMPTZ, finished_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS broadcast_schedules (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT, account_id TEXT, status VARCHAR(50) DEFAULT 'paused', target_group_jids JSONB DEFAULT '[]', ad_library_ids JSONB DEFAULT '[]', rotation_mode VARCHAR(50) DEFAULT 'sequential', active_days JSONB DEFAULT '[0,1,2,3,4,5,6]', publish_times JSONB DEFAULT '[]', max_per_day INT DEFAULT 3, send_to_members BOOLEAN DEFAULT FALSE, exclude_admins BOOLEAN DEFAULT TRUE, next_run_at TIMESTAMPTZ, last_run_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
 ALTER TABLE broadcast_schedules ADD COLUMN IF NOT EXISTS account_id TEXT;
@@ -82,6 +83,14 @@ ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS send_to_members BOOLEAN 
 ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS exclude_admins BOOLEAN DEFAULT TRUE;
 ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS members_sent INT DEFAULT 0;
 ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS ad_library_ids JSONB DEFAULT '[]';
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS groups_targeted INT DEFAULT 0;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS groups_sent INT DEFAULT 0;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS groups_failed INT DEFAULT 0;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS members_targeted INT DEFAULT 0;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS members_failed INT DEFAULT 0;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS member_delay_ms INT DEFAULT 1500;
+ALTER TABLE direct_publish_log ADD COLUMN IF NOT EXISTS details JSONB DEFAULT '[]';
 CREATE TABLE IF NOT EXISTS group_exclusions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone TEXT NOT NULL UNIQUE, reason TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS join_queue (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), link_url TEXT NOT NULL, status VARCHAR(50) DEFAULT 'pending', attempts INT DEFAULT 0, last_attempt_at TIMESTAMPTZ, joined_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS link_search_settings (id INT PRIMARY KEY DEFAULT 1, settings JSONB DEFAULT '{}', updated_at TIMESTAMPTZ DEFAULT NOW());
