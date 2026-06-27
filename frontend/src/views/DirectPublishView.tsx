@@ -74,6 +74,7 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
   const [selectedGroups, setSelectedGroups]  = useState<Set<string>>(new Set());
   const [search, setSearch]                  = useState('');
   const [syncing, setSyncing]                = useState(false);
+  const [statusFilter, setStatusFilter]      = useState<'all' | 'green' | 'yellow' | 'red'>('all');
 
   // ── محتوى الرسالة ─────────────────────────────────────────────────────────
   const [message, setMessage]                 = useState('');
@@ -173,8 +174,12 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
   };
 
   const filteredGroups = useMemo(
-    () => groups.filter(g => g.name.toLowerCase().includes(search.toLowerCase())),
-    [groups, search]
+    () => groups.filter(g => {
+      const matchSearch = g.name.toLowerCase().includes(search.toLowerCase());
+      const matchStatus = statusFilter === 'all' || (g.publish_status || 'green') === statusFilter;
+      return matchSearch && matchStatus;
+    }),
+    [groups, search, statusFilter]
   );
 
   const toggleAll = () => {
@@ -291,6 +296,28 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
               <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
               <input className="input pr-9 bg-[var(--bg-surface)]" placeholder="بحث في المجموعات..." value={search} onChange={e => setSearch(e.target.value)} />
             </div>
+            {/* فلتر الحالة */}
+            <div className="flex gap-1 mt-2">
+              {([
+                { key: 'all',    label: 'الكل' },
+                { key: 'green',  label: 'غير مقيدة',  color: 'bg-green-500/10 text-green-500 border-green-500/30' },
+                { key: 'yellow', label: 'مقيدة',       color: 'bg-yellow-500/10 text-yellow-500 border-yellow-500/30' },
+                { key: 'red',    label: 'محظورة',      color: 'bg-red-500/10 text-red-500 border-red-500/30' },
+              ] as const).map(({ key, label, color }) => (
+                <button
+                  key={key}
+                  onClick={() => setStatusFilter(key)}
+                  className={cn(
+                    'flex-1 text-[10px] font-medium px-1 py-1 rounded-lg border transition-all',
+                    statusFilter === key
+                      ? (color || 'bg-[var(--brand-primary)]/10 text-[var(--brand-primary)] border-[var(--brand-primary)]/30')
+                      : 'border-[var(--border-default)] text-[var(--text-muted)] hover:border-[var(--border-strong)]'
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {groupsError && (
@@ -329,7 +356,13 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
                       <p className="text-xs text-[var(--text-muted)] mt-0.5">{g.members_count || 0} عضو</p>
                     </div>
                     {g.publish_status === 'red' && (
-                      <Badge className="bg-red-500/10 text-red-500 border-0 text-[10px] shrink-0">مقيدة</Badge>
+                      <Badge className="bg-red-500/10 text-red-500 border-0 text-[10px] shrink-0">محظورة</Badge>
+                    )}
+                    {g.publish_status === 'yellow' && (
+                      <Badge className="bg-yellow-500/10 text-yellow-500 border-0 text-[10px] shrink-0">مقيدة</Badge>
+                    )}
+                    {(!g.publish_status || g.publish_status === 'green') && (
+                      <Badge className="bg-green-500/10 text-green-500 border-0 text-[10px] shrink-0">نشطة</Badge>
                     )}
                   </label>
                 ))}
@@ -534,24 +567,26 @@ export default function DirectPublishView({ accountId, accounts }: { accountId: 
               </div>
             )}
 
-            <div className="mt-auto pt-4">
-              <Button
-                disabled={!canSend}
-                onClick={handleSend}
-                className="w-full h-14 text-lg font-bold shadow-[var(--shadow-glow)] bg-gradient-to-r from-[var(--brand-primary)] to-[#008f6e] disabled:opacity-50"
-              >
-                {sending ? (
-                  <span className="flex items-center gap-2"><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> جاري الإرسال...</span>
-                ) : (
-                  <><Send className="w-5 h-5 ml-2" /> إرسال الآن ({selectedGroups.size} مجموعة{sendToMembers ? ' + أعضاء' : ''})</>
-                )}
-              </Button>
-              {lastResult && (
-                <p className={cn('mt-3 text-center text-sm font-medium', lastResult.ok ? 'text-green-500' : 'text-red-500')}>
-                  {lastResult.text}
-                </p>
+          </div>
+
+          {/* زر الإرسال — ثابت خارج منطقة السكرول */}
+          <div className="px-6 pb-4 pt-3 border-t border-[var(--border-default)] bg-[var(--bg-surface)] shrink-0">
+            <Button
+              disabled={!canSend}
+              onClick={handleSend}
+              className="w-full h-14 text-lg font-bold shadow-[var(--shadow-glow)] bg-gradient-to-r from-[var(--brand-primary)] to-[#008f6e] disabled:opacity-50"
+            >
+              {sending ? (
+                <span className="flex items-center gap-2"><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> جاري الإرسال...</span>
+              ) : (
+                <><Send className="w-5 h-5 ml-2" /> إرسال الآن ({selectedGroups.size} مجموعة{sendToMembers ? ' + أعضاء' : ''})</>
               )}
-            </div>
+            </Button>
+            {lastResult && (
+              <p className={cn('mt-3 text-center text-sm font-medium', lastResult.ok ? 'text-green-500' : 'text-red-500')}>
+                {lastResult.text}
+              </p>
+            )}
           </div>
 
           {/* Publish Log Strip */}
