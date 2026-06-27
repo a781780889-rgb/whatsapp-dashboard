@@ -58,6 +58,9 @@ router.delete('/admin/subscriptions/:id',         auth, role('admin'), Subscript
 // User — بيانات اشتراكي
 router.get('/subscription/me', auth, SubscriptionController.mySubscription.bind(SubscriptionController));
 
+// Admin — Subscriber Monitoring (sessions)
+router.get('/admin/subscriber-monitoring/:id/sessions', auth, role('admin'), SubscriptionController.getSubscriberSessions.bind(SubscriptionController));
+
 // ══════════════════════════════════════════════════════
 //  ADMIN — Stats
 // ══════════════════════════════════════════════════════
