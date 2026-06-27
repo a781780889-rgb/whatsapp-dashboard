@@ -43,8 +43,8 @@ export function AppLayout({
           onAccountChange={onAccountChange}
           currentUser={currentUser}
         />
-        <main className="flex-1 overflow-y-auto p-6 scroll-smooth">
-          <div className="max-w-7xl mx-auto w-full" style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+        <main className="flex-1 overflow-auto p-6 scroll-smooth">
+          <div className="max-w-7xl mx-auto w-full h-full">
             {children}
           </div>
         </main>
