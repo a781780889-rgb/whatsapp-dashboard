@@ -528,6 +528,39 @@ class SubscriptionController {
             return res.status(500).json({ success: false, error: 'خطأ في جلب بيانات الاشتراك.' });
         }
     }
+    // ══════════════════════════════════════════════════════
+    //  ADMIN — جلسات تسجيل الدخول للمشترك
+    // ══════════════════════════════════════════════════════
+    async getSubscriberSessions(req, res) {
+        const { id } = req.params;
+        try {
+            const user = await SystemDB.get(`SELECT id, username FROM users WHERE id=$1`, [id]);
+            if (!user) return res.status(404).json({ success: false, error: 'المشترك غير موجود.' });
+
+            // Migration: add user_agent column if missing
+            await SystemDB.run(`ALTER TABLE login_attempts ADD COLUMN IF NOT EXISTS user_agent TEXT`).catch(() => {});
+
+            const sessions = await SystemDB.all(`
+                SELECT ip_address, user_agent, success, created_at
+                FROM login_attempts
+                WHERE username = $1
+                ORDER BY created_at DESC
+                LIMIT 50
+            `, [user.username]);
+
+            const lastActivity = await SystemDB.get(`
+                SELECT ip_address FROM activity_logs
+                WHERE user_id = $1 AND ip_address IS NOT NULL
+                ORDER BY created_at DESC LIMIT 1
+            `, [id]);
+
+            return res.json({ success: true, sessions, lastIp: lastActivity?.ip_address || null });
+        } catch (err) {
+            console.error('[SubscriptionCtrl] getSubscriberSessions:', err);
+            return res.status(500).json({ success: false, error: 'خطأ في جلب الجلسات.' });
+        }
+    }
+
 }
 
 module.exports = new SubscriptionController();
