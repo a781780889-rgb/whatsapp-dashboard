@@ -1,60 +1,36 @@
 'use strict';
 /**
- * TelegramService — مراقبة حقيقية عبر Telegram Bot API (long polling)
+ * TelegramService — مراقبة حقيقية عبر Telegram MTProto (gramjs)
  *
- * كيف يعمل:
- *  - كل حساب يُضاف يحتاج bot_token (من @BotFather)
- *  - البوت يُضاف إلى القنوات/المجموعات المراد مراقبتها
- *  - الـ worker يقوم بـ long polling حقيقي عبر getUpdates
- *  - كل رسالة تُفحص عن روابط واتساب وتُحفظ في قاعدة البيانات
- *  - يدعم أيضاً: webhook (POST /api/telegram/webhook/:accountId)
- *               و ingest من Python (POST /api/telegram/ingest/:accountId)
+ * يعمل بحساب المستخدم العادي (لا يحتاج Admin):
+ *  - يقرأ الرسائل من جميع القنوات/المجموعات التي أنت عضو فيها
+ *  - يستخدم api_id + api_hash + session_string من my.telegram.org
+ *  - يكتشف روابط واتساب ويحفظها في قاعدة البيانات
+ *
+ * للحصول على session_string:
+ *  - سجّل دخولك مرة واحدة عبر سكريبت gen_session.js (مرفق)
+ *  - انسخ الـ string الناتج وضعه في حقل session_string عند إضافة الحساب
  */
 
-const https = require('https');
 const { query, queryOne, queryAll } = require('../../lib/postgres');
 const { v4: uuidv4 } = require('uuid');
 const SocketBridge = require('../../core/SocketBridge');
 
-// ── Regex لاكتشاف روابط واتساب ──────────────────────────────────────────────
+// ── Regex روابط واتساب ───────────────────────────────────────────────────────
 const WA_LINK_PATTERN = /https?:\/\/(?:chat\.whatsapp\.com|wa\.me|api\.whatsapp\.com\/send)[^\s\])"'>]*/gi;
 
 // ── خريطة الـ Workers النشطة ──────────────────────────────────────────────────
-const activeWorkers = new Map(); // accountId → { account, status, ... }
+const activeWorkers = new Map(); // accountId → workerState
 
-// ── طلب HTTPS بسيط بدون مكتبات خارجية ──────────────────────────────────────
-function httpsGet(url) {
-    return new Promise((resolve, reject) => {
-        const req = https.get(url, (res) => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                try { resolve(JSON.parse(data)); }
-                catch (e) { reject(new Error('JSON parse error: ' + data.slice(0, 200))); }
-            });
-        });
-        req.on('error', reject);
-        req.setTimeout(35000, () => { req.destroy(); reject(new Error('Request timeout')); });
-    });
-}
-
-// ── بناء URL الـ Telegram Bot API ───────────────────────────────────────────
-function telegramUrl(botToken, method, params = {}) {
-    const qs = Object.entries(params)
-        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-        .join('&');
-    return `https://api.telegram.org/bot${botToken}/${method}${qs ? '?' + qs : ''}`;
-}
-
-// ── التحقق من صحة الـ Bot Token ──────────────────────────────────────────────
-async function validateBotToken(botToken) {
-    try {
-        const url = telegramUrl(botToken, 'getMe');
-        const result = await httpsGet(url);
-        return result?.ok ? result.result : null;
-    } catch {
-        return null;
-    }
+// ── تحميل gramjs بشكل آمن ───────────────────────────────────────────────────
+let TelegramClient, StringSession;
+try {
+    const telegramLib = require('telegram');
+    TelegramClient  = telegramLib.TelegramClient;
+    StringSession   = require('telegram').sessions.StringSession;
+    console.log('[TelegramService] gramjs loaded ✓');
+} catch (e) {
+    console.warn('[TelegramService] gramjs not installed. Run: npm install telegram');
 }
 
 const TelegramService = {
@@ -68,198 +44,224 @@ const TelegramService = {
             return;
         }
 
-        // التحقق من وجود bot_token
-        if (!account.bot_token) {
-            console.warn(`[TelegramService] Account ${account.name} has no bot_token — skipping real polling`);
+        if (!TelegramClient) {
+            console.error('[TelegramService] gramjs not installed. Run: npm install telegram');
             await query(
-                `UPDATE telegram_accounts SET status='disconnected', updated_at=NOW() WHERE id=$1`,
-                [id]
+                `UPDATE telegram_accounts SET status='error', updated_at=NOW() WHERE id=$1`, [id]
             ).catch(() => {});
             return;
         }
 
-        console.log(`[TelegramService] Starting real polling worker for: ${account.name}`);
-
-        // التحقق من صحة الـ Bot Token
-        const botInfo = await validateBotToken(account.bot_token);
-        if (!botInfo) {
-            console.error(`[TelegramService] Invalid bot_token for account: ${account.name}`);
+        if (!account.api_id || !account.api_hash || !account.session_string) {
+            console.warn(`[TelegramService] Account ${account.name} missing api_id/api_hash/session_string`);
             await query(
-                `UPDATE telegram_accounts SET status='error', updated_at=NOW() WHERE id=$1`,
-                [id]
+                `UPDATE telegram_accounts SET status='disconnected', updated_at=NOW() WHERE id=$1`, [id]
             ).catch(() => {});
-            SocketBridge.emit('telegram:worker_error', {
-                accountId: id,
-                accountName: account.name,
-                error: 'Bot token غير صالح',
-            });
             return;
         }
 
-        console.log(`[TelegramService] Bot verified: @${botInfo.username} for account: ${account.name}`);
+        console.log(`[TelegramService] Starting MTProto worker for: ${account.name}`);
 
         const workerState = {
             account,
-            botInfo,
-            status:     'running',
+            client:     null,
+            status:     'connecting',
             startedAt:  new Date(),
             linksFound: 0,
             lastCheck:  null,
             error:      null,
-            offset:     0,       // آخر update_id معالج
-            active:     true,    // للتحكم في إيقاف الـ loop
+            active:     true,
         };
-
-        // تحديث الحالة في قاعدة البيانات
-        await query(
-            `UPDATE telegram_accounts SET status='connected', bot_username=$2, last_activity_at=NOW(), updated_at=NOW() WHERE id=$1`,
-            [id, botInfo.username]
-        ).catch(err => {
-            // إذا لم يكن العمود موجوداً (migrations قديمة)، نحدث بدونه
-            query(
-                `UPDATE telegram_accounts SET status='connected', last_activity_at=NOW(), updated_at=NOW() WHERE id=$1`,
-                [id]
-            ).catch(() => {});
-        });
 
         activeWorkers.set(id, workerState);
 
-        SocketBridge.emit('telegram:worker_started', {
-            accountId:   id,
-            accountName: account.name,
-            botUsername: botInfo.username,
-        });
-
-        // بدء Long Polling في الخلفية
-        TelegramService._longPollLoop(id, workerState).catch(err => {
-            console.error(`[TelegramService] Long poll loop crashed for ${account.name}:`, err.message);
+        // بدء الاتصال في الخلفية
+        TelegramService._connectAndListen(id, workerState).catch(err => {
+            console.error(`[TelegramService] Worker crashed for ${account.name}:`, err.message);
+            workerState.status = 'error';
+            workerState.error  = err.message;
         });
     },
 
-    // ── حلقة Long Polling الحقيقية ──────────────────────────────────────────
-    async _longPollLoop(accountId, state) {
-        console.log(`[TelegramService] Long poll loop started for account: ${state.account.name}`);
+    // ── الاتصال والاستماع ────────────────────────────────────────────────────
+    async _connectAndListen(accountId, state) {
+        const account = state.account;
 
-        while (state.active && activeWorkers.has(accountId)) {
-            try {
-                state.lastCheck = new Date();
-
-                // جلب التحديثات مع long polling (timeout=30 ثانية)
-                const url = telegramUrl(state.account.bot_token, 'getUpdates', {
-                    offset:          state.offset,
-                    timeout:         30,
-                    limit:           100,
-                    allowed_updates: 'message,channel_post,edited_message,edited_channel_post',
-                });
-
-                const result = await httpsGet(url);
-
-                if (!state.active || !activeWorkers.has(accountId)) break;
-
-                if (!result?.ok) {
-                    const errDesc = result?.description || 'Unknown Telegram API error';
-                    console.error(`[TelegramService] getUpdates error for ${state.account.name}:`, errDesc);
-                    state.error = errDesc;
-
-                    // إذا كان الـ token معطّلاً، أوقف الـ worker
-                    if (result?.error_code === 401) {
-                        console.error(`[TelegramService] Bot token revoked for ${state.account.name}`);
-                        break;
-                    }
-
-                    // انتظر قبل المحاولة مجدداً
-                    await TelegramService._sleep(5000);
-                    continue;
-                }
-
-                const updates = result.result || [];
-
-                if (updates.length > 0) {
-                    // معالجة كل تحديث
-                    for (const update of updates) {
-                        await TelegramService._processUpdate(accountId, state, update);
-                        // تحديث الـ offset لتجنب إعادة معالجة نفس التحديث
-                        state.offset = update.update_id + 1;
-                    }
-
-                    // تحديث last_activity في DB
-                    await query(
-                        `UPDATE telegram_accounts SET last_activity_at=NOW() WHERE id=$1`,
-                        [accountId]
-                    ).catch(() => {});
-                }
-
-            } catch (err) {
-                if (!state.active || !activeWorkers.has(accountId)) break;
-                state.error = err.message;
-                console.error(`[TelegramService] Poll error for ${state.account.name}:`, err.message);
-                // انتظر 5 ثوانٍ قبل إعادة المحاولة
-                await TelegramService._sleep(5000);
-            }
-        }
-
-        console.log(`[TelegramService] Long poll loop ended for: ${state.account.name}`);
-
-        // تحديث الحالة في DB عند الإيقاف
-        await query(
-            `UPDATE telegram_accounts SET status='disconnected', updated_at=NOW() WHERE id=$1`,
-            [accountId]
-        ).catch(() => {});
-    },
-
-    // ── معالجة تحديث واحد من Telegram ──────────────────────────────────────
-    async _processUpdate(accountId, state, update) {
         try {
-            // استخراج الرسالة (رسالة عادية، منشور قناة، رسالة معدّلة)
-            const msg = update.message
-                || update.channel_post
-                || update.edited_message
-                || update.edited_channel_post;
+            const session = new StringSession(account.session_string);
+            const client  = new TelegramClient(
+                session,
+                parseInt(account.api_id),
+                account.api_hash,
+                {
+                    connectionRetries: 5,
+                    retryDelay:        3000,
+                    autoReconnect:     true,
+                    // لا نطلب إدخال من المستخدم — نستخدم session_string موجود
+                    baseLogger: { // إخفاء logs التيليجرام الطويلة
+                        error:  (...a) => console.error('[gramjs]', ...a),
+                        warn:   () => {},
+                        info:   () => {},
+                        debug:  () => {},
+                    },
+                }
+            );
 
-            if (!msg) return;
+            state.client = client;
 
-            // نصوص فقط (text أو caption للصور/الفيديو)
-            const text = msg.text || msg.caption || '';
-            if (!text) return;
+            // الاتصال بدون طلب code (session موجود)
+            await client.connect();
 
-            // اسم المجموعة/القناة
-            const chatTitle  = msg.chat?.title || msg.chat?.username || String(msg.chat?.id || '');
-            const chatType   = msg.chat?.type  || 'unknown';
-            const sourceGroup = `${chatTitle} (${chatType})`;
+            if (!await client.isUserAuthorized()) {
+                throw new Error('Session غير صالح — أعد إنشاء session_string');
+            }
 
-            // البحث عن روابط واتساب في النص
-            const rawLinks = text.match(WA_LINK_PATTERN) || [];
+            const me = await client.getMe();
+            console.log(`[TelegramService] Connected as: ${me.username || me.phone} for account "${account.name}"`);
 
-            let saved = 0;
-            for (const raw of rawLinks) {
-                // تنظيف الرابط
-                const link = raw.trim().replace(/[.,;:!?'")\]}]+$/, '');
-                if (!link) continue;
+            // تحديث الحالة
+            state.status = 'running';
+            await query(
+                `UPDATE telegram_accounts
+                 SET status='connected', last_activity_at=NOW(), updated_at=NOW()
+                 WHERE id=$1`,
+                [accountId]
+            ).catch(() => {});
 
-                const result = await TelegramService.saveLink({
-                    whatsapp_link:       link,
-                    source_account_id:   accountId,
-                    source_account_name: state.account.name,
-                    source_group:        sourceGroup,
+            SocketBridge.emit('telegram:worker_started', {
+                accountId:   accountId,
+                accountName: account.name,
+                phone:       me.phone || '',
+                username:    me.username || '',
+            });
+
+            // ── الاستماع للرسائل الجديدة (real-time) ───────────────────────
+            const { NewMessage } = require('telegram/events');
+
+            client.addEventHandler(async (event) => {
+                if (!state.active) return;
+
+                try {
+                    const msg  = event.message;
+                    const text = msg?.text || msg?.message || '';
+                    if (!text) return;
+
+                    state.lastCheck = new Date();
+
+                    // اسم المجموعة/القناة
+                    let sourceGroup = '';
+                    try {
+                        const chat = await event.getChat();
+                        sourceGroup = chat?.title || chat?.username || String(chat?.id || '');
+                    } catch {
+                        sourceGroup = String(msg?.peerId?.channelId || msg?.peerId?.chatId || '');
+                    }
+
+                    const rawLinks = text.match(WA_LINK_PATTERN) || [];
+                    let saved = 0;
+
+                    for (const raw of rawLinks) {
+                        const link = raw.trim().replace(/[.,;:!?'")\]}]+$/, '');
+                        if (!link) continue;
+
+                        const result = await TelegramService.saveLink({
+                            whatsapp_link:       link,
+                            source_account_id:   accountId,
+                            source_account_name: account.name,
+                            source_group:        sourceGroup,
+                        });
+                        if (!result.isDuplicate) saved++;
+                    }
+
+                    if (rawLinks.length > 0) {
+                        state.linksFound += rawLinks.length;
+                        console.log(
+                            `[TelegramService] "${account.name}" — ` +
+                            `found ${rawLinks.length} link(s) in "${sourceGroup}", saved ${saved} new`
+                        );
+                        // تحديث last_activity
+                        query(
+                            `UPDATE telegram_accounts SET last_activity_at=NOW() WHERE id=$1`,
+                            [accountId]
+                        ).catch(() => {});
+                    }
+                } catch (err) {
+                    console.error(`[TelegramService] Message handler error:`, err.message);
+                }
+            }, new NewMessage({}));
+
+            // ── مسح الرسائل القديمة عند الاتصال (اختياري) ──────────────────
+            // يمكن تفعيله لجلب روابط من الرسائل السابقة
+            if (process.env.TELEGRAM_SCAN_HISTORY === 'true') {
+                await TelegramService._scanHistory(client, account, accountId).catch(err => {
+                    console.warn(`[TelegramService] History scan failed:`, err.message);
                 });
-
-                if (!result.isDuplicate) saved++;
             }
 
-            // تحديث عدد الروابط في الـ worker state
-            if (rawLinks.length > 0) {
-                state.linksFound += rawLinks.length;
-                state.error = null; // مسح أي خطأ سابق عند نجاح المعالجة
-
-                console.log(
-                    `[TelegramService] Account "${state.account.name}" — ` +
-                    `found ${rawLinks.length} link(s) in "${chatTitle}", saved ${saved} new`
-                );
-            }
+            // إبقاء الـ client مفتوحاً حتى يُطلب الإيقاف
+            await client.disconnected;
 
         } catch (err) {
-            console.error(`[TelegramService] _processUpdate error:`, err.message);
+            if (!state.active) return; // تم الإيقاف عمداً
+
+            state.status = 'error';
+            state.error  = err.message;
+            console.error(`[TelegramService] Connection error for "${account.name}":`, err.message);
+
+            await query(
+                `UPDATE telegram_accounts SET status='error', updated_at=NOW() WHERE id=$1`,
+                [accountId]
+            ).catch(() => {});
+
+            SocketBridge.emit('telegram:worker_error', {
+                accountId:   accountId,
+                accountName: account.name,
+                error:       err.message,
+            });
+
+            // إعادة المحاولة بعد 60 ثانية
+            if (state.active && activeWorkers.has(accountId)) {
+                console.log(`[TelegramService] Retrying "${account.name}" in 60s...`);
+                await TelegramService._sleep(60000);
+                if (state.active && activeWorkers.has(accountId)) {
+                    await TelegramService._connectAndListen(accountId, state).catch(() => {});
+                }
+            }
         }
+    },
+
+    // ── مسح الرسائل التاريخية (إذا كان TELEGRAM_SCAN_HISTORY=true) ──────────
+    async _scanHistory(client, account, accountId) {
+        console.log(`[TelegramService] Scanning history for "${account.name}"...`);
+        const dialogs = await client.getDialogs({ limit: 200 });
+        let totalFound = 0;
+
+        for (const dialog of dialogs) {
+            if (!dialog.isGroup && !dialog.isChannel) continue;
+            try {
+                const messages = await client.getMessages(dialog.entity, {
+                    limit: 100,
+                    filter: undefined,
+                });
+                for (const msg of messages) {
+                    const text = msg?.text || msg?.message || '';
+                    if (!text) continue;
+                    const rawLinks = text.match(WA_LINK_PATTERN) || [];
+                    for (const raw of rawLinks) {
+                        const link = raw.trim().replace(/[.,;:!?'")\]}]+$/, '');
+                        if (!link) continue;
+                        const result = await TelegramService.saveLink({
+                            whatsapp_link:       link,
+                            source_account_id:   accountId,
+                            source_account_name: account.name,
+                            source_group:        dialog.title || dialog.name || '',
+                        });
+                        if (!result.isDuplicate) totalFound++;
+                    }
+                }
+            } catch { /* تجاهل القنوات التي لا يمكن قراءتها */ }
+        }
+        console.log(`[TelegramService] History scan done: ${totalFound} new links for "${account.name}"`);
     },
 
     // ── إيقاف worker ─────────────────────────────────────────────────────────
@@ -267,7 +269,13 @@ const TelegramService = {
         const worker = activeWorkers.get(accountId);
         if (!worker) return;
 
-        worker.active = false; // إيقاف حلقة الـ polling
+        worker.active = false;
+
+        // قطع اتصال الـ client
+        if (worker.client) {
+            worker.client.disconnect().catch(() => {});
+        }
+
         activeWorkers.delete(accountId);
 
         query(
@@ -293,19 +301,17 @@ const TelegramService = {
             result.push({
                 accountId:   id,
                 accountName: state.account.name,
-                botUsername: state.botInfo?.username || null,
                 status:      state.status,
                 startedAt:   state.startedAt,
                 linksFound:  state.linksFound,
                 lastCheck:   state.lastCheck,
                 error:       state.error,
-                offset:      state.offset,
             });
         }
         return result;
     },
 
-    // ── استقبال رسالة واحدة (webhook / سكريبت Python خارجي) ─────────────────
+    // ── استقبال رسالة من Python / webhook خارجي ─────────────────────────────
     async processIncomingMessage(accountId, accountName, channelOrGroup, message) {
         if (!message || typeof message !== 'string') return;
         try {
@@ -321,10 +327,8 @@ const TelegramService = {
                 });
                 if (!result.isDuplicate) saved++;
             }
-
             const worker = activeWorkers.get(accountId);
             if (worker && saved > 0) worker.linksFound += saved;
-
             return { linksFound: links.length, linksSaved: saved };
         } catch (err) {
             console.error('[TelegramService.processIncomingMessage]', err.message);
@@ -332,29 +336,17 @@ const TelegramService = {
         }
     },
 
-    // ── معالجة تحديث Telegram Bot API (webhook) ─────────────────────────────
+    // ── معالجة webhook من Telegram Bot API ──────────────────────────────────
     async processBotUpdate(accountId, update) {
         try {
             const account = await queryOne(
                 `SELECT id, name FROM telegram_accounts WHERE id = $1`, [accountId]
             );
             if (!account) return;
-
-            // إذا كان الـ worker نشطاً، لا تُعيد المعالجة (تجنب التكرار)
-            const worker = activeWorkers.get(accountId);
-            if (worker) {
-                // الـ worker النشط يعالج التحديثات بنفسه عبر polling
-                // webhook يُستخدم فقط عندما لا يكون polling نشطاً
-                return;
-            }
-
             const msg = update.message || update.channel_post || update.edited_message;
             if (!msg?.text) return;
-
             const group = msg.chat?.title || msg.chat?.username || String(msg.chat?.id || '');
-            await TelegramService.processIncomingMessage(
-                accountId, account.name, group, msg.text
-            );
+            await TelegramService.processIncomingMessage(accountId, account.name, group, msg.text);
         } catch (err) {
             console.error('[TelegramService.processBotUpdate]', err.message);
         }
@@ -421,13 +413,16 @@ const TelegramService = {
         try {
             const accounts = await queryAll(
                 `SELECT * FROM telegram_accounts
-                 WHERE bot_token IS NOT NULL AND status != 'disabled'`
+                 WHERE session_string IS NOT NULL
+                   AND api_id IS NOT NULL
+                   AND api_hash IS NOT NULL
+                   AND status != 'disabled'`
             );
             for (const acc of accounts) {
                 await this.startWorker(acc).catch(err =>
                     console.error(`[TelegramService] Failed to start worker for ${acc.name}:`, err.message)
                 );
-                await TelegramService._sleep(1000); // فاصل بين كل worker
+                await TelegramService._sleep(2000);
             }
             console.log(`[TelegramService] Initialized ${accounts.length} workers`);
         } catch (err) {
@@ -435,10 +430,7 @@ const TelegramService = {
         }
     },
 
-    // ── دالة مساعدة: sleep ───────────────────────────────────────────────────
-    _sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    },
+    _sleep(ms) { return new Promise(r => setTimeout(r, ms)); },
 };
 
 module.exports = TelegramService;
