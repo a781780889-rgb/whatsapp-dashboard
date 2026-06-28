@@ -285,6 +285,11 @@ router.post('/accounts/:accountId/broadcast/schedules/:id/start', auth, Broadcas
 router.post('/accounts/:accountId/broadcast/direct',              auth, BroadcastController.directPublish.bind(BroadcastController));
 router.get('/accounts/:accountId/broadcast/log',                  auth, BroadcastController.getDirectPublishLog.bind(BroadcastController));
 
+// ── Live Publish — نشر مباشر متعدد الحسابات مع Socket.IO ────────────────────
+router.post('/live-publish/start',                   auth, BroadcastController.startLivePublish.bind(BroadcastController));
+router.post('/live-publish/:sessionId/control',      auth, BroadcastController.controlLivePublish.bind(BroadcastController));
+router.get ('/live-publish/:sessionId/status',       auth, BroadcastController.getLivePublishStatus.bind(BroadcastController));
+
 // ── Schedule Monitor ──────────────────────────────────────────────────────────
 const ScheduleMonitorController = require('./controllers/ScheduleMonitorController');
 router.get('/accounts/:accountId/broadcast/monitor',              auth, ScheduleMonitorController.getMonitor.bind(ScheduleMonitorController));
