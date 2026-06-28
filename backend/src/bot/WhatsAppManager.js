@@ -152,6 +152,21 @@ class WhatsAppManager {
             for (const msg of messages) {
                 if (!msg.message) continue;
                 emit('new_message', { accountId, message: msg });
+
+                // ── مراقبة الكلمات المفتاحية ───────────────────────────────
+                // نتحقق فقط من رسائل المجموعات الواردة (من الآخرين)
+                if (!msg.key?.fromMe && msg.key?.remoteJid?.endsWith('@g.us')) {
+                    try {
+                        // جلب user_id من الحساب
+                        const acct = await SystemDB.get(
+                            `SELECT user_id FROM accounts WHERE id=$1`, [accountId]
+                        ).catch(() => null);
+                        if (acct?.user_id) {
+                            const KWService = require('../api/services/KeywordMonitoringService');
+                            KWService.processIncomingMessage(accountId, acct.user_id, msg).catch(() => {});
+                        }
+                    } catch {}
+                }
             }
         });
 
