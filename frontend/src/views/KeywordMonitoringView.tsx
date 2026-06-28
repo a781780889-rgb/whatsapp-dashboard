@@ -1112,4 +1112,3 @@ export default function KeywordMonitoringView() {
     </div>
   );
 }
-
