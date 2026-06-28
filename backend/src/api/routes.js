@@ -477,6 +477,31 @@ router.get ('/admin/infra/process',          auth, role('admin'),  Infrastructur
 
 
 // ══════════════════════════════════════════════════════
+//  KEYWORD MONITORING
+// ══════════════════════════════════════════════════════
+const KWController = require('./controllers/KeywordMonitoringController');
+
+// الكلمات المفتاحية
+router.get   ('/keywords',              auth, KWController.listKeywords.bind(KWController));
+router.post  ('/keywords',              auth, KWController.addKeyword.bind(KWController));
+router.patch ('/keywords/:id',          auth, KWController.updateKeyword.bind(KWController));
+router.delete('/keywords/:id',          auth, KWController.deleteKeyword.bind(KWController));
+router.get   ('/keywords/export',       auth, KWController.exportKeywords.bind(KWController));
+router.post  ('/keywords/import',       auth, KWController.importKeywords.bind(KWController));
+
+// التنبيهات
+router.get   ('/keyword-alerts',        auth, KWController.listAlerts.bind(KWController));
+router.patch ('/keyword-alerts/:id',    auth, KWController.updateAlertStatus.bind(KWController));
+router.delete('/keyword-alerts/:id',    auth, KWController.deleteAlert.bind(KWController));
+router.post  ('/keyword-alerts/:id/note', auth, KWController.addAlertNote.bind(KWController));
+
+// الإحصائيات والإعدادات والسجل
+router.get   ('/keywords/stats',        auth, KWController.getStats.bind(KWController));
+router.get   ('/keywords/settings',     auth, KWController.getSettings.bind(KWController));
+router.post  ('/keywords/settings',     auth, KWController.saveSettings.bind(KWController));
+router.get   ('/keywords/activity-log', auth, KWController.getActivityLog.bind(KWController));
+
+// ══════════════════════════════════════════════════════
 //  TELEGRAM SYSTEM
 // ══════════════════════════════════════════════════════
 const TelegramController = require("./controllers/TelegramController");
