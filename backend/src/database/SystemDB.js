@@ -172,6 +172,65 @@ const SystemDB = {
             )
         `);
 
+        // ── Keyword Monitoring Tables ─────────────────────────────────────
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS kw_keywords (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL,
+                word TEXT NOT NULL,
+                category TEXT DEFAULT 'عام',
+                priority VARCHAR(20) DEFAULT 'normal',
+                color VARCHAR(20) DEFAULT '#00A884',
+                case_sensitive BOOLEAN DEFAULT FALSE,
+                is_active BOOLEAN DEFAULT TRUE,
+                match_count INT DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_kw_keywords_user ON kw_keywords(user_id)`).catch(() => {});
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS kw_alerts (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL,
+                keyword_id UUID,
+                matched_keyword TEXT NOT NULL,
+                message_text TEXT,
+                sender_name TEXT,
+                sender_phone TEXT,
+                group_name TEXT,
+                group_jid TEXT,
+                account_id UUID,
+                message_time TIMESTAMPTZ DEFAULT NOW(),
+                status VARCHAR(30) DEFAULT 'new',
+                internal_note TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_kw_alerts_user ON kw_alerts(user_id, message_time DESC)`).catch(() => {});
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_kw_alerts_status ON kw_alerts(user_id, status)`).catch(() => {});
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS kw_settings (
+                user_id UUID PRIMARY KEY,
+                settings JSONB DEFAULT '{}',
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS kw_activity_log (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL,
+                action VARCHAR(100),
+                details TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_kw_activity_user ON kw_activity_log(user_id, created_at DESC)`).catch(() => {});
+
         // ── Telegram System Tables ────────────────────────────────────────
         const TelegramMigrations = require('./TelegramMigrations');
         await TelegramMigrations.run();
