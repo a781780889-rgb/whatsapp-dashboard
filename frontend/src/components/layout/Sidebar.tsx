@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Library, Send, Calendar,
   Megaphone, Link as LinkIcon, LogOut, ChevronRight,
   UsersRound, BarChart3, Crown, Shield, Rocket, Brain, Activity,
-  GitMerge, MessageCircle, CreditCard, Monitor
+  GitMerge, MessageCircle, CreditCard, Monitor, SearchCheck
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 
@@ -41,9 +41,10 @@ export function Sidebar({ isCollapsed, setIsCollapsed, currentUser, onLogout }: 
     {
       section: 'الروابط والحماية',
       items: [
-        { to: '/links',      icon: LinkIcon,  label: 'مراقبة الروابط'      },
-        { to: '/link-join',  icon: GitMerge,  label: 'الانضمام بالروابط'   },
-        { to: '/protection', icon: Shield,    label: 'نظام الحماية'         },
+        { to: '/links',      icon: LinkIcon,    label: 'مراقبة الروابط'      },
+        { to: '/link-join',  icon: GitMerge,    label: 'الانضمام بالروابط'   },
+        { to: '/protection', icon: Shield,       label: 'نظام الحماية'         },
+        { to: '/keywords',   icon: SearchCheck,  label: 'الكلمات المفتاحية'   },
       ]
     },
   
