@@ -17,6 +17,7 @@ import DirectPublishView    from './views/DirectPublishView';
 import PrivateCampaignsView from './views/PrivateCampaignsView';
 import ProtectionView      from './views/ProtectionView';
 import AIAutomationView    from './views/AIAutomationView';
+import KeywordMonitoringView from './views/KeywordMonitoringView';
 // Admin views
 import DiagnosticsDashboardView from './views/DiagnosticsDashboardView';
 import TelegramView         from './views/TelegramView';
@@ -208,6 +209,7 @@ function AppInner() {
           <Route path="/direct-publish" element={<DirectPublishView    accountId={selectedAccountId} accounts={accounts} />} />
           <Route path="/protection"    element={<ProtectionView />} />
           <Route path="/ai-automation" element={<AIAutomationView />} />
+          <Route path="/keywords"      element={<KeywordMonitoringView />} />
           <Route path="/diagnostics"   element={<DiagnosticsDashboardView accountId={selectedAccountId} />} />
 
           {/* Admin-only routes */}
