@@ -2,8 +2,27 @@ const DatabaseManager = require('../../database/DatabaseManager');
 const crypto = require('crypto');
 const JobScheduler = require('../../scheduler/JobScheduler');
 const WhatsAppManager = require('../../bot/WhatsAppManager');
+const { ProtectionService } = require('./ProtectionService');
+const { queryAll: pgQueryAll } = require('../../lib/postgres');
 
 class CampaignService {
+
+    // ── [البند 1+2] جلب userId لحساب معين (لاستخدام Redis-backed ProtectionService
+    //    المرتبط بالمستخدم وليس بالحساب فقط) — كاش قصير لتفادي ضغط DB ──────────
+    async _getUserId(accountId) {
+        this._userIdCache = this._userIdCache || new Map();
+        const cached = this._userIdCache.get(accountId);
+        if (cached && (Date.now() - cached.ts) < 60000) return cached.userId;
+        try {
+            const rows = await pgQueryAll(`SELECT user_id FROM accounts WHERE id = $1`, [accountId]);
+            const userId = rows?.[0]?.user_id || null;
+            this._userIdCache.set(accountId, { userId, ts: Date.now() });
+            return userId;
+        } catch {
+            return null;
+        }
+    }
+
     async preflightCheck(accountId, { targetType, targetIds, excludeAdmins, excludeDuplicates }) {
         let totalRaw = 0;
         let finalTargets = new Set();
@@ -111,6 +130,12 @@ class CampaignService {
         const campaign = await accountDB.get(`SELECT * FROM campaigns WHERE id = $1`, [campaignId]);
         if (!campaign) throw new Error('Campaign not found');
 
+        // [البند 3] لا نبدأ حملة على حساب موقوف تلقائياً (محظور/متجاوز عتبة الأخطاء)
+        const userId = await this._getUserId(accountId);
+        if (userId && await ProtectionService.getInstance().isSuspended(userId, accountId)) {
+            throw new Error('الحساب موقوف تلقائياً بسبب الحماية (حظر أو أخطاء متكررة) — لا يمكن بدء الحملة');
+        }
+
         // 2. Update status
         await accountDB.run(`UPDATE campaigns SET status = 'running', updated_at = NOW() WHERE id = $1`, [campaignId]);
 
@@ -121,10 +146,18 @@ class CampaignService {
         const ad = await accountDB.get(`SELECT * FROM ad_library WHERE id = $1`, [campaign.ad_library_id]);
         
         // 5. Queue into JobScheduler
-        let delayCounter = 0;
+        // [البند 1+2] فاصل عشوائي (Jitter) بدل الفاصل الرياضي الثابت 100%
+        // (delayCounter * intervalSeconds كان نمطاً منتظماً يسهل اكتشافه). نحافظ
+        // على ترتيب تصاعدي تراكمي مع تباين ±40% حول القيمة الأساسية.
+        const intervalMs = Math.max(0, (campaign.interval_seconds || 10) * 1000);
+        let cumulativeDelayMs = 0;
         for (const target of targets) {
-            // Apply interval delay
-            const executeAt = new Date(Date.now() + (delayCounter * (campaign.interval_seconds * 1000)));
+            if (cumulativeDelayMs > 0 || targets.indexOf(target) > 0) {
+                const jitterSpan = intervalMs * 0.4;
+                const jitter = Math.random() * jitterSpan;
+                cumulativeDelayMs += intervalMs + jitter - (jitterSpan / 2);
+            }
+            const executeAt = new Date(Date.now() + Math.max(0, Math.round(cumulativeDelayMs)));
             
             await JobScheduler.scheduleTask(
                 accountId, 
@@ -139,10 +172,9 @@ class CampaignService {
                 executeAt,
                 10 // priority
             );
-            delayCounter++;
         }
 
-        await this.logEvent(accountDB, campaignId, 'info', `Campaign started. Queued ${targets.length} messages with ${campaign.interval_seconds}s interval.`);
+        await this.logEvent(accountDB, campaignId, 'info', `Campaign started. Queued ${targets.length} messages with ${campaign.interval_seconds}s interval (randomized).`);
         return { success: true, queued: targets.length };
     }
 
@@ -151,10 +183,13 @@ class CampaignService {
         
         await accountDB.run(`UPDATE campaigns SET status = 'paused', updated_at = NOW() WHERE id = $1`, [campaignId]);
 
-        // Section 9.3 (BullMQ): BullMQ worker checks campaign status before sending.
-        // Paused campaigns are automatically skipped by the worker. No need to delete queue entries.
-        await this.logEvent(accountDB, campaignId, 'info', `Campaign paused. BullMQ worker will skip remaining pending jobs.`);
-        return { success: true };
+        // [البند 3] إلغاء فعلي للمهام المعلّقة من BullMQ بدل الاعتماد فقط على
+        // أن الـ Worker "سيتخطاها" لاحقاً عند سحبها — هذا يوفر موارد ويمنع
+        // أي احتمال تسرّب مهام قديمة بعد إعادة تشغيل الحملة لاحقاً بنفس المعرف.
+        const cancelled = await JobScheduler.pauseCampaignJobs(campaignId);
+        await this.logEvent(accountDB, campaignId, 'info',
+            `Campaign paused. ${cancelled || 0} pending job(s) cancelled from queue.`);
+        return { success: true, cancelled: cancelled || 0 };
     }
 
     async getStats(accountId, campaignId) {
