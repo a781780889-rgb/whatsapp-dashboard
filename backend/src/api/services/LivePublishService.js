@@ -13,6 +13,8 @@ const fs         = require('fs');
 const WhatsAppManager = require('../../bot/WhatsAppManager');
 const DatabaseManager = require('../../database/DatabaseManager');
 const SocketBridge    = require('../../core/SocketBridge');
+const { ProtectionService } = require('./ProtectionService');
+const { queryAll: pgQueryAll } = require('../../lib/postgres');
 
 const MAX_RETRY   = 2;
 const ROOM_PRE    = 'live_publish:';
@@ -145,6 +147,40 @@ class LiveSession {
 class LivePublishService {
     constructor() {
         this._sessions = new Map();
+        this._userIdCache = new Map(); // [البند 1+2] كاش بسيط: accountId → { userId, ts }
+    }
+
+    // ── [البند 1+2] جلب userId لحساب معين، بكاش قصير لتفادي ضغط DB داخل
+    //    حلقات الإرسال الكثيفة في جلسات Live Publish الطويلة ─────────────────
+    async _getUserId(accountId) {
+        const cached = this._userIdCache.get(accountId);
+        if (cached && (Date.now() - cached.ts) < 60000) return cached.userId;
+        try {
+            const rows = await pgQueryAll(`SELECT user_id, created_at FROM accounts WHERE id = $1`, [accountId]);
+            const userId    = rows?.[0]?.user_id || null;
+            const createdAt = rows?.[0]?.created_at || null;
+            this._userIdCache.set(accountId, { userId, createdAt, ts: Date.now() });
+            return userId;
+        } catch {
+            return null;
+        }
+    }
+
+    async _getAccountCreatedAt(accountId) {
+        const cached = this._userIdCache.get(accountId);
+        if (cached) return cached.createdAt || null;
+        await this._getUserId(accountId);
+        return this._userIdCache.get(accountId)?.createdAt || null;
+    }
+
+    // ── [البند 1+2] تأخير آمن وعشوائي بدل أي قيمة ثابتة من delays{} ──────────
+    async _safeDelay(accountId, operationType = 'group') {
+        const userId = await this._getUserId(accountId);
+        if (!userId) {
+            const ms = 800 + Math.floor(Math.random() * 700);
+            return new Promise(r => setTimeout(r, ms));
+        }
+        return ProtectionService.getInstance().safeDelay(userId, operationType);
     }
 
     // ── API عام ──────────────────────────────────────────────────
@@ -177,11 +213,11 @@ class LivePublishService {
 
     // ── الحلقة الرئيسية ───────────────────────────────────────────
     async _run(sess) {
-        const {
-            accountIds, accountsInfo, groupJids,
-            sendToMembers, excludeAdmins, messages, delays,
-        } = sess.cfg;
-        const { memberDelayMs, groupDelayMs, adDelayMs } = delays;
+        const { accountIds, accountsInfo, groupJids, sendToMembers, excludeAdmins, messages } = sess.cfg;
+        // [البند 1+2] delays{} (memberDelayMs/groupDelayMs/adDelayMs) لم تعد تُستخدم
+        // فعلياً للتوقيت — استُبدلت بالكامل بـ ProtectionService.safeDelay العشوائي
+        // المرتبط بإعدادات الحماية لكل مستخدم. أُبقيت في cfg فقط للتوافق العكسي
+        // مع أي استدعاء قديم لـ create() يمرّرها.
 
         // تهيئة الإجماليات
         const totalGroups = accountIds.length * groupJids.length;
@@ -212,11 +248,27 @@ class LivePublishService {
                 continue;
             }
 
+            // [البند 3] لا نبدأ بحساب موقوف تلقائياً (محظور / متجاوز عتبة الأخطاء)
+            const accUserId = await this._getUserId(accountId);
+            if (accUserId && await ProtectionService.getInstance().isSuspended(accUserId, accountId)) {
+                sess.log('error', `🚫 الحساب "${accName}" موقوف تلقائياً (حماية) — تم تخطي كل مجموعاته`);
+                sess.stats.errorCount++;
+                sess.stats.completedGroups += groupJids.length;
+                sess.tick();
+                continue;
+            }
+            let accountSuspendedMidRun = false; // [البند 3] توقف فوري لهذا الحساب لو تعلّق أثناء التشغيل
+
             let accountDB;
             try { accountDB = await DatabaseManager.getAccountDB(accountId); } catch { accountDB = null; }
 
             // ── حلقة المجموعات ────────────────────────────────────
             for (const jid of groupJids) {
+                if (accountSuspendedMidRun) {
+                    sess.stats.completedGroups++;
+                    sess.tick();
+                    continue;
+                }
                 if (!(await sess.waitIfPaused())) break;
 
                 const groupName = await this._groupName(accountDB, jid);
@@ -224,23 +276,33 @@ class LivePublishService {
                 sess.log('info', `📍 المجموعة: ${groupName}`);
 
                 // ── إرسال الإعلانات للمجموعة ──────────────────────
-                for (let i = 0; i < messages.length; i++) {
+                for (let i = 0; i < messages.length && !accountSuspendedMidRun; i++) {
                     if (!(await sess.waitIfPaused())) break;
                     const msg = messages[i];
                     sess.tick({ currentAdName: msg.name || 'رسالة مخصصة' });
 
                     let sent = false;
-                    for (let attempt = 1; attempt <= MAX_RETRY + 1 && !sent; attempt++) {
+                    for (let attempt = 1; attempt <= MAX_RETRY + 1 && !sent && !accountSuspendedMidRun; attempt++) {
                         try {
-                            await this._send(waSession, jid, msg);
+                            await this._send(accountId, jid, msg, { operationType: 'group' });
                             sess.stats.sentMessages++;
                             sess.recordSent();
                             sess.log('success', `✅ "${msg.name || 'رسالة'}" → ${groupName}`);
                             sent = true;
                         } catch (e) {
-                            if (attempt <= MAX_RETRY) {
+                            // [البند 3] حظر/تعليق = توقف فوري بدون إعادة محاولة على الإطلاق
+                            if (e.protectionReason === 'account_suspended') {
+                                accountSuspendedMidRun = true;
+                                sess.stats.failedMessages++;
+                                sess.stats.errorCount++;
+                                sess.log('error', `🚫 الحساب تعلّق أثناء الإرسال — إيقاف فوري لكل عمليات هذا الحساب`, e.message);
+                                break;
+                            }
+                            // [البند 8] لا نعيد المحاولة لأخطاء غير قابلة لإعادة المحاولة (مثل invalid jid)
+                            const nonRetryable = e.protectionReason && e.protectionReason !== 'rate_limit_hour' && e.protectionReason !== 'rate_limit_day';
+                            if (attempt <= MAX_RETRY && !nonRetryable) {
                                 sess.log('warning', `⚠️ إعادة المحاولة ${attempt}/${MAX_RETRY} — ${groupName}`, e.message);
-                                await this._sleep(600 * attempt);
+                                await this._safeDelay(accountId, 'group');
                             } else {
                                 sess.stats.failedMessages++;
                                 sess.stats.errorCount++;
@@ -249,11 +311,14 @@ class LivePublishService {
                         }
                     }
                     sess.tick();
-                    if (i < messages.length - 1) await this._sleep(adDelayMs);
+                    if (i < messages.length - 1 && !accountSuspendedMidRun) {
+                        // [البند 1+2] تأخير عشوائي آمن بدل adDelayMs الثابت
+                        await this._safeDelay(accountId, 'group');
+                    }
                 }
 
                 // ── إرسال خاص للأعضاء ─────────────────────────────
-                if (sendToMembers) {
+                if (sendToMembers && !accountSuspendedMidRun) {
                     if (!(await sess.waitIfPaused())) break;
                     try {
                         const membersInfo = await WhatsAppManager.getGroupMembers(accountId, jid);
@@ -265,11 +330,12 @@ class LivePublishService {
                         sess.log('info', `👥 رسائل خاصة لـ ${targets.length} عضو في ${groupName}`);
 
                         for (const memberJid of targets) {
+                            if (accountSuspendedMidRun) break;
                             if (!(await sess.waitIfPaused())) break;
-                            for (let i = 0; i < messages.length; i++) {
+                            for (let i = 0; i < messages.length && !accountSuspendedMidRun; i++) {
                                 const msg = messages[i];
                                 try {
-                                    await this._send(waSession, memberJid, msg);
+                                    await this._send(accountId, memberJid, msg, { operationType: 'private' });
                                     sess.stats.sentMembers++;
                                     sess.recordSent();
                                     sess.log('success', `✅ خاص → ${memberJid.split('@')[0]}`);
@@ -277,11 +343,21 @@ class LivePublishService {
                                     sess.stats.failedMembers++;
                                     sess.stats.errorCount++;
                                     sess.log('error', `❌ خاص → ${memberJid.split('@')[0]}`, e.message);
+                                    // [البند 3] توقف فوري لكل عمليات هذا الحساب عند تعليقه
+                                    if (e.protectionReason === 'account_suspended') {
+                                        accountSuspendedMidRun = true;
+                                        sess.log('error', `🚫 الحساب تعلّق أثناء الإرسال الخاص — إيقاف فوري`);
+                                    }
                                 }
                                 sess.tick();
-                                if (i < messages.length - 1) await this._sleep(adDelayMs);
+                                if (i < messages.length - 1 && !accountSuspendedMidRun) {
+                                    await this._safeDelay(accountId, 'private');
+                                }
                             }
-                            await this._sleep(memberDelayMs);
+                            if (!accountSuspendedMidRun) {
+                                // [البند 1+2] تأخير عشوائي آمن بدل memberDelayMs الثابت
+                                await this._safeDelay(accountId, 'private');
+                            }
                         }
                     } catch (e) {
                         sess.log('error', `فشل جلب أعضاء ${groupName}`, e.message);
@@ -292,7 +368,10 @@ class LivePublishService {
                 sess.stats.completedGroups++;
                 sess.tick();
                 sess.log('info', `✓ اكتملت: ${groupName}`);
-                await this._sleep(groupDelayMs);
+                if (!accountSuspendedMidRun) {
+                    // [البند 1+2] تأخير عشوائي آمن بدل groupDelayMs الثابت
+                    await this._safeDelay(accountId, 'group');
+                }
             }
         }
 
@@ -332,26 +411,28 @@ class LivePublishService {
         }
     }
 
-    async _send(waSession, jid, msg) {
+    // ── [البند 1] إرسال محمي عبر النقطة المركزية الوحيدة في WhatsAppManager:
+    //    فحص حدود + محاكاة بشرية + تسجيل نجاح/فشل تلقائي. لا إرسال مباشر. ────
+    async _send(accountId, jid, msg, options = {}) {
         const MEDIA_BASE = path.resolve(__dirname, '../../../../');
+        let content;
         if (msg.mediaPaths?.length) {
-            const mp  = path.join(MEDIA_BASE, msg.mediaPaths[0]);
+            const mp = path.join(MEDIA_BASE, msg.mediaPaths[0]);
             if (fs.existsSync(mp)) {
                 const buf = fs.readFileSync(mp);
                 const ext = path.extname(mp).toLowerCase();
                 if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
-                    return waSession.sendMessage(jid, { image: buf, caption: msg.text || '' });
+                    content = { image: buf, caption: msg.text || '' };
+                } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
+                    content = { video: buf, caption: msg.text || '' };
+                } else {
+                    content = { document: buf, caption: msg.text || '', fileName: path.basename(mp) };
                 }
-                if (['.mp4', '.mov', '.avi'].includes(ext)) {
-                    return waSession.sendMessage(jid, { video: buf, caption: msg.text || '' });
-                }
-                return waSession.sendMessage(jid, {
-                    document: buf, caption: msg.text || '',
-                    fileName: path.basename(mp),
-                });
             }
         }
-        return waSession.sendMessage(jid, { text: msg.text || ' ' });
+        if (!content) content = { text: msg.text || ' ' };
+
+        return WhatsAppManager.sendMessageSafe(accountId, jid, content, options);
     }
 
     _sleep(ms) { return new Promise(r => setTimeout(r, Math.max(0, ms))); }
