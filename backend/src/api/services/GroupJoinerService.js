@@ -19,6 +19,8 @@
  *   all      — جميع الحسابات المتاحة
  */
 const WhatsAppManager = require('../../bot/WhatsAppManager');
+const { ProtectionService } = require('./ProtectionService');
+const { queryAll: pgQueryAll } = require('../../lib/postgres');
 
 class GroupJoinerService {
     constructor() {
@@ -28,6 +30,26 @@ class GroupJoinerService {
         this._scheduledTimers   = [];   // مؤقتات الجدولة
         this._totalProcessed    = 0;
         this._totalSucceeded    = 0;
+        this._userIdCache       = new Map(); // [البند 1+4+7] accountId → { userId, createdAt, ts }
+    }
+
+    // ── [البند 1+4+7] جلب userId + تاريخ إنشاء الحساب (لـ Warm-up) مع كاش
+    //    قصير لتفادي ضغط DB أثناء معالجة قائمة انتظار طويلة ─────────────────
+    async _getAccountMeta(accountId) {
+        const cached = this._userIdCache.get(accountId);
+        if (cached && (Date.now() - cached.ts) < 60000) return cached;
+        try {
+            const rows = await pgQueryAll(`SELECT user_id, created_at FROM accounts WHERE id = $1`, [accountId]);
+            const meta = {
+                userId:    rows?.[0]?.user_id || null,
+                createdAt: rows?.[0]?.created_at || null,
+                ts: Date.now(),
+            };
+            this._userIdCache.set(accountId, meta);
+            return meta;
+        } catch {
+            return { userId: null, createdAt: null, ts: Date.now() };
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -146,35 +168,126 @@ class GroupJoinerService {
         this._processing = true;
         console.log('[GroupJoiner] Processing queue...');
 
+        // [البند 4] تتبّع الحسابات الموقوفة أثناء هذه الجلسة لتفادي إعادة فحص
+        // Redis لكل عنصر من نفس الحساب الموقوف (تحسين أداء، ليس بديلاً عن
+        // الفحص الفعلي داخل _joinGroup الذي يبقى مصدر الحقيقة).
+        const suspendedThisRun = new Set();
+
         while (this._queue.length > 0) {
             const item = this._queue.shift();
 
-            // ── تطبيق التأخير للوضع المؤجل ──────────────────────────────────
+            if (suspendedThisRun.has(item.accountId)) {
+                this._results.push({
+                    ...item,
+                    result: { success: false, error: 'الحساب موقوف تلقائياً — تم تخطي العنصر' },
+                    ts: new Date().toISOString(),
+                });
+                this._totalProcessed++;
+                continue;
+            }
+
+            // ── تطبيق التأخير للوضع المؤجل — [البند 1+2] مع جزء عشوائي بسيط
+            //    (±10%) بدل قيمة دقيقة للثانية بالضبط يحددها المستخدم حرفياً ──
             if (item.delaySeconds > 0) {
-                console.log(`[GroupJoiner] Waiting ${item.delaySeconds}s before: ${item.link}`);
-                await new Promise(r => setTimeout(r, item.delaySeconds * 1000));
+                const jitterFrac = 0.9 + Math.random() * 0.2; // 90%–110%
+                const ms = Math.round(item.delaySeconds * 1000 * jitterFrac);
+                console.log(`[GroupJoiner] Waiting ~${Math.round(ms/1000)}s before: ${item.link}`);
+                await new Promise(r => setTimeout(r, ms));
             }
 
             const result = await this._joinGroup(item);
             this._totalProcessed++;
             if (result.success) this._totalSucceeded++;
+            if (result.suspended) suspendedThisRun.add(item.accountId);
 
             this._results.push({ ...item, result, ts: new Date().toISOString() });
             if (this._results.length > 100) this._results.shift();
 
-            // تأخير عشوائي لمنع الحظر (3–8 ثواني)
-            const antiBan = 3000 + Math.floor(Math.random() * 5000);
-            await new Promise(r => setTimeout(r, antiBan));
+            // [البند 1+2+4] تأخير عشوائي آمن بدل antiBan الثابت يدوياً — يحترم
+            // إعدادات الحماية الفعلية للمستخدم (min/max/jitter) بدل قيمة مكتوبة
+            // بالكود، ومرتبط بـ operationType='group' (عداد منفصل عن الخاص)
+            if (!suspendedThisRun.has(item.accountId)) {
+                await this._safeDelay(item.accountId);
+            }
         }
 
         this._processing = false;
         console.log('[GroupJoiner] Queue drained.');
     }
 
+    // ── [البند 1+2] تأخير آمن وعشوائي مرتبط بإعدادات حماية المستخدم؛ يتدهور
+    //    بأمان لقيمة عشوائية بسيطة (3-8 ثوانٍ، كالسلوك الأصلي) إن تعذّر تحديد
+    //    userId ─────────────────────────────────────────────────────────────
+    async _safeDelay(accountId) {
+        const { userId } = await this._getAccountMeta(accountId);
+        if (!userId) {
+            const ms = 3000 + Math.floor(Math.random() * 5000);
+            return new Promise(r => setTimeout(r, ms));
+        }
+        return ProtectionService.getInstance().safeDelay(userId, 'group');
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
-    //  الانضمام لمجموعة واحدة
+    //  الانضمام لمجموعة واحدة — [البند 1] محمي بالكامل عبر ProtectionService
     // ══════════════════════════════════════════════════════════════════════════
     async _joinGroup({ accountId, link, linkId }) {
+        const { userId, createdAt } = await this._getAccountMeta(accountId);
+        const taskId = linkId || `${accountId}:${link}`;
+
+        // إن لم نجد user_id (حالة نادرة/بيانات قديمة) ننفذ مباشرة دون حماية —
+        // بدل رمي خطأ يكسر التوافق العكسي — مع تحذير صريح في السجل.
+        if (!userId) {
+            console.warn(`[GroupJoiner] _joinGroup: no user_id for account ${accountId} — joining WITHOUT protection.`);
+            return this._doJoin(accountId, link);
+        }
+
+        const svc = ProtectionService.getInstance();
+
+        // [البند 1+3] فحص قبل أي محاولة انضمام: حدود الانضمام الساعية/اليومية
+        // (operationType='group' — عداد منفصل عن الخاص حسب البند 6)، Warm-up
+        // للحسابات الجديدة (البند 7)، وحالة التعليق (محظور/متجاوز أخطاء)
+        const check = await svc.checkOperation(userId, accountId, {
+            operationType: 'group',
+            accountCreatedAt: createdAt,
+        });
+        if (!check.allowed) {
+            const isSuspended = check.reason === 'account_suspended';
+            console.warn(`[GroupJoiner] checkOperation rejected for ${accountId}: ${check.reason}`);
+            return { success: false, error: check.message || 'تم رفض العملية بواسطة نظام الحماية', suspended: isSuspended };
+        }
+
+        try {
+            const result = await this._doJoin(accountId, link);
+            if (result.success) {
+                await svc.recordSuccess(userId, accountId, taskId, { operationType: 'group' });
+                return result;
+            } else {
+                // [البند 8] نستخدم النص الخام الأصلي (_rawError) للتصنيف الصحيح في
+                // ProtectionService — النص "المُجمَّل" (result.error) عربي وودي
+                // للمستخدم لكنه قد يُفقد كلمات مفتاحية يعتمد عليها classifyError
+                // (مثل forbidden/rate-overlimit) فلا نستخدمه للتصنيف.
+                const rawMsg = result._rawError || result.error || 'فشل الانضمام';
+                const syntheticErr = new Error(rawMsg);
+                const fail = await svc.recordFailure(userId, accountId, taskId, rawMsg, {
+                    operationType: 'group',
+                    errorObject: syntheticErr,
+                });
+                const { _rawError, ...publicResult } = result;
+                return { ...publicResult, suspended: !!fail.suspended };
+            }
+        } catch (err) {
+            // مسار احتياطي: لو _doJoin رمى استثناء فعلياً بدل إرجاع { success:false }
+            const fail = await svc.recordFailure(userId, accountId, taskId, err.message, {
+                operationType: 'group',
+                errorObject: err,
+            });
+            return { success: false, error: this._friendlyError(err.message), suspended: !!fail.suspended };
+        }
+    }
+
+    // ── [البند 1] تنفيذ الانضمام الفعلي فقط — منفصل عن منطق الحماية أعلاه
+    //    لإبقاء كل مسار (محمي / غير محمي fallback) يستدعي نفس الكود الفعلي ───
+    async _doJoin(accountId, link) {
         try {
             const sock = WhatsAppManager.getSession(accountId);
             if (!sock) {
@@ -194,7 +307,7 @@ class GroupJoinerService {
         } catch (err) {
             console.error(`[GroupJoiner] ❌ ${link}:`, err.message);
             const friendly = this._friendlyError(err.message);
-            return { success: false, error: friendly };
+            return { success: false, error: friendly, _rawError: err.message };
         }
     }
 
