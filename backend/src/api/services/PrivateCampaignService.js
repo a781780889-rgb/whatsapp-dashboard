@@ -1,6 +1,7 @@
 const { Pool } = require('pg');
 const crypto = require('crypto');
 const WhatsAppManager = require('../../bot/WhatsAppManager');
+const { ProtectionService } = require('./ProtectionService');
 
 // ─── DB Pool (system-level, not per-account) ──────────────────────────────────
 const pool = new Pool({
@@ -248,10 +249,21 @@ class PrivateCampaignService {
             // حساب تأخير بدء الإرسال إذا كان start_time في المستقبل
             const startDelay = Math.max(0, new Date(campaign.start_time).getTime() - Date.now());
 
+            // [البند 1+2] فاصل عشوائي (Jitter) بدل الفاصل الرياضي الثابت 100%
+            // (delayMs = i * intervalMs كان نمطاً منتظماً يسهل اكتشافه). نحافظ
+            // على الترتيب التصاعدي العام (تراكمي) لكن مع تباين ±40% حول القيمة
+            // الأساسية، بما يطابق صيغة baseDelay + random(0..40%) المطلوبة.
+            let cumulativeDelay = startDelay;
             let enqueuedCount = 0;
             for (let i = 0; i < targets.length; i++) {
-                const target  = targets[i];
-                const delayMs = startDelay + (i * intervalMs);
+                const target = targets[i];
+
+                if (i > 0) {
+                    const jitterSpan = intervalMs * 0.4;
+                    const jitter = Math.random() * jitterSpan;
+                    cumulativeDelay += intervalMs + jitter - (jitterSpan / 2); // متمركز حول intervalMs
+                }
+                const delayMs = Math.max(0, Math.round(cumulativeDelay));
 
                 await QueueManager.enqueuePrivateCampaignMessage(
                     target.account_id,
@@ -383,20 +395,43 @@ class PrivateCampaignService {
 
         // تحقق من حالة الحملة قبل الإرسال (قد تكون مُوقَفة)
         const statusRes = await pool.query(
-            `SELECT status FROM private_campaigns WHERE id=$1`,
+            `SELECT status, user_id FROM private_campaigns WHERE id=$1`,
             [campaignId]
         );
         const campaignStatus = statusRes.rows[0]?.status;
+        const campaignUserId = statusRes.rows[0]?.user_id;
 
         if (campaignStatus !== 'running') {
             console.log(`[PrivateCampaign] Skipping job — campaign ${campaignId} status: ${campaignStatus}`);
             return; // المهمة تُكمل بنجاح (لا retry) لأن الإيقاف متعمَّد
         }
 
-        // محاولة الإرسال
+        // [البند 3] لا نرسل من حساب موقوف تلقائياً (محظور/متجاوز عتبة الأخطاء) —
+        // وإن كان كذلك، نُلغي كل المهام المتبقية للحملة بدل تركها تفشل واحدة واحدة
+        if (campaignUserId && await ProtectionService.getInstance().isSuspended(campaignUserId, accountId)) {
+            await pool.query(
+                `UPDATE private_campaigns SET status='paused', updated_at=NOW() WHERE id=$1`,
+                [campaignId]
+            );
+            await this._log(campaignId, 'error',
+                `🚫 الحساب ${accountId} موقوف تلقائياً (حماية) — تم إيقاف الحملة وإلغاء كل المهام المتبقية`,
+                accountId
+            );
+            try {
+                const QueueManager = require('../../lib/QueueManager');
+                await QueueManager.cancelCampaignJobs(campaignId);
+            } catch (_) {}
+            return; // اكتمال "ناجح" للمهمة الحالية — التوقف متعمَّد وليس فشلاً يستدعي retry
+        }
+
+        // محاولة الإرسال — [البند 1] عبر sendMessageSafe المحمي حصرياً، مع تمرير
+        // operationType='private' صراحة (الحملات الخاصة دوماً private) وtaskId
+        // لربطها بـ SmartRetry الخاص بـ ProtectionService
         try {
-            const WhatsAppManager = require('../../bot/WhatsAppManager');
-            await WhatsAppManager.sendTextMessage(accountId, groupId, message);
+            await WhatsAppManager.sendMessageSafe(accountId, groupId, { text: message }, {
+                operationType: 'private',
+                taskId: targetRowId || `${campaignId}:${groupId}`,
+            });
 
             // تحديث حالة الهدف → sent
             if (targetRowId) {
@@ -434,7 +469,13 @@ class PrivateCampaignService {
                 accountId
             );
 
-            throw err; // إعادة الرمي لـ BullMQ كي يُعيد المحاولة (attempts: 3)
+            // [البند 8] لا داعي لإعادة المحاولة عبر BullMQ إن كان السبب تعليق الحساب —
+            // ProtectionService تكفّل بذلك بالفعل (recordFailure استدعت suspendAccount)
+            if (err.protectionReason === 'account_suspended') {
+                return; // لا نرمي الخطأ → لا retry إضافي من BullMQ على حساب محظور
+            }
+
+            throw err; // إعادة الرمي لـ BullMQ كي يُعيد المحاولة (attempts: 3) للأخطاء العادية فقط
         }
 
         // تحديث العدادات الإجمالية
@@ -444,6 +485,9 @@ class PrivateCampaignService {
     // ── Execution Engine (Legacy Fallback) ────────────────────────────────────
     // يُستخدم فقط كـ fallback عندما يكون QueueManager غير متاح
     async _executeEngine(campaignId, userId, intervalSeconds, startTime, endTime) {
+        // [البند 1+2] احتفظنا بـ delay() كأداة عامة وحيدة، لكنها الآن تُستخدم فقط
+        // لانتظار "وقت البداية" (start_time) — وهو انتظار شرعي وليس تأخيراً بين
+        // رسائل، وليس بديلاً عن safeDelay المستخدم بين كل رسالة وأخرى أدناه.
         const delay = ms => new Promise(r => setTimeout(r, ms));
 
         // Wait until start_time
@@ -506,6 +550,20 @@ class PrivateCampaignService {
 
             const target = targetRes.rows[0];
 
+            // [البند 3] لا نرسل من حساب موقوف تلقائياً — نوقف الحملة كاملةً بدل
+            // المحاولة بلا فائدة على حساب محظور
+            if (await ProtectionService.getInstance().isSuspended(userId, target.account_id)) {
+                await pool.query(
+                    `UPDATE private_campaigns SET status='paused', updated_at=NOW() WHERE id=$1`,
+                    [campaignId]
+                );
+                await this._log(campaignId, 'error',
+                    `🚫 الحساب ${target.account_id} موقوف تلقائياً (حماية) — تم إيقاف الحملة`,
+                    target.account_id
+                );
+                break;
+            }
+
             // Get message content
             const msgRes = await pool.query(
                 `SELECT message_text FROM private_campaigns WHERE id=$1`,
@@ -513,9 +571,12 @@ class PrivateCampaignService {
             );
             const messageText = msgRes.rows[0]?.message_text || '';
 
-            // Try to send
+            // Try to send — [البند 1] عبر sendMessageSafe المحمي حصرياً
             try {
-                await WhatsAppManager.sendTextMessage(target.account_id, target.group_jid, messageText);
+                await WhatsAppManager.sendMessageSafe(target.account_id, target.group_jid, { text: messageText }, {
+                    operationType: 'private',
+                    taskId: target.id,
+                });
 
                 await pool.query(
                     `UPDATE private_campaign_groups SET status='sent', sent_at=NOW() WHERE id=$1`,
@@ -547,9 +608,14 @@ class PrivateCampaignService {
             // Update campaign counters
             await this._updateCounts(campaignId);
 
-            // Wait interval
-            const waitMs = intervalSeconds * 1000;
-            await delay(waitMs);
+            // [البند 1+2] تأخير عشوائي آمن بدل intervalSeconds الثابت — مرتبط
+            // بإعدادات الحماية الخاصة بالمستخدم (يضمن حداً أدنى معقولاً أيضاً
+            // حتى لو كان intervalSeconds المُدخل صغيراً جداً)
+            const minWaitMs = Math.max(0, intervalSeconds * 1000);
+            await Promise.all([
+                ProtectionService.getInstance().safeDelay(userId, 'private'),
+                delay(minWaitMs * 0.5), // يحترم رغبة المستخدم بحد أدنى تقريبي دون أن يكون صارماً/ثابتاً 100%
+            ]);
         }
     }
 }
