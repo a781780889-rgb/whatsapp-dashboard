@@ -5,8 +5,38 @@ const fs = require('fs');
 const path = require('path');
 const LivePublishService = require('../services/LivePublishService');
 const { queryAll: pgQueryAll } = require('../../lib/postgres');
+const { ProtectionService } = require('../services/ProtectionService');
 
 class BroadcastController {
+
+    // ── [البند 1+2] جلب userId الخاص بحساب معيّن (لاستخدام safeDelay المرتبط
+    //    بإعدادات المستخدم بدل أي تأخير ثابت). كاش بسيط بالذاكرة لمدة قصيرة
+    //    لتفادي استعلام DB متكرر داخل حلقات الإرسال الكثيفة. ──────────────────
+    async _getUserId(accountId) {
+        this._userIdCache = this._userIdCache || new Map();
+        const cached = this._userIdCache.get(accountId);
+        if (cached && (Date.now() - cached.ts) < 60000) return cached.userId;
+        try {
+            const row = await pgQueryAll(`SELECT user_id FROM accounts WHERE id = $1`, [accountId]);
+            const userId = row?.[0]?.user_id || null;
+            this._userIdCache.set(accountId, { userId, ts: Date.now() });
+            return userId;
+        } catch {
+            return null;
+        }
+    }
+
+    // ── [البند 1+2] تأخير آمن وعشوائي بدل أي setTimeout ثابت. يتدهور بأمان
+    //    (fallback لقيمة عشوائية بسيطة) إن تعذّر تحديد userId. ─────────────────
+    async _safeDelay(accountId, operationType = 'group') {
+        const userId = await this._getUserId(accountId);
+        if (!userId) {
+            const ms = 800 + Math.floor(Math.random() * 700);
+            return new Promise(r => setTimeout(r, ms));
+        }
+        const svc = ProtectionService.getInstance();
+        return svc.safeDelay(userId, operationType);
+    }
 
     async getAll(req, res) {
         try {
@@ -132,26 +162,32 @@ class BroadcastController {
         };
     }
 
-    // ── Helper: send one message to a JID ─────────────────────────────────────
-    async _sendOne(session, jid, messageContent) {
+    // ── Helper: send one message to a JID — [البند 1] يمر إلزامياً عبر
+    //    WhatsAppManager.sendMessageSafe، وهي النقطة المركزية الوحيدة المسموح
+    //    بها للإرسال: تستدعي ProtectionService.checkOperation قبل الإرسال،
+    //    تحاكي السلوك البشري (composing/typing/paused)، ثم تسجل النتيجة عبر
+    //    recordSuccess/recordFailure تلقائياً. لا إرسال مباشر بعد الآن. ───────
+    async _sendOne(accountId, jid, messageContent, options = {}) {
         const MEDIA_BASE = path.resolve(__dirname, '../../../../');
         const { text, mediaPaths } = messageContent;
+        let content;
         if (mediaPaths && mediaPaths.length > 0) {
             const mediaPath = path.join(MEDIA_BASE, mediaPaths[0]);
             if (fs.existsSync(mediaPath)) {
                 const mediaBuffer = fs.readFileSync(mediaPath);
                 const ext = path.extname(mediaPaths[0]).toLowerCase();
-                if (['.jpg','.jpeg','.png','.gif','.webp'].includes(ext)) {
-                    await session.sendMessage(jid, { image: mediaBuffer, caption: text });
-                } else if (['.mp4','.mov','.avi'].includes(ext)) {
-                    await session.sendMessage(jid, { video: mediaBuffer, caption: text });
+                if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
+                    content = { image: mediaBuffer, caption: text };
+                } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
+                    content = { video: mediaBuffer, caption: text };
                 } else {
-                    await session.sendMessage(jid, { document: mediaBuffer, caption: text, fileName: path.basename(mediaPaths[0]) });
+                    content = { document: mediaBuffer, caption: text, fileName: path.basename(mediaPaths[0]) };
                 }
-                return;
             }
         }
-        await session.sendMessage(jid, { text: text || '' });
+        if (!content) content = { text: text || '' };
+
+        return WhatsAppManager.sendMessageSafe(accountId, jid, content, options);
     }
 
     // ── Direct Publish — instant send ─────────────────────────────────────────
@@ -181,6 +217,11 @@ class BroadcastController {
             if (!session) {
                 return res.status(400).json({ success: false, error: 'الحساب غير متصل بواتساب' });
             }
+            // [البند 3] لا نرسل من حساب موقوف تلقائياً (محظور/متجاوز الأخطاء)
+            const userIdForCheck = await this._getUserId(accountId);
+            if (userIdForCheck && await ProtectionService.getInstance().isSuspended(userIdForCheck, accountId)) {
+                return res.status(403).json({ success: false, error: 'الحساب موقوف تلقائياً بسبب الحماية (حظر أو أخطاء متكررة) — لا يمكن الإرسال منه' });
+            }
 
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             await this._ensureDirectPublishLogTable(accountDB);
@@ -209,6 +250,9 @@ class BroadcastController {
                 return res.status(400).json({ success: false, error: 'يجب إضافة نص أو وسائط للرسالة' });
             }
 
+            // [البند 1+2] memberDelay/adDelay لم تعد تُستخدم فعلياً للتأخير (استُبدلت
+            // بـ ProtectionService.safeDelay العشوائي)، ونُبقيها فقط لأغراض التوافق مع
+            // الواجهة الأمامية وسجل الإرسال (قيمة توثيقية لا تؤثر على التوقيت الفعلي).
             const memberDelay = Number.isFinite(member_delay_ms) ? Math.max(0, member_delay_ms) : 1500;
             const adDelay     = Number.isFinite(ad_delay_ms)     ? Math.max(0, ad_delay_ms)     : 2000;
 
@@ -219,8 +263,15 @@ class BroadcastController {
             let membersTargetedTotal = 0;
             let groupsSent   = 0;
             let groupsFailed = 0;
+            let accountSuspendedMidRun = false; // [البند 3] توقف فوري إذا تعلّق الحساب أثناء التنفيذ
 
             for (const jid of target_group_jids) {
+                if (accountSuspendedMidRun) {
+                    results.push({ jid, type: 'group', status: 'skipped', error: 'تم إيقاف الحساب أثناء التنفيذ' });
+                    groupsFailed++;
+                    continue;
+                }
+
                 const detail = {
                     group_jid: jid,
                     group_sent: 0,
@@ -231,26 +282,32 @@ class BroadcastController {
                     errors: [],
                 };
 
-                // 1️⃣ إرسال للمجموعة (كل الإعلانات بالترتيب)
+                // 1️⃣ إرسال للمجموعة (كل الإعلانات بالترتيب) — عبر sendMessageSafe المحمي
                 for (let i = 0; i < messages.length; i++) {
                     const msg = messages[i];
                     try {
-                        await this._sendOne(session, jid, msg);
+                        await this._sendOne(accountId, jid, msg, { operationType: 'group' });
                         results.push({ jid, type: 'group', status: 'sent', ad_id: msg.adId });
                         detail.group_sent++;
                     } catch (sendErr) {
                         results.push({ jid, type: 'group', status: 'failed', ad_id: msg.adId, error: sendErr.message });
                         detail.group_failed++;
                         detail.errors.push(`فشل إرسال الإعلان للمجموعة: ${sendErr.message}`);
+                        // [البند 3] إن كان السبب تعليق الحساب (محظور/متجاوز حد)، نوقف كل العمليات الباقية فوراً
+                        if (sendErr.protectionReason === 'account_suspended') {
+                            accountSuspendedMidRun = true;
+                            break;
+                        }
                     }
-                    if (i < messages.length - 1) await new Promise(r => setTimeout(r, adDelay));
-                    else await new Promise(r => setTimeout(r, 1000));
+                    if (accountSuspendedMidRun) break;
+                    // [البند 1+2] تأخير عشوائي آمن بدل setTimeout الثابت
+                    await this._safeDelay(accountId, 'group');
                 }
                 if (detail.group_sent > 0) groupsSent++;
                 else groupsFailed++;
 
                 // 2️⃣ إرسال للأعضاء خاص (باستثناء المشرفين إذا كان الخيار مفعلاً)
-                if (send_to_members) {
+                if (send_to_members && !accountSuspendedMidRun) {
                     try {
                         // [FIX-DIRECT-PUBLISH-2] التحقق من صلاحية قراءة أعضاء المجموعة قبل الإرسال
                         const membersInfo = await WhatsAppManager.getGroupMembers(accountId, jid);
@@ -262,10 +319,11 @@ class BroadcastController {
                         membersTargetedTotal += targets.length;
 
                         for (const memberJid of targets) {
+                            if (accountSuspendedMidRun) break;
                             for (let i = 0; i < messages.length; i++) {
                                 const msg = messages[i];
                                 try {
-                                    await this._sendOne(session, memberJid, msg);
+                                    await this._sendOne(accountId, memberJid, msg, { operationType: 'private' });
                                     membersSentTotal++;
                                     detail.members_sent++;
                                     results.push({ jid: memberJid, type: 'private', status: 'sent', fromGroup: jid, ad_id: msg.adId });
@@ -273,11 +331,19 @@ class BroadcastController {
                                     membersFailedTotal++;
                                     detail.members_failed++;
                                     results.push({ jid: memberJid, type: 'private', status: 'failed', fromGroup: jid, ad_id: msg.adId, error: e.message });
+                                    // [البند 3] توقف فوري عند تعليق الحساب أثناء الإرسال للأعضاء أيضاً
+                                    if (e.protectionReason === 'account_suspended') {
+                                        accountSuspendedMidRun = true;
+                                        break;
+                                    }
                                 }
-                                if (i < messages.length - 1) await new Promise(r => setTimeout(r, adDelay));
+                                if (accountSuspendedMidRun) break;
+                                if (i < messages.length - 1) await this._safeDelay(accountId, 'private');
                             }
-                            // تأخير بين الرسائل الخاصة لتجنب الحظر
-                            await new Promise(r => setTimeout(r, memberDelay));
+                            if (!accountSuspendedMidRun) {
+                                // [البند 1+2] تأخير عشوائي آمن بين الرسائل الخاصة لتجنب الحظر
+                                await this._safeDelay(accountId, 'private');
+                            }
                         }
                     } catch (membersErr) {
                         // [مطلوب] في حال تعذّر جلب أعضاء مجموعة معينة، نسجل الخطأ ونستمر بباقي المجموعات
