@@ -9,6 +9,7 @@ const { Queue, Worker } = require('bullmq');
 const crypto = require('crypto');
 const { getBullMQConnection } = require('../lib/redis');
 const DatabaseManager = require('../database/DatabaseManager');
+const { ProtectionService } = require('../api/services/ProtectionService');
 
 const QUEUE_NAME = 'wa-tasks';
 
@@ -116,6 +117,22 @@ class JobScheduler {
 
         const accountDB = await DatabaseManager.getAccountDB(accountId);
 
+        // [البند 3] فحص مركزي واحد لكل أنواع المهام: لا تنفيذ على حساب موقوف
+        // تلقائياً (محظور/متجاوز عتبة الأخطاء) — نفشل المهمة بصمت (لا retry
+        // عبر BullMQ لأن إعادة المحاولة على حساب محظور عديمة الجدوى ومضرة).
+        try {
+            const accRow = await DatabaseManager.systemDB?.get
+                ? await DatabaseManager.systemDB.get(`SELECT user_id FROM accounts WHERE id = $1`, [accountId])
+                : null;
+            const userId = accRow?.user_id || null;
+            if (userId && await ProtectionService.getInstance().isSuspended(userId, accountId)) {
+                console.warn(`[BullMQ] Skipping job ${job.id} (${job.name}) — account ${accountId} is suspended by protection.`);
+                return; // اكتمال "ناجح" — التوقف متعمَّد، ليس فشلاً يستدعي retry
+            }
+        } catch (e) {
+            console.warn(`[BullMQ] suspension check failed for ${accountId}, proceeding cautiously:`, e.message);
+        }
+
         switch (job.name) {
             case 'send_campaign_message':
                 await this._sendCampaignMessage(job.data, session, accountDB, accountId, WhatsAppManager);
@@ -148,7 +165,12 @@ class JobScheduler {
             : null;
         const content = ad?.content || data.fallbackContent || 'رسالة الحملة';
         try {
-            await WhatsAppManager.sendMessageSafe(accountId, to, { text: content });
+            // [البند 6] تمرير operationType صراحة (حملات send_campaign_message دوماً
+            // private — رسالة فردية لكل هدف) وtaskId لربطها بـ SmartRetry
+            await WhatsAppManager.sendMessageSafe(accountId, to, { text: content }, {
+                operationType: 'private',
+                taskId: targetId,
+            });
             await accountDB.run(
                 `UPDATE campaign_targets SET status = 'sent', sent_at = NOW() WHERE id = $1`, [targetId]
             );
@@ -174,7 +196,11 @@ class JobScheduler {
         const schedule = await accountDB.get(`SELECT * FROM scheduled_messages WHERE id = $1`, [scheduleId]);
         if (!schedule) throw new Error(`Scheduled message ${scheduleId} not found`);
         try {
-            await WhatsAppManager.sendMessageSafe(accountId, to, { text: schedule.content });
+            // [البند 6] رسالة مجدولة فردية = دوماً private
+            await WhatsAppManager.sendMessageSafe(accountId, to, { text: schedule.content }, {
+                operationType: 'private',
+                taskId: scheduleId,
+            });
             await accountDB.run(
                 `UPDATE scheduled_messages
                  SET status = 'completed', executions_done = executions_done + 1, last_executed_at = NOW()
@@ -243,29 +269,50 @@ class JobScheduler {
         const text = ad?.content || '';
         const mediaPaths = JSON.parse(ad?.media_paths || '[]');
 
-        const _send = async (jid) => {
+        const buildContent = () => {
             if (mediaPaths.length > 0) {
                 const mediaPath = path.join(MEDIA_BASE, mediaPaths[0]);
                 if (fs.existsSync(mediaPath)) {
                     const buf = fs.readFileSync(mediaPath);
                     const ext = path.extname(mediaPaths[0]).toLowerCase();
                     if (['.jpg','.jpeg','.png','.gif','.webp'].includes(ext)) {
-                        return session.sendMessage(jid, { image: buf, caption: text });
+                        return { image: buf, caption: text };
                     } else if (['.mp4','.mov','.avi'].includes(ext)) {
-                        return session.sendMessage(jid, { video: buf, caption: text });
+                        return { video: buf, caption: text };
                     }
-                    return session.sendMessage(jid, { document: buf, caption: text, fileName: path.basename(mediaPaths[0]) });
+                    return { document: buf, caption: text, fileName: path.basename(mediaPaths[0]) };
                 }
             }
-            return session.sendMessage(jid, { text });
+            return { text };
+        };
+
+        // [البند 1] إرسال محمي عبر sendMessageSafe حصرياً — لا session.sendMessage مباشر بعد الآن
+        const _send = (jid, operationType) =>
+            WhatsAppManager.sendMessageSafe(accountId, jid, buildContent(), { operationType, taskId: `${scheduleId}:${jid}` });
+
+        // [البند 1+2] جلب userId للحساب لاستخدام safeDelay المرتبط بإعدادات الحماية
+        let userId = null;
+        try {
+            const row = await DatabaseManager.systemDB?.get?.(`SELECT user_id FROM accounts WHERE id = $1`, [accountId]);
+            userId = row?.user_id || null;
+        } catch { /* تجاهل — fallback أدناه */ }
+        const _safeDelay = async (operationType = 'private') => {
+            if (userId) return ProtectionService.getInstance().safeDelay(userId, operationType);
+            return new Promise(r => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
         };
 
         // 1️⃣ إرسال للمجموعة
-        await _send(groupJid);
-        console.log(`[BroadcastJob] Sent to group ${groupJid}`);
+        let accountSuspendedMidRun = false;
+        try {
+            await _send(groupJid, 'group');
+            console.log(`[BroadcastJob] Sent to group ${groupJid}`);
+        } catch (e) {
+            console.error(`[BroadcastJob] Failed to send to group ${groupJid}:`, e.message);
+            if (e.protectionReason === 'account_suspended') accountSuspendedMidRun = true;
+        }
 
         // 2️⃣ إرسال للأعضاء خاص
-        if (send_to_members) {
+        if (send_to_members && !accountSuspendedMidRun) {
             try {
                 const membersInfo = await WhatsAppManager.getGroupMembers(accountId, groupJid);
                 const targets = exclude_admins
@@ -274,13 +321,21 @@ class JobScheduler {
 
                 let sentCount = 0;
                 for (const memberJid of targets) {
+                    if (accountSuspendedMidRun) break;
                     try {
-                        await _send(memberJid);
+                        await _send(memberJid, 'private');
                         sentCount++;
                     } catch (e) {
                         console.error(`[BroadcastJob] Failed to send private to ${memberJid}:`, e.message);
+                        // [البند 3] توقف فوري عند تعليق الحساب أثناء الإرسال للأعضاء
+                        if (e.protectionReason === 'account_suspended') {
+                            accountSuspendedMidRun = true;
+                            console.warn(`[BroadcastJob] Account ${accountId} suspended mid-run — stopping remaining members.`);
+                            break;
+                        }
                     }
-                    await new Promise(r => setTimeout(r, 1500));
+                    // [البند 1+2] تأخير عشوائي آمن بدل setTimeout(1500) الثابت
+                    if (!accountSuspendedMidRun) await _safeDelay('private');
                 }
                 console.log(`[BroadcastJob] Sent private to ${sentCount}/${targets.length} members of ${groupJid}`);
             } catch (e) {
@@ -365,9 +420,24 @@ class JobScheduler {
         }
     }
 
-    // ── Pause Campaign ────────────────────────────────────────────────────────
+    // ── Pause Campaign — [البند 3] إلغاء فعلي للمهام المعلّقة في BullMQ ────────
     async pauseCampaignJobs(campaignId) {
-        console.log(`[BullMQ] Campaign ${campaignId} paused — pending jobs will be skipped by worker.`);
+        if (!this.queue) return 0;
+        try {
+            const [waiting, delayed] = await Promise.all([
+                this.queue.getWaiting(),
+                this.queue.getDelayed(),
+            ]);
+            const toRemove = [...waiting, ...delayed].filter(
+                j => j.name === 'send_campaign_message' && j.data?.campaignId === campaignId
+            );
+            await Promise.all(toRemove.map(j => j.remove().catch(() => {})));
+            console.log(`[BullMQ] Campaign ${campaignId} paused — ${toRemove.length} pending job(s) removed from queue.`);
+            return toRemove.length;
+        } catch (err) {
+            console.error('[BullMQ] pauseCampaignJobs error:', err.message);
+            return 0;
+        }
     }
 
     // ── Queue Stats ───────────────────────────────────────────────────────────
