@@ -38,6 +38,7 @@ const autoModeState = {
     maxPerRun:         20,
     intervalMinutes:   5,
     distributionMode:  'all',
+    sourceAccountCount: 1,   // 1 | 2 | 3 | -1 (كل الحسابات)
   },
   stats: {
     totalJoined:  0,
@@ -111,6 +112,35 @@ class LinkJoinController {
     } catch {
       return [];
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  تحديد حسابات المصدر بناءً على العدد المطلوب
+  //  sourceAccountCount: 1 | 2 | 3 | N | -1 (= كل الحسابات)
+  //  - يبدأ دائماً بالحساب الرئيسي (sourceAccountId) ثم يكمل من البقية
+  //  - إن كان العدد المتاح أقل من المطلوب، يعيد الجميع بدون خطأ
+  //  - قابل للتوسع: إضافة قيمة جديدة لا تحتاج تعديل منطق آخر
+  // ══════════════════════════════════════════════════════════════════════════
+  _resolveSourceAccounts(allAccounts, sourceAccountId, sourceAccountCount) {
+    const availableIds = allAccounts.map(a => a.id);
+    if (availableIds.length === 0) return [];
+
+    // -1 = كل الحسابات، أو إذا العدد المطلوب أكبر من المتاح
+    if (!sourceAccountCount || sourceAccountCount === -1 || sourceAccountCount >= availableIds.length) {
+      return availableIds;
+    }
+
+    // حساب واحد
+    if (sourceAccountCount <= 1) {
+      return sourceAccountId ? [sourceAccountId] : [availableIds[0]];
+    }
+
+    // عدد محدد: الحساب الرئيسي أولاً ثم الباقي بالترتيب
+    const primaryFirst = sourceAccountId
+      ? [sourceAccountId, ...availableIds.filter(id => id !== sourceAccountId)]
+      : availableIds;
+
+    return primaryFirst.slice(0, Math.min(sourceAccountCount, primaryFirst.length));
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -671,6 +701,7 @@ class LinkJoinController {
         intervalMinutes   = 5,
         distributionMode  = 'all',
         sourceAccountId,
+        sourceAccountCount = 1,
       } = req.body;
 
       if (!sourceAccountId) {
@@ -681,7 +712,7 @@ class LinkJoinController {
       autoModeState.settings = {
         accountIds, delaySeconds, randomDelay, randomDelayMax,
         linkTypes, maxPerRun, intervalMinutes, distributionMode,
-        sourceAccountId,
+        sourceAccountId, sourceAccountCount,
       };
 
       autoModeState.isRunning = true;
@@ -697,46 +728,81 @@ class LinkJoinController {
           const isAdmin = ['super_admin', 'admin'].includes(req.user?.role);
           const allAccounts = await this._getAllAccounts(req.user?.id, isAdmin);
 
-          const srcAcc = allAccounts.find(a => a.id === sourceAccountId);
-          if (!srcAcc) return;
+          // تحديد حسابات المصدر بناءً على sourceAccountCount
+          const resolvedSourceIds = this._resolveSourceAccounts(allAccounts, sourceAccountId, sourceAccountCount);
+          if (resolvedSourceIds.length === 0) return;
 
-          const db = await DatabaseManager.getAccountDB(sourceAccountId);
-          await this._ensureTables(db);
-
-          // جلب الروابط الجديدة
           const typeFilter = linkTypes.length > 0
             ? `AND link_type IN (${linkTypes.map((_, i) => `$${i + 2}`).join(',')})`
             : '';
 
-          const newLinks = await db.all(
-            `SELECT id, url, link_type FROM discovered_links
-             WHERE status = 'new' ${typeFilter}
-             ORDER BY discovered_at ASC LIMIT $1`,
-            [maxPerRun, ...linkTypes]
-          );
+          // جلب الروابط من كل حساب مصدر بحصة متساوية
+          const perSourceLimit = Math.ceil(maxPerRun / resolvedSourceIds.length);
+          const linksBySource  = new Map(); // srcId → [{ id, url }]
 
-          if (newLinks.length === 0) return;
+          for (const srcId of resolvedSourceIds) {
+            try {
+              const db = await DatabaseManager.getAccountDB(srcId);
+              await this._ensureTables(db);
 
-          // تحديد الحسابات المستخدمة
+              const links = await db.all(
+                `SELECT id, url, link_type FROM discovered_links
+                 WHERE status = 'new' ${typeFilter}
+                 ORDER BY discovered_at ASC LIMIT $1`,
+                [perSourceLimit, ...linkTypes]
+              );
+
+              if (links.length > 0) {
+                linksBySource.set(srcId, links.map(l => ({ id: l.id, url: l.url })));
+              }
+            } catch (err) {
+              console.error(`[AutoMode] خطأ في جلب روابط الحساب ${srcId}:`, err.message);
+            }
+          }
+
+          const totalLinksCount = [...linksBySource.values()].reduce((s, arr) => s + arr.length, 0);
+          if (totalLinksCount === 0) return;
+
+          // تحديد الحسابات المستخدمة للانضمام الفعلي
           const useAccountIds = accountIds.length > 0
             ? accountIds
             : allAccounts.map(a => a.id);
 
-          const jobId = crypto.randomUUID();
-          activeJobs.set(jobId, { status: 'running', total: newLinks.length, done: 0, isAutoMode: true });
+          const masterJobId = crypto.randomUUID();
+          activeJobs.set(masterJobId, { status: 'running', total: totalLinksCount, done: 0, isAutoMode: true });
 
-          await this._runMultiJoin(
-            sourceAccountId,
-            newLinks.map(l => ({ id: l.id, url: l.url })),
-            useAccountIds,
-            { delaySeconds, randomDelay, randomDelayMax, distributionMode, jobId }
-          );
+          let totalSucceeded = 0;
+          let totalFailed    = 0;
 
-          const job = activeJobs.get(jobId);
-          if (job) {
-            autoModeState.stats.totalJoined += job.succeeded || 0;
-            autoModeState.stats.totalFailed += job.failed  || 0;
+          // تنفيذ الانضمام لكل مجموعة مصدر على حدة (لضمان تحديث DB الصحيح)
+          for (const [srcId, srcLinks] of linksBySource) {
+            if (!autoModeState.isRunning) break;
+
+            const subJobId = crypto.randomUUID();
+            activeJobs.set(subJobId, { status: 'running', total: srcLinks.length, done: 0 });
+
+            await this._runMultiJoin(
+              srcId,
+              srcLinks,
+              useAccountIds,
+              { delaySeconds, randomDelay, randomDelayMax, distributionMode, jobId: subJobId }
+            );
+
+            const subJob = activeJobs.get(subJobId);
+            if (subJob) {
+              totalSucceeded += subJob.succeeded || 0;
+              totalFailed    += subJob.failed    || 0;
+            }
           }
+
+          activeJobs.set(masterJobId, {
+            status: 'finished', total: totalLinksCount, done: totalLinksCount,
+            succeeded: totalSucceeded, failed: totalFailed, finishedAt: new Date(),
+          });
+
+          autoModeState.stats.totalJoined += totalSucceeded;
+          autoModeState.stats.totalFailed += totalFailed;
+
         } catch (err) {
           console.error('[AutoMode] error:', err.message);
         }
@@ -781,18 +847,20 @@ class LinkJoinController {
   async updateAutoSettings(req, res) {
     const {
       accountIds, delaySeconds, randomDelay, randomDelayMax,
-      linkTypes, maxPerRun, intervalMinutes, distributionMode, sourceAccountId,
+      linkTypes, maxPerRun, intervalMinutes, distributionMode,
+      sourceAccountId, sourceAccountCount,
     } = req.body;
 
-    if (accountIds       !== undefined) autoModeState.settings.accountIds       = accountIds;
-    if (delaySeconds     !== undefined) autoModeState.settings.delaySeconds     = delaySeconds;
-    if (randomDelay      !== undefined) autoModeState.settings.randomDelay      = randomDelay;
-    if (randomDelayMax   !== undefined) autoModeState.settings.randomDelayMax   = randomDelayMax;
-    if (linkTypes        !== undefined) autoModeState.settings.linkTypes        = linkTypes;
-    if (maxPerRun        !== undefined) autoModeState.settings.maxPerRun        = maxPerRun;
-    if (intervalMinutes  !== undefined) autoModeState.settings.intervalMinutes  = intervalMinutes;
-    if (distributionMode !== undefined) autoModeState.settings.distributionMode = distributionMode;
-    if (sourceAccountId  !== undefined) autoModeState.settings.sourceAccountId  = sourceAccountId;
+    if (accountIds          !== undefined) autoModeState.settings.accountIds          = accountIds;
+    if (delaySeconds        !== undefined) autoModeState.settings.delaySeconds        = delaySeconds;
+    if (randomDelay         !== undefined) autoModeState.settings.randomDelay         = randomDelay;
+    if (randomDelayMax      !== undefined) autoModeState.settings.randomDelayMax      = randomDelayMax;
+    if (linkTypes           !== undefined) autoModeState.settings.linkTypes           = linkTypes;
+    if (maxPerRun           !== undefined) autoModeState.settings.maxPerRun           = maxPerRun;
+    if (intervalMinutes     !== undefined) autoModeState.settings.intervalMinutes     = intervalMinutes;
+    if (distributionMode    !== undefined) autoModeState.settings.distributionMode    = distributionMode;
+    if (sourceAccountId     !== undefined) autoModeState.settings.sourceAccountId     = sourceAccountId;
+    if (sourceAccountCount  !== undefined) autoModeState.settings.sourceAccountCount  = sourceAccountCount;
 
     res.json({ success: true, message: 'تم حفظ الإعدادات', settings: autoModeState.settings });
   }
