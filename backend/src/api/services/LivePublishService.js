@@ -334,8 +334,14 @@ class LivePublishService {
 
                         const excludedAdminsCount = (membersInfo.admins || []).length;
 
-                        // 2) الإبقاء فقط على الأرقام السعودية (+966)
-                        const targets         = nonAdminMembers.filter(memberJid => this._isSaudiNumber(memberJid));
+                        // 2) الإبقاء فقط على الأرقام السعودية (+966) — الفحص يتم على رقم الهاتف
+                        //    الحقيقي (phone_by_jid) وليس على الـ jid مباشرة، لأن الأخير قد يكون
+                        //    معرّف LID داخلي عشوائي عند تفعيل خصوصية الرقم في واتساب.
+                        const phoneByJid = membersInfo.phone_by_jid || {};
+                        const targets = nonAdminMembers.filter(memberJid => {
+                            const realPhone = phoneByJid[memberJid] || memberJid;
+                            return this._isSaudiNumber(realPhone);
+                        });
                         const nonSaudiExcluded = nonAdminMembers.length - targets.length;
 
                         sess.stats.totalMembers      += targets.length;
