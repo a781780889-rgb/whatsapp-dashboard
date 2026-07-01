@@ -334,21 +334,6 @@ router.patch('/accounts/:accountId/schedules/:id/status', auth, async (req, res)
 });
 
 // ══════════════════════════════════════════════════════
-//  PROTECTION — نظام الحماية المتقدم
-// ══════════════════════════════════════════════════════
-const ProtectionController = require('./controllers/ProtectionController');
-router.get ('/protection/config',                          auth, ProtectionController.getConfig.bind(ProtectionController));
-router.put ('/protection/config',                          auth, ProtectionController.updateConfig.bind(ProtectionController));
-router.post('/protection/config/reset',                    auth, ProtectionController.resetConfig.bind(ProtectionController));
-router.get ('/protection/stats',                           auth, ProtectionController.getStats.bind(ProtectionController));
-router.get ('/protection/accounts/state',                  auth, ProtectionController.getAccountsState.bind(ProtectionController));
-router.post('/protection/accounts/:accountId/suspend',     auth, ProtectionController.suspendAccount.bind(ProtectionController));
-router.post('/protection/accounts/:accountId/resume',      auth, ProtectionController.resumeAccount.bind(ProtectionController));
-router.get ('/protection/logs',                            auth, ProtectionController.getLogs.bind(ProtectionController));
-router.get ('/protection/logs/summary',                    auth, ProtectionController.getLogsSummary.bind(ProtectionController));
-router.delete('/protection/logs',                          auth, ProtectionController.clearLogs.bind(ProtectionController));
-
-// ══════════════════════════════════════════════════════
 //  PRIVATE CAMPAIGNS — الجزء السادس: حملات النشر الخاص
 // ══════════════════════════════════════════════════════
 const PrivateCampaignController = require('./controllers/PrivateCampaignController');
