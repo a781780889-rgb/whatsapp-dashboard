@@ -549,6 +549,7 @@ class WhatsAppManager {
         const all = [];
         const admins = [];
         const targetJids = [];
+        const phoneByJid = {}; // [فلتر السعودية] jid → رقم الهاتف الحقيقي (وليس معرّف LID)
 
         for (const p of participants) {
             const pJid = normalize(p.id);
@@ -559,7 +560,15 @@ class WhatsAppManager {
             if (isSelf) continue;
 
             const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
-            const entry = { jid: pJid, phone: pJid.split('@')[0], is_admin: isAdmin };
+
+            // [فلتر السعودية] عندما تكون الخصوصية مفعّلة، p.id يكون LID (رقم داخلي عشوائي)
+            // وليس رقم الهاتف الحقيقي. الرقم الحقيقي يأتي فقط عبر p.phoneNumber
+            // (بصيغة jid مثل 9665xxxxxxxx@s.whatsapp.net) عند توفره من واتساب.
+            const realPhoneJid = normalize(p.phoneNumber) || (pJid.endsWith('@s.whatsapp.net') ? pJid : null);
+            const realPhone    = realPhoneJid ? realPhoneJid.split('@')[0] : pJid.split('@')[0];
+
+            const entry = { jid: pJid, phone: realPhone, is_admin: isAdmin };
+            phoneByJid[pJid] = realPhone;
 
             all.push(entry);
             if (isAdmin) admins.push(pJid);
@@ -570,6 +579,7 @@ class WhatsAppManager {
             all,
             admins,
             target_jids: targetJids,
+            phone_by_jid: phoneByJid, // [فلتر السعودية] للفلترة بالرقم الحقيقي بدل LID
             total: all.length,
             admins_count: admins.length,
             members_count: targetJids.length,
