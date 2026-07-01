@@ -40,6 +40,16 @@ const qrData      = new Map();    // accountId → { qr, timestamp }
 const connecting  = new Set();    // accountId
 const reconnectAt = new Map();    // accountId → attempt count (exponential backoff)
 
+// [FIX-LIVE-PUBLISH-READY] sessions.set() يحدث فور إنشاء الـ socket، أي قبل
+// اكتمال مصافحة Baileys الفعلية مع واتساب (connection === 'open'). كان هذا
+// يسبب فشلاً صامتاً في النشر المباشر: يجتاز الكود فحص "الحساب متصل؟" لأن
+// الـ socket موجود في sessions، لكن أول محاولة إرسال فعلية تفشل فوراً لأن
+// الاتصال لم يكتمل بعد — فتُسجَّل المجموعة "مكتملة" ضمن خطأ واحد دون أي
+// رسائل مُرسلة أو فاشلة فعلياً (تحديداً بعد إعادة تشغيل الخادم على Railway،
+// حين تكون كل الحسابات لا تزال في طور إعادة الاتصال).
+// هذا الـ Set يتتبع الحسابات التي أكدت فعلياً الوصول لـ connection === 'open'.
+const readySessions = new Set();  // accountId
+
 // [البند 4: Multi-Tenant] لا نخزّن user_id بشكل ثابت — نجلبه عند الحاجة عبر
 // _getAccountMeta() مع كاش قصير العمر (60 ثانية) لكل accountId لتفادي ضغط DB
 // مفرط دون أن نفترض user_id ثابتاً بمعزل عن قاعدة البيانات (مصدر الحقيقة الوحيد).
@@ -58,6 +68,24 @@ class WhatsAppManager {
     setIO(io) { _io = io; }
 
     getSession(accountId) { return sessions.get(accountId) || null; }
+
+    // [FIX-LIVE-PUBLISH-READY] هل الحساب متصل فعلياً وجاهز للإرسال الآن؟
+    // خلافاً لـ getSession() (يتحقق فقط من وجود الـ socket في الذاكرة)، هذه
+    // الدالة تتحقق من أن اتصال Baileys وصل فعلياً لحالة 'open' على الأقل مرة.
+    isReady(accountId) { return sessions.has(accountId) && readySessions.has(accountId); }
+
+    // [FIX-LIVE-PUBLISH-READY] ينتظر جاهزية الحساب حتى مهلة زمنية محددة بدل
+    // الفشل الفوري — يُستخدم فقط في نقاط الإرسال الحرجة (النشر المباشر) حيث
+    // يكون الحساب غالباً في طور إعادة الاتصال بعد إعادة تشغيل الخادم.
+    async waitUntilReady(accountId, timeoutMs = 20_000, pollMs = 500) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            if (this.isReady(accountId)) return true;
+            if (!sessions.has(accountId) && !connecting.has(accountId)) return false; // لا محاولة اتصال جارية أصلاً
+            await new Promise(r => setTimeout(r, pollMs));
+        }
+        return this.isReady(accountId);
+    }
     isConnecting(accountId) { return connecting.has(accountId); }
     getQrStatus(accountId) { return qrData.get(accountId) || null; }
 
@@ -138,6 +166,7 @@ class WhatsAppManager {
                 connecting.delete(accountId);
                 reconnectAt.delete(accountId); // إعادة ضبط عداد المحاولات عند نجاح الاتصال
                 qrData.delete(accountId);
+                readySessions.add(accountId); // [FIX-LIVE-PUBLISH-READY] الاتصال مكتمل فعلياً الآن
                 this._invalidateAccountMeta(accountId);
                 await SystemDB.run(
                     `UPDATE accounts SET status='connected', updated_at=NOW() WHERE id=$1`, [accountId]
@@ -172,6 +201,7 @@ class WhatsAppManager {
             if (connection === 'close') {
                 connecting.delete(accountId);
                 sessions.delete(accountId);
+                readySessions.delete(accountId); // [FIX-LIVE-PUBLISH-READY] لم يعد جاهزاً بعد قطع الاتصال
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
 
                 // [البند 3] تمييز صريح بين Disconnected عادي و Forbidden (محظور فعلياً)
@@ -364,6 +394,7 @@ class WhatsAppManager {
         }
         connecting.delete(accountId);
         qrData.delete(accountId);
+        readySessions.delete(accountId); // [FIX-LIVE-PUBLISH-READY]
 
         await deletePostgreSQLAuthState(accountId, SystemDB).catch(() => {});
 
@@ -390,6 +421,7 @@ class WhatsAppManager {
             sessions.delete(accountId);
         }
         connecting.delete(accountId);
+        readySessions.delete(accountId); // [FIX-LIVE-PUBLISH-READY]
         this._invalidateAccountMeta(accountId);
         await SystemDB.run(
             `UPDATE accounts SET status='disconnected', updated_at=NOW() WHERE id=$1`, [accountId]
@@ -454,6 +486,14 @@ class WhatsAppManager {
     async sendMessageSafe(accountId, jid, content, options = {}) {
         const sock = sessions.get(accountId);
         if (!sock) throw new Error('Account not connected');
+        // [FIX-LIVE-PUBLISH-READY] وجود الـ socket في sessions لا يعني اتصالاً
+        // فعلياً مكتملاً (قد يكون لا يزال في طور المصافحة بعد إعادة تشغيل
+        // الخادم) — الإرسال على socket غير جاهز يفشل فوراً وبصمت.
+        if (!readySessions.has(accountId)) {
+            const err = new Error('الحساب لا يزال يتصل بواتساب — لم تكتمل المصافحة بعد');
+            err.protectionReason = 'not_ready';
+            throw err;
+        }
 
         const operationType = options.operationType
             || (jid.endsWith('@g.us') ? 'group' : 'private');
@@ -532,6 +572,15 @@ class WhatsAppManager {
         const sock = sessions.get(accountId);
         if (!sock) {
             throw new Error('الحساب غير متصل بواتساب — لا يمكن قراءة أعضاء المجموعة');
+        }
+        // [FIX-LIVE-PUBLISH-READY] نفس مشكلة sendMessageSafe: socket موجود لا
+        // يعني اتصالاً مكتملاً — استدعاء groupMetadata على اتصال غير مكتمل
+        // يفشل بصمت (أو يعلّق حتى timeout طويل). ننتظر جاهزية حقيقية أولاً.
+        if (!readySessions.has(accountId)) {
+            const becameReady = await this.waitUntilReady(accountId, 15_000);
+            if (!becameReady) {
+                throw new Error('الحساب لا يزال يتصل بواتساب — لم تكتمل المصافحة بعد');
+            }
         }
 
         const jid = groupId.includes('@') ? groupId : `${groupId}@g.us`;
