@@ -573,6 +573,24 @@ class BroadcastController {
         if (!s) return res.status(404).json({ success: false, error: 'الجلسة غير موجودة' });
         res.json({ success: true, ...s });
     }
+
+    // ── [إصلاح استمرارية اللوحة] إيجاد جلسة نشر مباشر جارية حالياً لأي من
+    //    الحسابات المُرسلة — تستدعيها الواجهة عند فتح الصفحة لإعادة ربط
+    //    اللوحة تلقائياً بالجلسة الحقيقية بدل البدء من صفر (0%) بينما
+    //    العملية لا تزال تعمل فعلياً في الخادم.
+    async getActiveLivePublishSession(req, res) {
+        try {
+            const raw = req.query.account_ids || '';
+            const accountIds = String(raw).split(',').map(s => s.trim()).filter(Boolean);
+            if (!accountIds.length) return res.json({ success: true, session: null });
+
+            const session = await LivePublishService.findActiveSession(accountIds);
+            res.json({ success: true, session });
+        } catch (err) {
+            console.error('[LivePublish] getActiveLivePublishSession error:', err);
+            res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
+        }
+    }
 }
 
 module.exports = new BroadcastController();
