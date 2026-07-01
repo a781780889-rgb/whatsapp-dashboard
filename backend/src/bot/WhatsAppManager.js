@@ -33,7 +33,7 @@ const { Boom } = require('@hapi/boom');
 const SystemDB = require('../database/SystemDB');
 const DatabaseManager = require('../database/DatabaseManager');
 const SocketBridge = require('../core/SocketBridge');
-const { usePostgreSQLAuthState, deletePostgreSQLAuthState } = require('./PostgreSQLAuthState');
+const { usePostgreSQLAuthState, deletePostgreSQLAuthState, repairCorruptedSessions } = require('./PostgreSQLAuthState');
 
 const sessions    = new Map();    // accountId → socket
 const qrData      = new Map();    // accountId → { qr, timestamp }
@@ -559,6 +559,35 @@ class WhatsAppManager {
             await svc.recordSuccess(userId, accountId, taskId, { operationType });
             return result;
         } catch (sendErr) {
+            // [FIX-SESSION-RACE-RECOVERY] بعض حالات فشل الإرسال الصامت جذرها
+            // جلسة Signal تالفة لهذا الطرف تحديداً (بقايا سباق كتابة قديم قبل
+            // إضافة القفل التسلسلي في PostgreSQLAuthState). عند اكتشاف نمط
+            // خطأ متعلق بفك التشفير/الجلسة، نمسح جلسة هذا الرقم تحديداً
+            // (Baileys يعيد بناءها تلقائياً وبأمان) ونعيد محاولة الإرسال مرة
+            // واحدة فقط، بدل تسجيل فشل نهائي لمشكلة قابلة للإصلاح تلقائياً.
+            const msg = String(sendErr?.message || '').toLowerCase();
+            const looksLikeSessionCorruption =
+                msg.includes('closed session') || msg.includes('decrypt') ||
+                msg.includes('bad mac') || msg.includes('session record') ||
+                sendErr?.protectionReason === 'send_unconfirmed';
+
+            if (looksLikeSessionCorruption && !options._sessionRepairRetried) {
+                try {
+                    const targetPhone = jid.split('@')[0];
+                    console.warn(`[WAManager] sendMessageSafe: session corruption detected for ${jid} — repairing and retrying once.`);
+                    await repairCorruptedSessions(accountId, SystemDB, targetPhone);
+                    const retryResult = await this._sendWithPresence(sock, jid, content);
+                    await svc.recordSuccess(userId, accountId, taskId, { operationType });
+                    return retryResult;
+                } catch (retryErr) {
+                    await svc.recordFailure(userId, accountId, taskId, retryErr.message, {
+                        operationType,
+                        errorObject: retryErr,
+                    });
+                    throw retryErr;
+                }
+            }
+
             await svc.recordFailure(userId, accountId, taskId, sendErr.message, {
                 operationType,
                 errorObject: sendErr,
