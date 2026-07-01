@@ -1,7 +1,6 @@
 const { Pool } = require('pg');
 const crypto = require('crypto');
 const WhatsAppManager = require('../../bot/WhatsAppManager');
-const { ProtectionService } = require('./ProtectionService');
 
 // ─── DB Pool (system-level, not per-account) ──────────────────────────────────
 const pool = new Pool({
@@ -406,27 +405,8 @@ class PrivateCampaignService {
             return; // المهمة تُكمل بنجاح (لا retry) لأن الإيقاف متعمَّد
         }
 
-        // [البند 3] لا نرسل من حساب موقوف تلقائياً (محظور/متجاوز عتبة الأخطاء) —
-        // وإن كان كذلك، نُلغي كل المهام المتبقية للحملة بدل تركها تفشل واحدة واحدة
-        if (campaignUserId && await ProtectionService.getInstance().isSuspended(campaignUserId, accountId)) {
-            await pool.query(
-                `UPDATE private_campaigns SET status='paused', updated_at=NOW() WHERE id=$1`,
-                [campaignId]
-            );
-            await this._log(campaignId, 'error',
-                `🚫 الحساب ${accountId} موقوف تلقائياً (حماية) — تم إيقاف الحملة وإلغاء كل المهام المتبقية`,
-                accountId
-            );
-            try {
-                const QueueManager = require('../../lib/QueueManager');
-                await QueueManager.cancelCampaignJobs(campaignId);
-            } catch (_) {}
-            return; // اكتمال "ناجح" للمهمة الحالية — التوقف متعمَّد وليس فشلاً يستدعي retry
-        }
-
-        // محاولة الإرسال — [البند 1] عبر sendMessageSafe المحمي حصرياً، مع تمرير
-        // operationType='private' صراحة (الحملات الخاصة دوماً private) وtaskId
-        // لربطها بـ SmartRetry الخاص بـ ProtectionService
+        // محاولة الإرسال عبر sendMessageSafe، مع تمرير operationType='private'
+        // صراحة (الحملات الخاصة دوماً private) وtaskId لتتبّع المهمة
         try {
             await WhatsAppManager.sendMessageSafe(accountId, groupId, { text: message }, {
                 operationType: 'private',
@@ -469,13 +449,7 @@ class PrivateCampaignService {
                 accountId
             );
 
-            // [البند 8] لا داعي لإعادة المحاولة عبر BullMQ إن كان السبب تعليق الحساب —
-            // ProtectionService تكفّل بذلك بالفعل (recordFailure استدعت suspendAccount)
-            if (err.protectionReason === 'account_suspended') {
-                return; // لا نرمي الخطأ → لا retry إضافي من BullMQ على حساب محظور
-            }
-
-            throw err; // إعادة الرمي لـ BullMQ كي يُعيد المحاولة (attempts: 3) للأخطاء العادية فقط
+            throw err; // إعادة الرمي لـ BullMQ كي يُعيد المحاولة (attempts: 3)
         }
 
         // تحديث العدادات الإجمالية
@@ -550,20 +524,6 @@ class PrivateCampaignService {
 
             const target = targetRes.rows[0];
 
-            // [البند 3] لا نرسل من حساب موقوف تلقائياً — نوقف الحملة كاملةً بدل
-            // المحاولة بلا فائدة على حساب محظور
-            if (await ProtectionService.getInstance().isSuspended(userId, target.account_id)) {
-                await pool.query(
-                    `UPDATE private_campaigns SET status='paused', updated_at=NOW() WHERE id=$1`,
-                    [campaignId]
-                );
-                await this._log(campaignId, 'error',
-                    `🚫 الحساب ${target.account_id} موقوف تلقائياً (حماية) — تم إيقاف الحملة`,
-                    target.account_id
-                );
-                break;
-            }
-
             // Get message content
             const msgRes = await pool.query(
                 `SELECT message_text FROM private_campaigns WHERE id=$1`,
@@ -608,14 +568,9 @@ class PrivateCampaignService {
             // Update campaign counters
             await this._updateCounts(campaignId);
 
-            // [البند 1+2] تأخير عشوائي آمن بدل intervalSeconds الثابت — مرتبط
-            // بإعدادات الحماية الخاصة بالمستخدم (يضمن حداً أدنى معقولاً أيضاً
-            // حتى لو كان intervalSeconds المُدخل صغيراً جداً)
+            // تأخير بين الرسائل وفق intervalSeconds التي حددها المستخدم
             const minWaitMs = Math.max(0, intervalSeconds * 1000);
-            await Promise.all([
-                ProtectionService.getInstance().safeDelay(userId, 'private'),
-                delay(minWaitMs * 0.5), // يحترم رغبة المستخدم بحد أدنى تقريبي دون أن يكون صارماً/ثابتاً 100%
-            ]);
+            await delay(minWaitMs);
         }
     }
 }
