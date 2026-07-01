@@ -507,19 +507,37 @@ class LivePublishService {
 
                             for (let i = 0; i < messages.length && !accountSuspendedMidRun; i++) {
                                 const msg = messages[i];
-                                try {
-                                    await this._send(accountId, sendJid, msg, { operationType: 'private' });
-                                    sess.stats.sentMembers++;
-                                    sess.recordSent();
-                                    sess.log('success', `✅ خاص → ${sendJid.split('@')[0]}`);
-                                } catch (e) {
-                                    sess.stats.failedMembers++;
-                                    sess.stats.errorCount++;
-                                    sess.log('error', `❌ خاص → ${sendJid.split('@')[0]}`, e.message);
-                                    // [البند 3] توقف فوري لكل عمليات هذا الحساب عند تعليقه
-                                    if (e.protectionReason === 'account_suspended') {
-                                        accountSuspendedMidRun = true;
-                                        sess.log('error', `🚫 الحساب تعلّق أثناء الإرسال الخاص — إيقاف فوري`);
+                                // [إصلاح الإرسال الخاص] إعادة محاولة حقيقية (MAX_RETRY) لأخطاء
+                                // قابلة للإعادة — كانت غائبة هنا سابقاً، فأي فشل عابر (مهلة اتصال،
+                                // ازدحام مؤقت) كان يُسجَّل فشلاً نهائياً من أول محاولة بلا فرصة ثانية،
+                                // خلافاً لحلقة إرسال المجموعات التي تملك هذه الآلية بالفعل.
+                                let sentMember = false;
+                                for (let attempt = 1; attempt <= MAX_RETRY + 1 && !sentMember && !accountSuspendedMidRun; attempt++) {
+                                    try {
+                                        await this._send(accountId, sendJid, msg, { operationType: 'private' });
+                                        sess.stats.sentMembers++;
+                                        sess.recordSent();
+                                        sess.log('success', `✅ خاص → ${sendJid.split('@')[0]}`);
+                                        sentMember = true;
+                                    } catch (e) {
+                                        // [البند 3] توقف فوري لكل عمليات هذا الحساب عند تعليقه
+                                        if (e.protectionReason === 'account_suspended') {
+                                            accountSuspendedMidRun = true;
+                                            sess.stats.failedMembers++;
+                                            sess.stats.errorCount++;
+                                            sess.log('error', `🚫 الحساب تعلّق أثناء الإرسال الخاص — إيقاف فوري`);
+                                            break;
+                                        }
+                                        // أخطاء غير قابلة لإعادة المحاولة (رقم غير موجود، jid خاطئ...) لا داعي لتكرارها
+                                        const nonRetryable = e.protectionReason && e.protectionReason !== 'rate_limit_hour' && e.protectionReason !== 'rate_limit_day';
+                                        if (attempt <= MAX_RETRY && !nonRetryable) {
+                                            sess.log('warning', `⚠️ إعادة المحاولة ${attempt}/${MAX_RETRY} — خاص → ${sendJid.split('@')[0]}`, e.message);
+                                            await this._safeDelay(sess, accountId, 'private');
+                                        } else {
+                                            sess.stats.failedMembers++;
+                                            sess.stats.errorCount++;
+                                            sess.log('error', `❌ خاص → ${sendJid.split('@')[0]}`, e.message);
+                                        }
                                     }
                                 }
                                 sess.tick();
