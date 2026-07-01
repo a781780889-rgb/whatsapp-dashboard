@@ -172,6 +172,22 @@ const SystemDB = {
             )
         `);
 
+        // [استمرارية النشر المباشر] — يسمح باستئناف جلسات النشر تلقائياً
+        // بعد أي إعادة تشغيل لعملية الخادم (Railway restart/redeploy/crash)
+        // بدل توقفها بشكل كامل وفقدان التقدم.
+        await p.query(`
+            CREATE TABLE IF NOT EXISTS live_publish_sessions (
+                id UUID PRIMARY KEY,
+                status VARCHAR(20) NOT NULL DEFAULT 'running',
+                cfg JSONB NOT NULL,
+                cursor JSONB DEFAULT '{}',
+                stats JSONB DEFAULT '{}',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_live_publish_status ON live_publish_sessions(status)`).catch(() => {});
+
         // ── Keyword Monitoring Tables ─────────────────────────────────────
         await p.query(`
             CREATE TABLE IF NOT EXISTS kw_keywords (
