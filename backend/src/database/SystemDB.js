@@ -372,18 +372,33 @@ Object.assign(SystemDB, {
         return Math.max(0, Math.ceil(ms / 86400000));
     },
 
+    // [FIX-AUTH-REUSE] كان هذا الاستدعاء يبتلع أي خطأ كتابة بصمت (.catch(()=>{}))
+    // — فلو فشل الإدراج لأي سبب (تحميل مؤقت على DB، إعادة تشغيل الخادم أثناء
+    // الكتابة...)، يبقى الـ refresh token صالحاً تشفيرياً (JWT موقّع بنجاح)
+    // لكن بلا أي صف مطابق في قاعدة البيانات. أول محاولة refresh حقيقية بهذا
+    // التوكن كانت تُفسَّر خطأً على أنها "إعادة استخدام" (لأن findRefreshToken
+    // ترجع null)، فيُعتبر الـ family كله "مخترقاً" وتُبطَل الجلسة بالكامل رغم
+    // أنه أول استخدام فعلي — بالضبط ما ظهر في سجلات النشر: "[Auth] REUSE
+    // DETECTED" فور تسجيل الدخول رغم عدم وجود أي سرقة حقيقية. الآن الخطأ
+    // يُرفع للأعلى ليتعامل معه المستدعي (issue/refresh) صراحة بدل الفشل الصامت.
     async saveRefreshToken(userId, tokenHash, ip, userAgent, expiresAt, familyId) {
         await this.run(
             `INSERT INTO refresh_tokens (token_hash, family_id, user_id, used, expires_at)
              VALUES ($1, $2, $3, FALSE, $4)
              ON CONFLICT (token_hash) DO NOTHING`,
             [tokenHash, familyId || null, userId, expiresAt]
-        ).catch(() => {});
+        );
     },
 
+    // [FIX-AUTH-REUSE] يُرجع الصف فقط إن كان لا يزال غير مُستخدَم (used=FALSE)
+    // وغير منتهي الصلاحية — هذا هو الفحص الصحيح لتمييز "توكن صالح للاستخدام"
+    // عن "توكن مُستخدَم سابقاً/منتهي"، بدل الاعتماد فقط على وجود الصف (كان
+    // أي صف موجود يُعتبر صالحاً حتى لو used=TRUE بالفعل، مما يسمح نظرياً
+    // بإعادة استخدام توكن مُدار بالفعل بدل رفضه واعتباره اختراقاً محتملاً).
     async findRefreshToken(tokenHash) {
         return await this.get(
-            `SELECT * FROM refresh_tokens WHERE token_hash = $1`, [tokenHash]
+            `SELECT * FROM refresh_tokens WHERE token_hash = $1 AND used = FALSE AND expires_at > NOW()`,
+            [tokenHash]
         ).catch(() => null);
     },
 
