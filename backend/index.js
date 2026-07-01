@@ -352,6 +352,17 @@ async function bootstrap() {
         logger.info('[Bootstrap] ✅ All services initialized successfully.');
         logger.info(`[Bootstrap] PORT=${PORT} | Phase5: JWTFamilyTracking=ON | CSRF=ON | RateLimit=ON | Validation=ON | Encryption=ON`);
 
+        // [استمرارية النشر المباشر] استئناف أي جلسات نشر كانت جارية قبل
+        // إعادة تشغيل الخادم (Railway restart/redeploy/crash). يُنفَّذ بعد
+        // تجهيز جلسات واتساب وجاهزية الخدمة، مع مهلة قصيرة لضمان استقرار
+        // اتصالات Baileys قبل بدء الإرسال الفعلي.
+        setTimeout(() => {
+            const LivePublishService = require('./src/api/services/LivePublishService');
+            LivePublishService.resumeAll().catch(err =>
+                logger.error({ err }, '[LivePublishService] فشل استئناف جلسات النشر المباشر')
+            );
+        }, 10_000);
+
         setupGracefulShutdown();
 
     } catch (err) {
