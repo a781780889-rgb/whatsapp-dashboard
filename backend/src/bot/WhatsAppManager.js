@@ -50,6 +50,39 @@ const reconnectAt = new Map();    // accountId → attempt count (exponential ba
 // هذا الـ Set يتتبع الحسابات التي أكدت فعلياً الوصول لـ connection === 'open'.
 const readySessions = new Set();  // accountId
 
+// [FIX-SEND-SERVER-ACK] تتبع تأكيد استلام خادم واتساب الفعلي لكل رسالة صادرة.
+// نتيجة sock.sendMessage() الناجحة (key.id موجود) تعني فقط أن Baileys بنى
+// الرسالة محلياً وأرسلها للطابور — status:1 (PENDING) في النتيجة يؤكد ذلك،
+// وليس أنها وصلت فعلياً لخوادم واتساب. التأكيد الحقيقي الوحيد هو حدث
+// messages.update لاحق لنفس key.id بحالة SERVER_ACK (status >= 2) أو أعلى.
+// بدون هذا الانتظار، كانت رسائل بحالة PENDING دائمة (بسبب جلسة معطوبة أو
+// قطع اتصال لحظي) تُسجَّل "ناجحة" رغم عدم وصولها إطلاقاً.
+const _pendingAckResolvers = new Map(); // messageId → { resolve, reject, timer }
+const SEND_ACK_TIMEOUT_MS = 12_000;
+
+function _waitForServerAck(messageId) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            _pendingAckResolvers.delete(messageId);
+            reject(Object.assign(new Error('لم يصل تأكيد استلام من خادم واتساب خلال المهلة — الرسالة قد تكون لم تُبَث فعلياً'), { protectionReason: 'send_unconfirmed' }));
+        }, SEND_ACK_TIMEOUT_MS);
+        _pendingAckResolvers.set(messageId, { resolve, reject, timer });
+    });
+}
+
+function _resolveServerAck(messageId, status) {
+    const entry = _pendingAckResolvers.get(messageId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    _pendingAckResolvers.delete(messageId);
+    // status: 0=ERROR, 1=PENDING, 2=SERVER_ACK, 3=DELIVERY_ACK, 4=READ, 5=PLAYED
+    if (status === 0) {
+        entry.reject(Object.assign(new Error('خادم واتساب أعاد حالة خطأ (status=ERROR) لهذه الرسالة'), { protectionReason: 'send_server_error' }));
+    } else {
+        entry.resolve(status);
+    }
+}
+
 // [البند 4: Multi-Tenant] لا نخزّن user_id بشكل ثابت — نجلبه عند الحاجة عبر
 // _getAccountMeta() مع كاش قصير العمر (60 ثانية) لكل accountId لتفادي ضغط DB
 // مفرط دون أن نفترض user_id ثابتاً بمعزل عن قاعدة البيانات (مصدر الحقيقة الوحيد).
@@ -293,6 +326,20 @@ class WhatsAppManager {
                         }
                     } catch {}
                 }
+            }
+        });
+
+        // [FIX-SEND-SERVER-ACK] يصل هذا الحدث عندما يُحدِّث واتساب حالة رسالة
+        // صادرة (PENDING → SERVER_ACK → DELIVERY_ACK...) أو يُبلغ عن خطأ فيها.
+        // نستخدمه لتأكيد أن sendMessage() وصل فعلياً لخوادم واتساب، بدل الوثوق
+        // بمجرد نجاح استدعاء الدالة محلياً (انظر sendMessageSafe/_sendWithPresence).
+        sock.ev.on('messages.update', (updates) => {
+            for (const u of updates) {
+                const id = u.key?.id;
+                if (!id) continue;
+                const status = u.update?.status;
+                if (status === undefined || status === null) continue;
+                _resolveServerAck(id, status);
             }
         });
 
@@ -648,6 +695,25 @@ class WhatsAppManager {
                 err.protectionReason = 'send_unconfirmed';
                 err.rawResult = result;
                 throw err;
+            }
+
+            // [FIX-SEND-SERVER-ACK] وجود key.id فقط يعني أن Baileys بنى الرسالة
+            // محلياً (status:1 = PENDING) — وهذا وحده لا يؤكد وصولها لخوادم
+            // واتساب فعلياً (خصوصاً إذا كانت جلسة التشفير معطوبة). ننتظر الآن
+            // فعلياً حدث messages.update الذي يرفع الحالة إلى SERVER_ACK (2)
+            // أو أعلى؛ إن انتهت المهلة أو وصلت حالة ERROR، نعتبر الإرسال غير
+            // مؤكَّد ونرمي خطأ بدل تسجيله نجاحاً وهمياً.
+            //
+            // استثناء: إن كانت الحالة الأولية في result.status نفسها SERVER_ACK
+            // (2) أو أعلى مباشرة (بعض المسارات/الأجهزة القديمة قد تُرجعها كذلك)،
+            // لا حاجة للانتظار.
+            if ((result.status ?? 1) < 2) {
+                try {
+                    await _waitForServerAck(result.key.id);
+                } catch (ackErr) {
+                    ackErr.rawResult = result;
+                    throw ackErr;
+                }
             }
 
             return result;
