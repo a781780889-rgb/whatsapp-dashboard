@@ -14,7 +14,6 @@ const WhatsAppManager = require('../../bot/WhatsAppManager');
 const DatabaseManager = require('../../database/DatabaseManager');
 const SystemDB        = require('../../database/SystemDB');
 const SocketBridge    = require('../../core/SocketBridge');
-const { ProtectionService } = require('./ProtectionService');
 const { queryAll: pgQueryAll } = require('../../lib/postgres');
 
 const MAX_RETRY   = 2;
@@ -202,32 +201,9 @@ class LivePublishService {
     //    @param {string} accountId
     //    @param {'group'|'private'|'ad'} kind  نوع التأخير المطلوب من cfg.delays
     async _safeDelay(sess, accountId, kind = 'group') {
-        const userId = await this._getUserId(accountId);
-
         // القيمة التي اختارها المستخدم فعلياً من واجهة النشر المباشر (خاصة بهذه الجلسة)
         const userMs = this._userDelayMs(sess, kind);
-
-        // لا يوجد مستخدم مرتبط بالحساب (حالة نادرة) → نلتزم بقيمة المستخدم مباشرة فقط
-        if (!userId) {
-            return this._sleep(userMs);
-        }
-
-        // نجلب الحد الأدنى الآمن من نظام الحماية (كأرضية فقط) دون تنفيذ delay مزدوج
-        const operationType = kind === 'private' ? 'private' : 'group';
-        let floorMs = 0;
-        try {
-            const svc = ProtectionService.getInstance();
-            const cfgProt = await svc.loadConfig(userId);
-            const minSec = operationType === 'private'
-                ? (cfgProt.private_min_delay_between_ops ?? cfgProt.min_delay_between_ops)
-                : (cfgProt.group_min_delay_between_ops   ?? cfgProt.min_delay_between_ops);
-            floorMs = Math.max(0, (minSec || 0) * 1000);
-        } catch { /* لا نمنع النشر لو فشل جلب إعدادات الحماية */ }
-
-        // نأخذ الأكبر بين اختيار المستخدم وأرضية الأمان — هكذا يُحترم الفارق
-        // الزمني الذي حدّده المستخدم فعلياً، مع ضمان عدم النزول تحت الحد الآمن.
-        const finalMs = Math.max(userMs, floorMs);
-        return this._sleep(finalMs);
+        return this._sleep(userMs);
     }
 
     // ── قراءة قيمة التأخير التي اختارها المستخدم من cfg.delays الخاصة بالجلسة (ms) ─
@@ -449,22 +425,7 @@ class LivePublishService {
                 sess.log('success', `✅ الحساب "${accName}" أصبح جاهزاً — استئناف النشر`);
             }
 
-            // [البند 3] لا نبدأ بحساب موقوف تلقائياً (محظور / متجاوز عتبة الأخطاء)
-            // — إلا إذا كان نظام الحماية معطلاً بالكامل من الإعدادات (is_active=false)،
-            // وفي هذه الحالة نتجاوز فحص الإيقاف تماماً كما يفعل checkOperation().
-            const accUserId = await this._getUserId(accountId);
-            if (accUserId) {
-                const protSvc = ProtectionService.getInstance();
-                const protCfg = await protSvc.loadConfig(accUserId);
-                if (protCfg.is_active !== false && await protSvc.isSuspended(accUserId, accountId)) {
-                    sess.log('error', `🚫 الحساب "${accName}" موقوف تلقائياً (حماية) — تم تخطي كل مجموعاته`);
-                    sess.stats.errorCount++;
-                    sess.stats.completedGroups += groupJids.length;
-                    sess.tick();
-                    continue;
-                }
-            }
-            let accountSuspendedMidRun = false; // [البند 3] توقف فوري لهذا الحساب لو تعلّق أثناء التشغيل
+            let accountSuspendedMidRun = false; // يبقى false دائماً بعد إزالة نظام الحماية — محفوظ للتوافق مع منطق التحكم بالحلقة
 
             let accountDB;
             try { accountDB = await DatabaseManager.getAccountDB(accountId); } catch { accountDB = null; }
