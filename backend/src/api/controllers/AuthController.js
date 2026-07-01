@@ -209,8 +209,26 @@ class AuthController {
             const stored = await SystemDB.findRefreshToken(tokenHash);
 
             if (!stored) {
-                // التوكن مُبطَل في DB لكنه لا يزال صالح cryptographically
-                // → إعادة استخدام بعد rotation → سرقة محتملة!
+                // [FIX-AUTH-REUSE] فترة سماح قصيرة (10 ثوانٍ) قبل اعتبار الأمر
+                // اختراقاً فعلياً: لو فُتح لوحة التحكم في أكثر من تبويب/جهاز
+                // بنفس الجلسة، قد يصل طلبا refresh لنفس التوكن القديم بفارق
+                // أجزاء من الثانية بعد أن دار أحدهما التوكن بالفعل (rotation) —
+                // هذا تسابق شرعي وليس سرقة، وكان سابقاً يُفسَّر خطأً كاختراق
+                // فيُبطِل الجلسة الحقيقية للمستخدم بالكامل (بما يشمل النشر
+                // المباشر وكل ميزة تعتمد على المصادقة). إن وُجد بديل "أحدث"
+                // (rotated_to) صادر عن نفس هذا الـ hash خلال آخر 10 ثوانٍ، نُعيد
+                // نفس الزوج الجديد بدل رفض الطلب أو إبطال الـ family بأكمله.
+                const recent = await JWTService.getRecentRotation(tokenHash);
+                if (recent) {
+                    return res.json({
+                        success:      true,
+                        accessToken:  recent.accessToken,
+                        refreshToken: recent.refreshToken,
+                    });
+                }
+
+                // التوكن مُبطَل في DB فعلياً منذ فترة طويلة، ولا يوجد بديل حديث
+                // له — إعادة استخدام حقيقية بعد rotation قديم → سرقة محتملة.
                 if (family) {
                     await JWTService.compromiseFamily(family);
                     await SystemDB.revokeAllUserTokensByFamily(family).catch(() => {});
@@ -244,6 +262,12 @@ class AuthController {
             const ip        = this._ip(req);
             const userAgent = req.headers['user-agent'] || '';
             await SystemDB.saveRefreshToken(user.id, newHash, ip, userAgent, newExpiresAt, newFamily);
+
+            // [FIX-AUTH-REUSE] تسجيل "ماذا أصبح هذا التوكن القديم" لفترة سماح
+            // قصيرة، حتى لو وصل طلب refresh آخر بنفس التوكن القديم خلال ثوانٍ
+            // (تسابق شرعي بين تبويبات/أجهزة) يحصل على نفس الزوج الجديد بدل
+            // إبطال الجلسة بأكملها.
+            await JWTService.recordRotation(tokenHash, newAccessToken, newRefreshToken);
 
             // تحديث الـ family في Redis
             if (family) await JWTService.deleteFamily(family);
