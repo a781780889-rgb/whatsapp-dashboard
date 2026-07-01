@@ -284,6 +284,26 @@ const SystemDB = {
             END $$;
         `).catch(() => {});
 
+        // ── [إصلاح تسجيل الدخول] Migration: إضافة حقل family_id لجدول
+        //    refresh_tokens — جدول refresh_tokens كان موجوداً مسبقاً في قواعد
+        //    بيانات الإنتاج من قبل إضافة ميزة "تتبّع عائلة التوكنات" (JWT
+        //    Family Tracking / اكتشاف إعادة الاستخدام)، و`CREATE TABLE IF NOT
+        //    EXISTS` لا يضيف أعمدة جديدة لجدول موجود بالفعل. النتيجة: كل عملية
+        //    تسجيل دخول كانت تفشل فوراً بخطأ
+        //    "column family_id of relation refresh_tokens does not exist"
+        //    لأن saveRefreshToken() يحاول الكتابة لعمود غير موجود فعلياً.
+        await p.query(`
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='refresh_tokens' AND column_name='family_id'
+                ) THEN
+                    ALTER TABLE refresh_tokens ADD COLUMN family_id VARCHAR(200);
+                END IF;
+            END $$;
+        `).catch(() => {});
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family_id ON refresh_tokens(family_id)`).catch(() => {});
+
         console.log('[SystemDB] Schema initialized.');
     },
 
