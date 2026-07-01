@@ -58,6 +58,16 @@ const ACCOUNT_META_TTL_MS = 60_000;
 
 let _io = null;
 
+// [FIX-RAILWAY-FALSE-BAN] عدّاد إشارات forbidden متتالية لكل حساب (بدون أي
+// نجاح اتصال بينها). طبقة بروكسي Railway قد تُرجع أحياناً 403 وهمي عند
+// قطع اتصال WebSocket مفاجئ (ليس حظراً فعلياً من واتساب)، فتُفسَّر خطأً على
+// أنها حظر دائم وتوقف الحساب فوراً حتى لو كانت المصافحة سليمة تماماً.
+// الحل: لا نحظر من أول إشارة 403 — نحاول إعادة اتصال سريعة تأكيدية واحدة
+// أولاً؛ فقط إذا تكرر 403 مرتين متتاليتين دون نجاح اتصال بينهما، نعتبره
+// حظراً حقيقياً وننفّذ suspendAccount.
+const _forbiddenStrikes = new Map(); // accountId → count
+const FORBIDDEN_CONFIRM_DELAY_MS = 8000; // مهلة قصيرة لإعادة الاتصال التأكيدية
+
 function emit(event, data) {
     try { SocketBridge.emit(event, data); } catch {}
     try { if (_io) _io.emit(event, data); } catch {}
@@ -165,6 +175,7 @@ class WhatsAppManager {
             if (connection === 'open') {
                 connecting.delete(accountId);
                 reconnectAt.delete(accountId); // إعادة ضبط عداد المحاولات عند نجاح الاتصال
+                _forbiddenStrikes.delete(accountId); // [FIX-RAILWAY-FALSE-BAN] اتصال ناجح ينفي أي إشارة forbidden سابقة
                 qrData.delete(accountId);
                 readySessions.add(accountId); // [FIX-LIVE-PUBLISH-READY] الاتصال مكتمل فعلياً الآن
                 this._invalidateAccountMeta(accountId);
@@ -209,16 +220,33 @@ class WhatsAppManager {
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut;
                 const isBadSession = statusCode === DisconnectReason.badSession;
 
+                // [FIX-RAILWAY-FALSE-BAN] لا نثق بإشارة forbidden أولى — بروكسي Railway
+                // قد يُسقط اتصال WebSocket بشكل مفاجئ فيُرجع Baileys هذا كـ 403 وهمي
+                // رغم أن الجلسة سليمة تماماً وما زالت صالحة لدى واتساب فعلياً. لذا
+                // نحاول إعادة اتصال تأكيدية سريعة أولاً؛ فقط عند تكرار forbidden
+                // مرتين متتاليتين دون أي اتصال ناجح بينهما نعتبره حظراً حقيقياً.
+                const strikes = isForbidden ? (_forbiddenStrikes.get(accountId) || 0) + 1 : 0;
+                if (isForbidden) _forbiddenStrikes.set(accountId, strikes);
+                const isConfirmedBan = isForbidden && strikes >= 2;
+
                 const noReconnectCodes = new Set([
                     DisconnectReason.loggedOut,
                     DisconnectReason.badSession,
-                    DisconnectReason.forbidden,
                 ]);
-                const shouldReconnect = !noReconnectCodes.has(statusCode);
+                const shouldReconnect = isForbidden ? !isConfirmedBan : !noReconnectCodes.has(statusCode);
 
-                if (isForbidden) {
-                    // ── [البند 3] حظر حقيقي — وليس مجرد قطع اتصال ─────────────
+                if (isConfirmedBan) {
+                    // ── [البند 3] حظر حقيقي مؤكَّد (403 مرتين متتاليتين) ──────
+                    _forbiddenStrikes.delete(accountId);
                     await this._handleAccountBanned(accountId, statusCode);
+                } else if (isForbidden) {
+                    // إشارة forbidden أولى فقط — نعاملها كقطع اتصال عادي وننتظر
+                    // محاولة إعادة الاتصال التأكيدية قبل أي حكم نهائي.
+                    console.warn(`[WAManager] Account ${accountId} got forbidden(403) once — treating as possible proxy glitch, confirming via reconnect (strike ${strikes}/2)...`);
+                    await SystemDB.run(
+                        `UPDATE accounts SET status='disconnected', updated_at=NOW() WHERE id=$1`, [accountId]
+                    ).catch(() => {});
+                    emit('account_status', { accountId, status: 'disconnected' });
                 } else {
                     await SystemDB.run(
                         `UPDATE accounts SET status='disconnected', updated_at=NOW() WHERE id=$1`, [accountId]
@@ -227,19 +255,22 @@ class WhatsAppManager {
                 }
 
                 if (shouldReconnect) {
-                    // Exponential backoff: 5s, 10s, 20s, 40s, 60s (max)
+                    // إشارة forbidden الأولى تُعاد فوراً تقريباً (تأكيد سريع)، بينما
+                    // بقية الأخطاء تتبع exponential backoff العادي: 5s, 10s, 20s, 40s, 60s
                     const attempt = (reconnectAt.get(accountId) || 0) + 1;
                     reconnectAt.set(accountId, attempt);
-                    const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60000);
+                    const delay = isForbidden
+                        ? FORBIDDEN_CONFIRM_DELAY_MS
+                        : Math.min(5000 * Math.pow(2, attempt - 1), 60000);
                     console.log(`[WAManager] Account ${accountId} disconnected — reconnecting in ${delay / 1000}s... (attempt ${attempt})`);
                     setTimeout(() => this._startSession(accountId), delay);
                 } else {
                     reconnectAt.delete(accountId);
-                    const reasonLabel = isForbidden ? 'forbidden/banned' : (isLoggedOut ? 'logged out' : (isBadSession ? 'bad session' : 'unknown'));
+                    const reasonLabel = isConfirmedBan ? 'forbidden/banned (confirmed)' : (isLoggedOut ? 'logged out' : (isBadSession ? 'bad session' : 'unknown'));
                     console.log(`[WAManager] Account ${accountId} stopped (statusCode=${statusCode}, reason=${reasonLabel}). Not reconnecting.`);
                     qrData.delete(accountId);
                     this._invalidateAccountMeta(accountId);
-                    // حذف الجلسة من Redis و PostgreSQL عند logout/forbidden
+                    // حذف الجلسة من Redis و PostgreSQL عند logout/forbidden مؤكَّد فقط
                     try { const SP = require('../core/SessionPersistence'); await SP.delete(accountId); } catch {}
                     await deletePostgreSQLAuthState(accountId, SystemDB).catch(() => {});
                 }
