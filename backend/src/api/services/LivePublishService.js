@@ -450,13 +450,19 @@ class LivePublishService {
             }
 
             // [البند 3] لا نبدأ بحساب موقوف تلقائياً (محظور / متجاوز عتبة الأخطاء)
+            // — إلا إذا كان نظام الحماية معطلاً بالكامل من الإعدادات (is_active=false)،
+            // وفي هذه الحالة نتجاوز فحص الإيقاف تماماً كما يفعل checkOperation().
             const accUserId = await this._getUserId(accountId);
-            if (accUserId && await ProtectionService.getInstance().isSuspended(accUserId, accountId)) {
-                sess.log('error', `🚫 الحساب "${accName}" موقوف تلقائياً (حماية) — تم تخطي كل مجموعاته`);
-                sess.stats.errorCount++;
-                sess.stats.completedGroups += groupJids.length;
-                sess.tick();
-                continue;
+            if (accUserId) {
+                const protSvc = ProtectionService.getInstance();
+                const protCfg = await protSvc.loadConfig(accUserId);
+                if (protCfg.is_active !== false && await protSvc.isSuspended(accUserId, accountId)) {
+                    sess.log('error', `🚫 الحساب "${accName}" موقوف تلقائياً (حماية) — تم تخطي كل مجموعاته`);
+                    sess.stats.errorCount++;
+                    sess.stats.completedGroups += groupJids.length;
+                    sess.tick();
+                    continue;
+                }
             }
             let accountSuspendedMidRun = false; // [البند 3] توقف فوري لهذا الحساب لو تعلّق أثناء التشغيل
 
