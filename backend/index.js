@@ -353,15 +353,20 @@ async function bootstrap() {
         logger.info(`[Bootstrap] PORT=${PORT} | Phase5: JWTFamilyTracking=ON | CSRF=ON | RateLimit=ON | Validation=ON | Encryption=ON`);
 
         // [استمرارية النشر المباشر] استئناف أي جلسات نشر كانت جارية قبل
-        // إعادة تشغيل الخادم (Railway restart/redeploy/crash). يُنفَّذ بعد
-        // تجهيز جلسات واتساب وجاهزية الخدمة، مع مهلة قصيرة لضمان استقرار
-        // اتصالات Baileys قبل بدء الإرسال الفعلي.
+        // إعادة تشغيل الخادم (Railway restart/redeploy/crash).
+        // [FIX-LIVE-PUBLISH-READY] كانت المهلة السابقة ثابتة (10 ثوانٍ فقط)
+        // بغض النظر عن حالة اتصال Baileys الفعلية — في كثير من الحالات لا
+        // تكتمل مصافحة الحساب مع واتساب خلال 10 ثوانٍ، فتبدأ جلسة النشر
+        // المُستأنفة وتفشل فوراً على حساب "متصل" في الذاكرة لكن غير جاهز
+        // فعلياً بعد. الآن LivePublishService نفسها تنتظر جاهزية كل حساب
+        // فعلياً (waitUntilReady) قبل الإرسال، لذا تكفي مهلة أقصر هنا فقط
+        // لضمان بدء initSession لكل الحسابات أولاً.
         setTimeout(() => {
             const LivePublishService = require('./src/api/services/LivePublishService');
             LivePublishService.resumeAll().catch(err =>
                 logger.error({ err }, '[LivePublishService] فشل استئناف جلسات النشر المباشر')
             );
-        }, 10_000);
+        }, 5_000);
 
         setupGracefulShutdown();
 
