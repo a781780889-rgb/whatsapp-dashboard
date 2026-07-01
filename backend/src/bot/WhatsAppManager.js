@@ -592,27 +592,59 @@ class WhatsAppManager {
             else targetJids.push(pJid);
         }
 
-        // [إصلاح الإرسال الخاص] تحويل معرّفات LID المتبقية إلى jid فعلي عبر
-        // sock.onWhatsApp() — استعلام شبكي حقيقي يُرجع الرقم/الـ jid القابل للإرسال.
-        // يُنفَّذ فقط لمن لا يوجد لهم بديل جاهز، وبأمان (تجاهل الفشل الفردي).
-        if (needsResolve.length && typeof sock.onWhatsApp === 'function') {
-            try {
-                const lookupInputs = needsResolve.map(j => j.split('@')[0]);
-                const results = await sock.onWhatsApp(...lookupInputs);
-                for (const r of results || []) {
-                    if (!r?.exists || !r?.jid) continue;
-                    const resolvedJid = normalize(r.jid);
-                    // نربط كل نتيجة بمعرّف LID الأصلي الذي طلبناه عبر lid إن توفر، أو نطابق بالترتيب
-                    const originalLid = r.lid ? normalize(r.lid) : null;
-                    if (originalLid && needsResolve.includes(originalLid)) {
+        // [إصلاح الإرسال الخاص — Baileys 7] تحويل معرّفات LID المتبقية إلى jid
+        // فعلي قابل للإرسال. ملاحظة مهمة: ابتداءً من Baileys 7.0.0، onWhatsApp()
+        // لم يعد يُرجع حقل `lid` في نتائجه (كان هذا هو الأساس القديم الذي اعتمد
+        // عليه الكود سابقاً وتوقف عن العمل، فتسبب بفشل كل الإرسال الخاص القادم
+        // من أعضاء LID). البديل الرسمي المُوثّق من مطوري Baileys هو استخدام
+        // sock.signalRepository.lidMapping.getPNForLID() الذي يعيد رقم الهاتف
+        // الحقيقي المرتبط بمعرّف LID مباشرة من الخريطة المحلية التي يبنيها
+        // Baileys تلقائياً أثناء المزامنة (بدون استعلام شبكي إضافي).
+        if (needsResolve.length) {
+            const lidStore = sock.signalRepository?.lidMapping;
+
+            if (lidStore && typeof lidStore.getPNForLID === 'function') {
+                for (const lidJid of needsResolve) {
+                    try {
+                        const pn = await lidStore.getPNForLID(lidJid);
+                        if (!pn) continue;
+                        const resolvedJid = normalize(
+                            pn.includes('@') ? pn : `${pn}@s.whatsapp.net`
+                        );
+                        if (resolvedJid) {
+                            sendableByJid[lidJid] = resolvedJid;
+                            if (resolvedJid.endsWith('@s.whatsapp.net')) {
+                                phoneByJid[lidJid] = resolvedJid.split('@')[0];
+                            }
+                        }
+                    } catch {
+                        // فشل فردي — نتجاهله ونكمل البقية، العضو سيُستبعد أدناه إن تعذّر الحل
+                    }
+                }
+            }
+
+            // ── خط دفاع أخير: onWhatsApp() بصيغته الجديدة (فحص وجود فقط، بدون lid) ──
+            // مفيد فقط لو أرسلنا الـ LID الخام كمدخل ورجع لنا exists=true+jid صالح
+            // (بعض إصدارات الخادم قد تُرجع jid مباشرة دون الحاجة لخريطة lidMapping).
+            const stillUnresolved = needsResolve.filter(j => !sendableByJid[j]);
+            if (stillUnresolved.length && typeof sock.onWhatsApp === 'function') {
+                try {
+                    const lookupInputs = stillUnresolved.map(j => j.split('@')[0]);
+                    const results = await sock.onWhatsApp(...lookupInputs);
+                    // ربط بالترتيب: onWhatsApp يحافظ على ترتيب المدخلات في نتائجه
+                    results?.forEach((r, idx) => {
+                        const originalLid = stillUnresolved[idx];
+                        if (!originalLid || !r?.exists || !r?.jid) return;
+                        const resolvedJid = normalize(r.jid);
+                        if (!resolvedJid) return;
                         sendableByJid[originalLid] = resolvedJid;
                         if (resolvedJid.endsWith('@s.whatsapp.net')) {
                             phoneByJid[originalLid] = resolvedJid.split('@')[0];
                         }
-                    }
+                    });
+                } catch {
+                    // فشل التحويل الجماعي — الأعضاء غير المحلولين سيُستبعدون تلقائياً أدناه
                 }
-            } catch {
-                // فشل التحويل الجماعي — الأعضاء غير المحلولين سيُستبعدون تلقائياً أدناه
             }
         }
 
