@@ -65,6 +65,31 @@ const JWTService = {
         try { await _redis.del(`family:${familyId}`); } catch {}
     },
 
+    // ── [FIX-AUTH-REUSE] فترة سماح لتسابق rotation الشرعي ────────────────────
+    // عند تدوير refresh token، نحفظ "ماذا أصبح التوكن القديم" لفترة قصيرة
+    // (ثوانٍ معدودة). إن وصل طلب refresh آخر بنفس التوكن القديم خلال هذه
+    // الفترة (تبويب ثانٍ/جهاز آخر استخدم نفس الجلسة تقريباً في نفس اللحظة)،
+    // نُعيد له نفس الزوج الجديد بدل معاملته كسرقة واعتبار الجلسة بأكملها
+    // مخترقة. بعد انتهاء المهلة، أي إعادة استخدام تُعامل كاختراق حقيقي كالمعتاد.
+    async recordRotation(oldTokenHash, newAccessToken, newRefreshToken, graceMs = 10_000) {
+        if (!_redis) return;
+        try {
+            await _redis.set(
+                `rot:${oldTokenHash}`,
+                JSON.stringify({ accessToken: newAccessToken, refreshToken: newRefreshToken }),
+                'PX', graceMs
+            );
+        } catch {}
+    },
+
+    async getRecentRotation(oldTokenHash) {
+        if (!_redis) return null;
+        try {
+            const raw = await _redis.get(`rot:${oldTokenHash}`);
+            return raw ? JSON.parse(raw) : null;
+        } catch { return null; }
+    },
+
     // ── Blacklist ─────────────────────────────────────────────────────────────
     async blacklistAccessToken(token, payload) {
         if (!_redis) return;
