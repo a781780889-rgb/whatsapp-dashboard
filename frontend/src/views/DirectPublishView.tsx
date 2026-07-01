@@ -62,6 +62,11 @@ const SOCKET_URL = (() => {
   try { return new URL(API).origin; } catch { return ''; }
 })();
 
+// [إصلاح استمرارية اللوحة] مفتاح تخزين محلي لحفظ sessionId الجاري حالياً،
+// حتى تُعاد قراءته فور فتح الصفحة من جديد (خروج/دخول، تحديث المتصفح، تبديل
+// تبويب) بدل فقدانه بمجرد إعادة تركيب الكومبوننت.
+const LIVE_SESSION_KEY = 'live_publish_active_session_id';
+
 const STEPS = [
   { id: 1, label: 'الحسابات',  icon: Smartphone },
   { id: 2, label: 'المجموعات', icon: Users },
@@ -232,14 +237,75 @@ export default function DirectPublishView({
   const [delayUnit,   setDelayUnit]   = useState<'sec'|'min'>('sec');
 
   // ── Live session ────────────────────────────────────────────
-  const [sessionId,   setSessionId]   = useState<string|null>(null);
-  const [liveStatus,  setLiveStatus]  = useState<'idle'|'running'|'paused'|'stopped'|'complete'|'error'>('idle');
+  // [إصلاح استمرارية اللوحة] القيمة الابتدائية تُقرأ من localStorage مباشرة
+  // بدل idle/null دائماً — بهذا لا تُغلق اللوحة بمجرد إعادة تركيب الكومبوننت
+  // (خروج من الصفحة والعودة إليها)، وتبدأ بعرض "جارٍ التحقق" ريثما يتأكد
+  // useEffect أدناه من حالة الجلسة الحقيقية من الخادم.
+  const [sessionId,   setSessionId]   = useState<string|null>(() => {
+    try { return localStorage.getItem(LIVE_SESSION_KEY); } catch { return null; }
+  });
+  const [liveStatus,  setLiveStatus]  = useState<'idle'|'running'|'paused'|'stopped'|'complete'|'error'>(() => {
+    try { return localStorage.getItem(LIVE_SESSION_KEY) ? 'running' : 'idle'; } catch { return 'idle'; }
+  });
   const [liveProgress, setLiveProgress] = useState<LiveProgress|null>(null);
   const [liveLogs,    setLiveLogs]    = useState<LogEntry[]>([]);
   const [starting,    setStarting]    = useState(false);
   const [ctrlLoading, setCtrlLoading] = useState(false);
   const socketRef = useRef<Socket|null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // ── [إصلاح استمرارية اللوحة] عند فتح الصفحة: تحقّق من وجود جلسة نشطة فعلياً
+  // على الخادم. حالتان:
+  //  1) لدينا sessionId محفوظ محلياً → نجلب حالتها مباشرة عبر status endpoint
+  //     (تعبئة فورية لكل الأرقام بدل انتظار أول حدث Socket.IO القادم).
+  //  2) لا يوجد شيء محفوظ محلياً (متصفح/جهاز آخر، أو localStorage مُسح) →
+  //     نسأل الخادم صراحة عبر /live-publish/active إن كانت هناك جلسة جارية
+  //     مرتبطة بأي من حسابات المستخدم الحالية، ونلتحق بها تلقائياً.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function reconnectToActiveSession() {
+      const savedId = (() => { try { return localStorage.getItem(LIVE_SESSION_KEY); } catch { return null; } })();
+
+      if (savedId) {
+        try {
+          const res  = await authFetch(`${API}/live-publish/${savedId}/status`);
+          const data = await res.json();
+          if (cancelled) return;
+          if (data.success && (data.status === 'running' || data.status === 'paused')) {
+            setSessionId(savedId);
+            setLiveStatus(data.status);
+            setLiveProgress(data as any);
+            setLiveLogs(data.logs || []);
+            return;
+          }
+          // الجلسة المحفوظة لم تعد قائمة (اكتملت/حُذفت) — تنظيف
+          try { localStorage.removeItem(LIVE_SESSION_KEY); } catch {}
+          setSessionId(null); setLiveStatus('idle');
+        } catch { /* سنحاول البحث عبر active أدناه كخط دفاع ثانٍ */ }
+      }
+
+      // لا يوجد sessionId محفوظ (أو تعذّر التحقق منه) — نسأل الخادم مباشرة
+      const accIds = accountId ? [accountId] : accounts.map(a => a.id);
+      if (!accIds.length) return;
+      try {
+        const res  = await authFetch(`${API}/live-publish/active?account_ids=${accIds.join(',')}`);
+        const data = await res.json();
+        if (cancelled || !data.success || !data.session) return;
+        const s = data.session;
+        setSessionId(s.sessionId);
+        setLiveStatus(s.status);
+        setLiveProgress(s as any);
+        setLiveLogs(s.logs || []);
+        try { localStorage.setItem(LIVE_SESSION_KEY, s.sessionId); } catch {}
+      } catch { /* لا توجد جلسة نشطة — الوضع الطبيعي */ }
+    }
+
+    reconnectToActiveSession();
+    return () => { cancelled = true; };
+    // يُنفَّذ مرة واحدة فقط عند تركيب الكومبوننت (فتح الصفحة)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Auto-scroll log ─────────────────────────────────────────
   useEffect(() => {
@@ -311,6 +377,9 @@ export default function DirectPublishView({
     socket.on('live_publish:complete', (d: any) => {
       if (d.sessionId !== sessionId) return;
       setLiveStatus(d.status || 'complete');
+      // [إصلاح استمرارية اللوحة] الجلسة انتهت فعلياً — لا داعٍ للاحتفاظ
+      // بمعرّفها محلياً بعد الآن (تفادي محاولة استرجاع جلسة منتهية لاحقاً)
+      try { localStorage.removeItem(LIVE_SESSION_KEY); } catch {}
     });
 
     return () => {
@@ -319,6 +388,27 @@ export default function DirectPublishView({
       socketRef.current = null;
     };
   }, [sessionId]);
+
+  // ── [إصلاح استمرارية اللوحة] بولينج احتياطي (كل 5 ثوانٍ) بجانب Socket.IO ──
+  // شبكات الموبايل قد تقطع اتصال الويب سوكيت مؤقتاً دون أن يُعاد الاتصال
+  // فوراً؛ هذا البولينج يضمن بقاء الأرقام محدثة دائماً بغضّ النظر عن حالة
+  // السوكيت، ويوقف نفسه تلقائياً بمجرد اكتمال/إيقاف الجلسة.
+  useEffect(() => {
+    if (!sessionId) return;
+    if (liveStatus === 'complete' || liveStatus === 'stopped' || liveStatus === 'error') return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res  = await authFetch(`${API}/live-publish/${sessionId}/status`);
+        const data = await res.json();
+        if (!data.success) return;
+        setLiveProgress(data as any);
+        setLiveStatus(data.status);
+      } catch { /* سيُعاد المحاولة في الدورة التالية */ }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [sessionId, liveStatus]);
 
   // ── Derived state ────────────────────────────────────────────
   const filteredGroups = useMemo(() =>
@@ -380,6 +470,9 @@ export default function DirectPublishView({
         setLiveStatus('running');
         setLiveLogs([]);
         setLiveProgress(null);
+        // [إصلاح استمرارية اللوحة] حفظ فوري — لو خرج المستخدم من الصفحة
+        // مباشرة بعد الضغط على "بدء" نستطيع استرجاع الجلسة عند عودته
+        try { localStorage.setItem(LIVE_SESSION_KEY, data.sessionId); } catch {}
       }
     } catch { /* ignore */ }
     setStarting(false);
@@ -400,6 +493,8 @@ export default function DirectPublishView({
     setSessionId(null); setLiveStatus('idle');
     setLiveProgress(null); setLiveLogs([]);
     setStep(1);
+    // [إصلاح استمرارية اللوحة] تنظيف المفتاح المحلي — الجلسة انتهت فعلياً
+    try { localStorage.removeItem(LIVE_SESSION_KEY); } catch {}
   };
 
   // ════════════════════════════════════════════════════════════
