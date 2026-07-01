@@ -659,72 +659,82 @@ class WhatsAppManager {
             // - إن كان pJid نفسه بصيغة @s.whatsapp.net فهو صالح مباشرة للإرسال الخاص.
             // - إن توفر phoneNumber (حتى لو pJid كان @lid) نبني منه jid صالحاً للإرسال.
             // - غير ذلك (LID بلا رقم) — يُجدوَل للتحويل عبر onWhatsApp لاحقاً.
-            if (pJid.endsWith('@s.whatsapp.net')) {
-                sendableByJid[pJid] = pJid;
-            } else if (realPhoneJid) {
-                sendableByJid[pJid] = realPhoneJid;
-            } else {
-                needsResolve.push(pJid);
-            }
+            //
+            // [FIX-PRIVATE-SEND-GHOST] سابقاً كان أي pJid بصيغة @s.whatsapp.net
+            // يُعتبر "صالحاً للإرسال" فوراً دون أي تحقق فعلي من وجوده على واتساب.
+            // في بعض الحالات (خاصة بعد التحديثات الأخيرة لـ Baileys 7 وتغييرات
+            // بروتوكول LID) قد يكون هذا الـ jid صيغة PN داخلية غير مرتبطة فعلياً
+            // برقم مستقبل حقيقي — فتقبل sock.sendMessage() الطلب محلياً بنجاح
+            // (Baileys لا يرمي استثناء) رغم أن الرسالة لا تصل أبداً على تطبيق
+            // واتساب الفعلي. لذلك نضيف هؤلاء أيضاً لقائمة needsResolve للتحقق
+            // النهائي عبر onWhatsApp() بدل الوثوق بالصيغة وحدها.
+            // [FIX-PRIVATE-SEND-GHOST] كل عضو، أياً كانت صيغة الـ jid، يُضاف
+            // لقائمة التحقق الإلزامي أدناه بدل الوثوق بصيغة @s.whatsapp.net
+            // وحدها كدليل على قابلية الإرسال الفعلية.
+            needsResolve.push(pJid);
 
             all.push(entry);
             if (isAdmin) admins.push(pJid);
             else targetJids.push(pJid);
         }
 
-        // [إصلاح الإرسال الخاص — Baileys 7] تحويل معرّفات LID المتبقية إلى jid
-        // فعلي قابل للإرسال. ملاحظة مهمة: ابتداءً من Baileys 7.0.0، onWhatsApp()
-        // لم يعد يُرجع حقل `lid` في نتائجه (كان هذا هو الأساس القديم الذي اعتمد
-        // عليه الكود سابقاً وتوقف عن العمل، فتسبب بفشل كل الإرسال الخاص القادم
-        // من أعضاء LID). البديل الرسمي المُوثّق من مطوري Baileys هو استخدام
-        // sock.signalRepository.lidMapping.getPNForLID() الذي يعيد رقم الهاتف
-        // الحقيقي المرتبط بمعرّف LID مباشرة من الخريطة المحلية التي يبنيها
-        // Baileys تلقائياً أثناء المزامنة (بدون استعلام شبكي إضافي).
+        // [FIX-PRIVATE-SEND-GHOST] لكل عضو، أياً كانت صيغة الـ jid الأصلية،
+        // يجب تأكيد وجوده الفعلي على واتساب عبر onWhatsApp() قبل اعتباره
+        // "قابلاً للإرسال" — بدل الوثوق بمجرد صيغة الـ jid (@s.whatsapp.net)،
+        // التي قد تكون صحيحة الشكل لكنها لا تشير لمستقبل فعلي في بعض حالات
+        // LID الحديثة. هذا هو التصحيح الجذري لمشكلة "الإرسال يُسجَّل ناجحاً
+        // لكن لا يصل فعلياً على واتساب".
         if (needsResolve.length) {
+            // مسار سريع أولاً: lidMapping المحلي (بدون استعلام شبكي) — يعطي
+            // مرشحاً للرقم الحقيقي، لكن لا نثق به وحده، فقط يُسرّع/يُقلّل
+            // عدد الاستعلامات المطلوبة عبر onWhatsApp أدناه.
             const lidStore = sock.signalRepository?.lidMapping;
+            const candidateJid = {}; // pJid → مرشح jid للتحقق منه
 
-            if (lidStore && typeof lidStore.getPNForLID === 'function') {
-                for (const lidJid of needsResolve) {
-                    try {
-                        const pn = await lidStore.getPNForLID(lidJid);
-                        if (!pn) continue;
-                        const resolvedJid = normalize(
-                            pn.includes('@') ? pn : `${pn}@s.whatsapp.net`
-                        );
-                        if (resolvedJid) {
-                            sendableByJid[lidJid] = resolvedJid;
-                            if (resolvedJid.endsWith('@s.whatsapp.net')) {
-                                phoneByJid[lidJid] = resolvedJid.split('@')[0];
-                            }
-                        }
-                    } catch {
-                        // فشل فردي — نتجاهله ونكمل البقية، العضو سيُستبعد أدناه إن تعذّر الحل
-                    }
+            for (const pJid of needsResolve) {
+                // المرشح الأول: الرقم الحقيقي إن كان متوفراً من بيانات المشارك نفسها
+                const entry = all.find(a => a.jid === pJid);
+                const knownPhone = entry ? phoneByJid[pJid] : null;
+                if (knownPhone && pJid.endsWith('@s.whatsapp.net')) {
+                    candidateJid[pJid] = pJid; // pJid نفسه رقم حقيقي بالفعل
+                    continue;
                 }
+                if (lidStore && typeof lidStore.getPNForLID === 'function') {
+                    try {
+                        const pn = await lidStore.getPNForLID(pJid);
+                        if (pn) {
+                            candidateJid[pJid] = normalize(pn.includes('@') ? pn : `${pn}@s.whatsapp.net`);
+                            continue;
+                        }
+                    } catch { /* تجاهل، سيُحل عبر onWhatsApp أدناه */ }
+                }
+                candidateJid[pJid] = pJid; // آخر مرشح متاح — سيُتحقق منه مباشرة
             }
 
-            // ── خط دفاع أخير: onWhatsApp() بصيغته الجديدة (فحص وجود فقط، بدون lid) ──
-            // مفيد فقط لو أرسلنا الـ LID الخام كمدخل ورجع لنا exists=true+jid صالح
-            // (بعض إصدارات الخادم قد تُرجع jid مباشرة دون الحاجة لخريطة lidMapping).
-            const stillUnresolved = needsResolve.filter(j => !sendableByJid[j]);
-            if (stillUnresolved.length && typeof sock.onWhatsApp === 'function') {
+            // ── التحقق النهائي الإلزامي: onWhatsApp() يستعلم من خوادم واتساب
+            //    فعلياً ويؤكد وجود الرقم — هذا وحده يضمن أن الإرسال سيصل حقاً. ──
+            if (typeof sock.onWhatsApp === 'function') {
+                const pJids = Object.keys(candidateJid);
+                const lookupInputs = pJids.map(j => (candidateJid[j] || j).split('@')[0]);
                 try {
-                    const lookupInputs = stillUnresolved.map(j => j.split('@')[0]);
                     const results = await sock.onWhatsApp(...lookupInputs);
-                    // ربط بالترتيب: onWhatsApp يحافظ على ترتيب المدخلات في نتائجه
                     results?.forEach((r, idx) => {
-                        const originalLid = stillUnresolved[idx];
-                        if (!originalLid || !r?.exists || !r?.jid) return;
+                        const originalPJid = pJids[idx];
+                        if (!originalPJid || !r?.exists || !r?.jid) return;
                         const resolvedJid = normalize(r.jid);
                         if (!resolvedJid) return;
-                        sendableByJid[originalLid] = resolvedJid;
+                        sendableByJid[originalPJid] = resolvedJid;
                         if (resolvedJid.endsWith('@s.whatsapp.net')) {
-                            phoneByJid[originalLid] = resolvedJid.split('@')[0];
+                            phoneByJid[originalPJid] = resolvedJid.split('@')[0];
                         }
                     });
-                } catch {
-                    // فشل التحويل الجماعي — الأعضاء غير المحلولين سيُستبعدون تلقائياً أدناه
+                } catch (err) {
+                    console.warn(`[WAManager] getGroupMembers: onWhatsApp bulk lookup failed:`, err.message);
+                    // فشل الاستعلام الجماعي — لا نضيف أي عضو لـ sendableByJid، فيُستبعدون
+                    // تلقائياً بدل تسجيلهم كصالحين للإرسال دون تأكيد حقيقي.
                 }
+            } else {
+                console.warn(`[WAManager] getGroupMembers: sock.onWhatsApp غير متاح — تعذّر تأكيد الأرقام، سيتم استبعاد الأعضاء غير المؤكدين.`);
             }
         }
 
