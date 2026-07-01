@@ -284,25 +284,23 @@ const SystemDB = {
             END $$;
         `).catch(() => {});
 
-        // ── [إصلاح تسجيل الدخول] Migration: إضافة حقل family_id لجدول
-        //    refresh_tokens — جدول refresh_tokens كان موجوداً مسبقاً في قواعد
-        //    بيانات الإنتاج من قبل إضافة ميزة "تتبّع عائلة التوكنات" (JWT
-        //    Family Tracking / اكتشاف إعادة الاستخدام)، و`CREATE TABLE IF NOT
-        //    EXISTS` لا يضيف أعمدة جديدة لجدول موجود بالفعل. النتيجة: كل عملية
-        //    تسجيل دخول كانت تفشل فوراً بخطأ
-        //    "column family_id of relation refresh_tokens does not exist"
-        //    لأن saveRefreshToken() يحاول الكتابة لعمود غير موجود فعلياً.
-        await p.query(`
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='refresh_tokens' AND column_name='family_id'
-                ) THEN
-                    ALTER TABLE refresh_tokens ADD COLUMN family_id VARCHAR(200);
-                END IF;
-            END $$;
-        `).catch(() => {});
+        // ── [إصلاح تسجيل الدخول] Migration: استكمال أعمدة جدول refresh_tokens —
+        //    جدول refresh_tokens في قاعدة بيانات الإنتاج قديم جداً (أُنشئ قبل
+        //    اكتمال ميزة "تتبّع عائلة التوكنات" / اكتشاف إعادة الاستخدام)،
+        //    و`CREATE TABLE IF NOT EXISTS` لا يضيف أعمدة جديدة لجدول موجود
+        //    مسبقاً. النتيجة: كانت الأعمدة الناقصة تظهر واحداً تلو الآخر مع كل
+        //    محاولة تسجيل دخول ("family_id" ثم "used" ...) بدل أن يُكتشف
+        //    النقص دفعة واحدة. الآن نتأكد من وجود كل عمود يعتمد عليه
+        //    saveRefreshToken/findRefreshToken/revoke* في نفس الاستدعاء،
+        //    باستخدام `ADD COLUMN IF NOT EXISTS` (مدعومة في PostgreSQL) بدل
+        //    فحص information_schema لكل عمود على حدة.
+        await p.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS family_id VARCHAR(200)`).catch(() => {});
+        await p.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS user_id UUID`).catch(() => {});
+        await p.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS used BOOLEAN DEFAULT FALSE`).catch(() => {});
+        await p.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`).catch(() => {});
+        await p.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`).catch(() => {});
         await p.query(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family_id ON refresh_tokens(family_id)`).catch(() => {});
+        await p.query(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)`).catch(() => {});
 
         console.log('[SystemDB] Schema initialized.');
     },
