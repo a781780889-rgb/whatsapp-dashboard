@@ -154,24 +154,6 @@ const SystemDB = {
             )
         `);
 
-        await p.query(`
-            CREATE TABLE IF NOT EXISTS protection_config (
-                id INT PRIMARY KEY DEFAULT 1,
-                config JSONB DEFAULT '{}',
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        `);
-
-        await p.query(`
-            CREATE TABLE IF NOT EXISTS protection_logs (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                account_id UUID,
-                event_type VARCHAR(100),
-                details JSONB,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        `);
-
         // [استمرارية النشر المباشر] — يسمح باستئناف جلسات النشر تلقائياً
         // بعد أي إعادة تشغيل لعملية الخادم (Railway restart/redeploy/crash)
         // بدل توقفها بشكل كامل وفقدان التقدم.
