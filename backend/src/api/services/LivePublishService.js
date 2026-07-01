@@ -182,14 +182,48 @@ class LivePublishService {
         return this._userIdCache.get(accountId)?.createdAt || null;
     }
 
-    // ── [البند 1+2] تأخير آمن وعشوائي بدل أي قيمة ثابتة من delays{} ──────────
-    async _safeDelay(accountId, operationType = 'group') {
+    // ── [إصلاح الفارق الزمني الحقيقي] تأخير يحترم القيمة التي حدّدها المستخدم
+    //    فعلياً من واجهة النشر المباشر (groupDelayMs/memberDelayMs/adDelayMs)،
+    //    مع استخدام حد الحماية الأدنى فقط كـ "أرضية أمان" لا تُخترق أبداً
+    //    (لتفادي تجاوز حدود الحماية المفروضة على الحساب)، بدل تجاهل اختيار
+    //    المستخدم بالكامل واستبداله بتأخير عشوائي كما كان يحدث سابقاً.
+    //    @param {string} accountId
+    //    @param {'group'|'private'|'ad'} kind  نوع التأخير المطلوب من cfg.delays
+    async _safeDelay(sess, accountId, kind = 'group') {
         const userId = await this._getUserId(accountId);
+
+        // القيمة التي اختارها المستخدم فعلياً من واجهة النشر المباشر (خاصة بهذه الجلسة)
+        const userMs = this._userDelayMs(sess, kind);
+
+        // لا يوجد مستخدم مرتبط بالحساب (حالة نادرة) → نلتزم بقيمة المستخدم مباشرة فقط
         if (!userId) {
-            const ms = 800 + Math.floor(Math.random() * 700);
-            return new Promise(r => setTimeout(r, ms));
+            return this._sleep(userMs);
         }
-        return ProtectionService.getInstance().safeDelay(userId, operationType);
+
+        // نجلب الحد الأدنى الآمن من نظام الحماية (كأرضية فقط) دون تنفيذ delay مزدوج
+        const operationType = kind === 'private' ? 'private' : 'group';
+        let floorMs = 0;
+        try {
+            const svc = ProtectionService.getInstance();
+            const cfgProt = await svc.loadConfig(userId);
+            const minSec = operationType === 'private'
+                ? (cfgProt.private_min_delay_between_ops ?? cfgProt.min_delay_between_ops)
+                : (cfgProt.group_min_delay_between_ops   ?? cfgProt.min_delay_between_ops);
+            floorMs = Math.max(0, (minSec || 0) * 1000);
+        } catch { /* لا نمنع النشر لو فشل جلب إعدادات الحماية */ }
+
+        // نأخذ الأكبر بين اختيار المستخدم وأرضية الأمان — هكذا يُحترم الفارق
+        // الزمني الذي حدّده المستخدم فعلياً، مع ضمان عدم النزول تحت الحد الآمن.
+        const finalMs = Math.max(userMs, floorMs);
+        return this._sleep(finalMs);
+    }
+
+    // ── قراءة قيمة التأخير التي اختارها المستخدم من cfg.delays الخاصة بالجلسة (ms) ─
+    _userDelayMs(sess, kind) {
+        const delays = sess?.cfg?.delays || {};
+        if (kind === 'private') return Math.max(0, Number(delays.memberDelayMs) || 1500);
+        if (kind === 'ad')      return Math.max(0, Number(delays.adDelayMs)     || 2000);
+        return Math.max(0, Number(delays.groupDelayMs) || 1000);
     }
 
     // ── [استمرارية النشر] حفظ/تحميل/حذف الجلسة من قاعدة البيانات ─────────────
@@ -303,10 +337,9 @@ class LivePublishService {
     // ── الحلقة الرئيسية ───────────────────────────────────────────
     async _run(sess) {
         const { accountIds, accountsInfo, groupJids, sendToMembers, excludeAdmins, messages } = sess.cfg;
-        // [البند 1+2] delays{} (memberDelayMs/groupDelayMs/adDelayMs) لم تعد تُستخدم
-        // فعلياً للتوقيت — استُبدلت بالكامل بـ ProtectionService.safeDelay العشوائي
-        // المرتبط بإعدادات الحماية لكل مستخدم. أُبقيت في cfg فقط للتوافق العكسي
-        // مع أي استدعاء قديم لـ create() يمرّرها.
+        // [إصلاح الفارق الزمني الحقيقي] delays{} (memberDelayMs/groupDelayMs/adDelayMs)
+        // هي القيم التي حدّدها المستخدم فعلياً من واجهة النشر المباشر، ويجب
+        // احترامها كأساس التوقيت الحقيقي بين كل عملية وأخرى.
 
         // تهيئة الإجماليات
         const totalGroups = accountIds.length * groupJids.length;
@@ -403,7 +436,7 @@ class LivePublishService {
                             const nonRetryable = e.protectionReason && e.protectionReason !== 'rate_limit_hour' && e.protectionReason !== 'rate_limit_day';
                             if (attempt <= MAX_RETRY && !nonRetryable) {
                                 sess.log('warning', `⚠️ إعادة المحاولة ${attempt}/${MAX_RETRY} — ${groupName}`, e.message);
-                                await this._safeDelay(accountId, 'group');
+                                await this._safeDelay(sess, accountId, 'group');
                             } else {
                                 sess.stats.failedMessages++;
                                 sess.stats.errorCount++;
@@ -413,8 +446,8 @@ class LivePublishService {
                     }
                     sess.tick();
                     if (i < messages.length - 1 && !accountSuspendedMidRun) {
-                        // [البند 1+2] تأخير عشوائي آمن بدل adDelayMs الثابت
-                        await this._safeDelay(accountId, 'group');
+                        // [إصلاح الفارق الزمني الحقيقي] فاصل بين الإعلانات = adDelayMs الذي حدّده المستخدم
+                        await this._safeDelay(sess, accountId, 'ad');
                     }
                 }
 
@@ -491,12 +524,16 @@ class LivePublishService {
                                 }
                                 sess.tick();
                                 if (i < messages.length - 1 && !accountSuspendedMidRun) {
-                                    await this._safeDelay(accountId, 'private');
+                                    // فاصل بين الإعلانات المتعددة المرسلة لنفس العضو خاص
+                                    await this._safeDelay(sess, accountId, 'ad');
                                 }
                             }
                             if (!accountSuspendedMidRun) {
-                                // [البند 1+2] تأخير عشوائي آمن بدل memberDelayMs الثابت
-                                await this._safeDelay(accountId, 'private');
+                                // [إصلاح الفارق الزمني الحقيقي] فاصل ثابت = memberDelayMs الذي
+                                // حدّده المستخدم فعلياً (مثال: كل 5 دقائق رسالة خاصة واحدة فقط)،
+                                // يُطبَّق بعد كل عضو — سواء داخل نفس المجموعة أو عند الانتقال
+                                // لمجموعة تالية، فالمعدّل ثابت وحقيقي عبر كامل الجلسة.
+                                await this._safeDelay(sess, accountId, 'private');
                             }
                         }
                     } catch (e) {
@@ -511,8 +548,8 @@ class LivePublishService {
                 // [استمرارية النشر] تقديم المؤشر للمجموعة التالية فور الاكتمال
                 sess.cursor.groupIndex = grpIdx + 1;
                 if (!accountSuspendedMidRun) {
-                    // [البند 1+2] تأخير عشوائي آمن بدل groupDelayMs الثابت
-                    await this._safeDelay(accountId, 'group');
+                    // [إصلاح الفارق الزمني الحقيقي] فاصل بين كل مجموعة = groupDelayMs الذي حدّده المستخدم
+                    await this._safeDelay(sess, accountId, 'group');
                 }
             }
             // [استمرارية النشر] انتقلنا لحساب جديد بالكامل — إعادة تصفير مؤشر المجموعة
