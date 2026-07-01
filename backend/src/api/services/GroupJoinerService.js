@@ -19,7 +19,6 @@
  *   all      — جميع الحسابات المتاحة
  */
 const WhatsAppManager = require('../../bot/WhatsAppManager');
-const { ProtectionService } = require('./ProtectionService');
 const { queryAll: pgQueryAll } = require('../../lib/postgres');
 
 class GroupJoinerService {
@@ -215,73 +214,25 @@ class GroupJoinerService {
         console.log('[GroupJoiner] Queue drained.');
     }
 
-    // ── [البند 1+2] تأخير آمن وعشوائي مرتبط بإعدادات حماية المستخدم؛ يتدهور
-    //    بأمان لقيمة عشوائية بسيطة (3-8 ثوانٍ، كالسلوك الأصلي) إن تعذّر تحديد
-    //    userId ─────────────────────────────────────────────────────────────
+    // ── تأخير عشوائي بسيط بين محاولات الانضمام (3-8 ثوانٍ) ─────────────────
     async _safeDelay(accountId) {
-        const { userId } = await this._getAccountMeta(accountId);
-        if (!userId) {
-            const ms = 3000 + Math.floor(Math.random() * 5000);
-            return new Promise(r => setTimeout(r, ms));
-        }
-        return ProtectionService.getInstance().safeDelay(userId, 'group');
+        const ms = 3000 + Math.floor(Math.random() * 5000);
+        return new Promise(r => setTimeout(r, ms));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    //  الانضمام لمجموعة واحدة — [البند 1] محمي بالكامل عبر ProtectionService
+    //  الانضمام لمجموعة واحدة
     // ══════════════════════════════════════════════════════════════════════════
     async _joinGroup({ accountId, link, linkId }) {
-        const { userId, createdAt } = await this._getAccountMeta(accountId);
-        const taskId = linkId || `${accountId}:${link}`;
-
-        // إن لم نجد user_id (حالة نادرة/بيانات قديمة) ننفذ مباشرة دون حماية —
-        // بدل رمي خطأ يكسر التوافق العكسي — مع تحذير صريح في السجل.
-        if (!userId) {
-            console.warn(`[GroupJoiner] _joinGroup: no user_id for account ${accountId} — joining WITHOUT protection.`);
-            return this._doJoin(accountId, link);
-        }
-
-        const svc = ProtectionService.getInstance();
-
-        // [البند 1+3] فحص قبل أي محاولة انضمام: حدود الانضمام الساعية/اليومية
-        // (operationType='group' — عداد منفصل عن الخاص حسب البند 6)، Warm-up
-        // للحسابات الجديدة (البند 7)، وحالة التعليق (محظور/متجاوز أخطاء)
-        const check = await svc.checkOperation(userId, accountId, {
-            operationType: 'group',
-            accountCreatedAt: createdAt,
-        });
-        if (!check.allowed) {
-            const isSuspended = check.reason === 'account_suspended';
-            console.warn(`[GroupJoiner] checkOperation rejected for ${accountId}: ${check.reason}`);
-            return { success: false, error: check.message || 'تم رفض العملية بواسطة نظام الحماية', suspended: isSuspended };
-        }
-
         try {
             const result = await this._doJoin(accountId, link);
             if (result.success) {
-                await svc.recordSuccess(userId, accountId, taskId, { operationType: 'group' });
                 return result;
-            } else {
-                // [البند 8] نستخدم النص الخام الأصلي (_rawError) للتصنيف الصحيح في
-                // ProtectionService — النص "المُجمَّل" (result.error) عربي وودي
-                // للمستخدم لكنه قد يُفقد كلمات مفتاحية يعتمد عليها classifyError
-                // (مثل forbidden/rate-overlimit) فلا نستخدمه للتصنيف.
-                const rawMsg = result._rawError || result.error || 'فشل الانضمام';
-                const syntheticErr = new Error(rawMsg);
-                const fail = await svc.recordFailure(userId, accountId, taskId, rawMsg, {
-                    operationType: 'group',
-                    errorObject: syntheticErr,
-                });
-                const { _rawError, ...publicResult } = result;
-                return { ...publicResult, suspended: !!fail.suspended };
             }
+            const { _rawError, ...publicResult } = result;
+            return publicResult;
         } catch (err) {
-            // مسار احتياطي: لو _doJoin رمى استثناء فعلياً بدل إرجاع { success:false }
-            const fail = await svc.recordFailure(userId, accountId, taskId, err.message, {
-                operationType: 'group',
-                errorObject: err,
-            });
-            return { success: false, error: this._friendlyError(err.message), suspended: !!fail.suspended };
+            return { success: false, error: this._friendlyError(err.message) };
         }
     }
 
