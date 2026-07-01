@@ -21,7 +21,7 @@ import { authFetch, API } from '@/utils/api';
 // ════════════════════════════════════════════════════════════
 interface Account {
   id: string; name: string; phone_number?: string;
-  status?: string; jid?: string;
+  status?: string; jid?: string; is_ready?: boolean;
 }
 
 interface Group {
@@ -615,13 +615,26 @@ export default function DirectPublishView({
                 </div>
               ))}
 
-              {/* Error counter */}
-              {(p?.errorCount ?? 0) > 0 && (
-                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-red-500/5 border border-red-500/20">
-                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-                  <span className="text-sm text-red-400 font-medium">{p!.errorCount} خطأ</span>
-                </div>
-              )}
+              {/* Error counter — [إصلاح النشر المباشر] نعرض الآن آخر خطأ فعلي
+                  نصياً (من liveLogs) بدل رقم مجرّد، حتى يعرف المستخدم فوراً
+                  سبب الخطأ (مثلاً: "الحساب لا يزال يتصل بواتساب") دون
+                  الحاجة للبحث في السجل أسفل الصفحة. */}
+              {(p?.errorCount ?? 0) > 0 && (() => {
+                const lastError = [...liveLogs].reverse().find(l => l.level === 'error');
+                return (
+                  <div className="flex flex-col gap-1 p-2.5 rounded-xl bg-red-500/5 border border-red-500/20">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                      <span className="text-sm text-red-400 font-medium">{p!.errorCount} خطأ</span>
+                    </div>
+                    {lastError && (
+                      <p className="text-xs text-red-400/80 pr-6 truncate" title={lastError.message}>
+                        {lastError.message}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
             </Card>
 
             {/* Controls */}
@@ -725,9 +738,10 @@ export default function DirectPublishView({
   // ════════════════════════════════════════════════════════════
   //  RENDER: Wizard
   // ════════════════════════════════════════════════════════════
-  const connectedAccounts = accounts.filter(a =>
-    a.status === 'connected' || a.status === 'ready' || a.status === 'open'
-  );
+  const connectedAccounts = accounts.filter(a => {
+    const statusOnline = a.status === 'connected' || a.status === 'ready' || a.status === 'open';
+    return a.is_ready !== undefined ? (statusOnline && a.is_ready) : statusOnline;
+  });
 
   return (
     <div className="flex flex-col gap-4">
@@ -773,7 +787,14 @@ export default function DirectPublishView({
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {accounts.map(acc => {
                   const isSelected = selAccounts.includes(acc.id);
-                  const isOnline = acc.status === 'connected' || acc.status === 'ready' || acc.status === 'open';
+                  const statusOnline = acc.status === 'connected' || acc.status === 'ready' || acc.status === 'open';
+                  // [إصلاح النشر المباشر] status='connected' بقاعدة البيانات لا يعني
+                  // بالضرورة أن الحساب جاهز فعلياً للإرسال الآن — قد يكون لا يزال
+                  // يعيد الاتصال بواتساب في الخلفية بعد إعادة تشغيل الخادم. عندما
+                  // يتوفر is_ready من الخادم نعتمد عليه كمصدر حقيقة أدق؛ إن لم يتوفر
+                  // (توافق عكسي) نرجع لحالة status وحدها.
+                  const isOnline = acc.is_ready !== undefined ? (statusOnline && acc.is_ready) : statusOnline;
+                  const isReconnecting = statusOnline && acc.is_ready === false;
                   return (
                     <div
                       key={acc.id}
@@ -798,10 +819,12 @@ export default function DirectPublishView({
                           <p className="text-xs text-[var(--text-muted)] mt-0.5 truncate">{acc.phone_number || acc.jid || '—'}</p>
                           <div className={cn(
                             'mt-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border',
-                            isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-default)]'
+                            isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                              : isReconnecting ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
+                              : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-default)]'
                           )}>
                             {isOnline ? <Wifi className="w-2.5 h-2.5" /> : <WifiOff className="w-2.5 h-2.5" />}
-                            {isOnline ? 'متصل' : 'غير متصل'}
+                            {isOnline ? 'متصل' : isReconnecting ? 'جارٍ إعادة الاتصال...' : 'غير متصل'}
                           </div>
                         </div>
                         {isSelected && (
