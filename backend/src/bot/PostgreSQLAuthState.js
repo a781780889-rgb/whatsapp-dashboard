@@ -22,43 +22,70 @@ const KEY_MAP = {
     'sender-key-memory':        'senderKeyMemory',
 };
 
+// [FIX-SESSION-RACE] قفل تسلسلي لكل مفتاح (account_id:key) — Baileys يستدعي
+// keys.set() بشكل متكرر ومتزامن من مصادر متعددة (استقبال رسائل، مزامنة
+// مجموعات، إرسال). كل نداء set() كان يكتب عبر Promise.all بلا أي ترتيب
+// مضمون، فقد تصل كتابتان متزامنتان لنفس مفتاح "session:xxx" وتُطبَّق نسخة
+// أقدم فوق أحدث بسبب تفاوت زمن استجابة PostgreSQL — مما يُفسد سلسلة تشفير
+// Signal لهذه الجهة (يظهر لاحقاً كـ "Decrypted message with closed session"
+// أو رسائل تُرسل بنجاح ظاهري لكن لا تصل أبداً لأن التشفير تحتها تالف).
+// هذا القفل يضمن أن كل كتابة/قراءة لنفس المفتاح تنتظر اكتمال العملية السابقة
+// عليه فعلياً في قاعدة البيانات قبل بدء التالية.
+const _keyLocks = new Map(); // lockKey → Promise (آخر عملية قيد التنفيذ على هذا المفتاح)
+
+function _withKeyLock(lockKey, fn) {
+    const prev = _keyLocks.get(lockKey) || Promise.resolve();
+    const next = prev.then(fn, fn); // ننفذ fn سواء نجحت العملية السابقة أو فشلت
+    // نخزّن نسخة "صامتة" (لا ترمي) حتى لا تتراكم unhandled rejections في الخريطة
+    _keyLocks.set(lockKey, next.catch(() => {}));
+    return next;
+}
+
 async function usePostgreSQLAuthState(accountId, db) {
     // ── مساعدات DB ────────────────────────────────────────────────────────────
+    function _lockKey(key) { return `${accountId}:${key}`; }
+
     async function readData(key) {
-        try {
-            const row = await db.get(
-                `SELECT value FROM session_data WHERE account_id = $1 AND key = $2`,
-                [accountId, key]
-            );
-            if (!row?.value) return null;
-            return JSON.parse(row.value, BufferJSON.reviver);
-        } catch {
-            return null;
-        }
+        return _withKeyLock(_lockKey(key), async () => {
+            try {
+                const row = await db.get(
+                    `SELECT value FROM session_data WHERE account_id = $1 AND key = $2`,
+                    [accountId, key]
+                );
+                if (!row?.value) return null;
+                return JSON.parse(row.value, BufferJSON.reviver);
+            } catch {
+                return null;
+            }
+        });
     }
 
     async function writeData(key, value) {
-        try {
-            const json = JSON.stringify(value, BufferJSON.replacer);
-            await db.run(
-                `INSERT INTO session_data (account_id, key, value, updated_at)
-                 VALUES ($1, $2, $3, NOW())
-                 ON CONFLICT (account_id, key) DO UPDATE
-                 SET value = EXCLUDED.value, updated_at = NOW()`,
-                [accountId, key, json]
-            );
-        } catch (err) {
-            console.error(`[PostgreSQLAuthState] writeData error (${accountId}/${key}):`, err.message);
-        }
+        return _withKeyLock(_lockKey(key), async () => {
+            try {
+                const json = JSON.stringify(value, BufferJSON.replacer);
+                await db.run(
+                    `INSERT INTO session_data (account_id, key, value, updated_at)
+                     VALUES ($1, $2, $3, NOW())
+                     ON CONFLICT (account_id, key) DO UPDATE
+                     SET value = EXCLUDED.value, updated_at = NOW()`,
+                    [accountId, key, json]
+                );
+            } catch (err) {
+                console.error(`[PostgreSQLAuthState] writeData error (${accountId}/${key}):`, err.message);
+            }
+        });
     }
 
     async function removeData(key) {
-        try {
-            await db.run(
-                `DELETE FROM session_data WHERE account_id = $1 AND key = $2`,
-                [accountId, key]
-            );
-        } catch {}
+        return _withKeyLock(_lockKey(key), async () => {
+            try {
+                await db.run(
+                    `DELETE FROM session_data WHERE account_id = $1 AND key = $2`,
+                    [accountId, key]
+                );
+            } catch {}
+        });
     }
 
     // ── تحميل الـ creds أو إنشاء جديدة ──────────────────────────────────────
@@ -121,4 +148,32 @@ async function deletePostgreSQLAuthState(accountId, db) {
     }
 }
 
-module.exports = { usePostgreSQLAuthState, deletePostgreSQLAuthState };
+/**
+ * [FIX-SESSION-RACE] مسح جلسات Signal (sessions/senderKeys) فقط، مع الإبقاء
+ * على creds/preKeys — يُستخدم لتصحيح جلسات محادثة تالفة سابقاً (بسبب سباق
+ * الكتابة القديم قبل إضافة القفل التسلسلي) دون قطع اتصال الحساب بأكمله
+ * (الذي يتطلبه الحذف الكامل عبر deletePostgreSQLAuthState). Baileys يعيد
+ * بناء أي جلسة محذوفة تلقائياً وبأمان عند أول تواصل تالٍ مع نفس الطرف.
+ * @param {string} accountId
+ * @param {object} db
+ * @param {string} [targetPhone]  إن مُرِّر، يُمسح فقط جلسات هذا الرقم تحديداً
+ *                                (بصيغة رقم بدون jid، مثال: '966597806430')
+ */
+async function repairCorruptedSessions(accountId, db, targetPhone = null) {
+    try {
+        const pattern = targetPhone
+            ? `sessions:${targetPhone}%`
+            : `sessions:%`;
+        const result = await db.run(
+            `DELETE FROM session_data WHERE account_id = $1 AND key LIKE $2`,
+            [accountId, pattern]
+        );
+        console.log(`[PostgreSQLAuthState] repairCorruptedSessions: cleared session keys for account ${accountId}${targetPhone ? ` (phone=${targetPhone})` : ' (all)'}`);
+        return true;
+    } catch (err) {
+        console.error(`[PostgreSQLAuthState] repairCorruptedSessions error:`, err.message);
+        return false;
+    }
+}
+
+module.exports = { usePostgreSQLAuthState, deletePostgreSQLAuthState, repairCorruptedSessions };
