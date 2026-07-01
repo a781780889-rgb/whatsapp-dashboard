@@ -334,6 +334,44 @@ class LivePublishService {
         return { sessionId: s.id, status: s.status, ...s.stats, logs: s.logs.slice(-200) };
     }
 
+    // ── [إصلاح استمرارية اللوحة] إيجاد جلسة نشطة (running/paused) مرتبطة بأي
+    //    من الحسابات المُمرَّرة — يُستخدم عند فتح صفحة النشر المباشر من جديد
+    //    (بعد الخروج منها أو إعادة تحميل المتصفح) لإعادة ربط الواجهة تلقائياً
+    //    بالجلسة الجارية فعلياً في الخادم بدل ظهور لوحة فارغة/متجمّدة عند 0%.
+    //    يبحث أولاً في الذاكرة (الأسرع)، ثم في قاعدة البيانات كخط دفاع أخير
+    //    (حالة إعادة تشغيل الخادم بين لحظة مغادرة الصفحة والعودة إليها).
+    async findActiveSession(accountIds = []) {
+        const idSet = new Set(accountIds);
+
+        // 1) البحث في الجلسات الحيّة بالذاكرة أولاً
+        for (const s of this._sessions.values()) {
+            if (s.status !== 'running' && s.status !== 'paused') continue;
+            const cfgAccountIds = s.cfg?.accountIds || [];
+            if (cfgAccountIds.some(id => idSet.has(id))) {
+                return { sessionId: s.id, status: s.status, ...s.stats, logs: s.logs.slice(-200) };
+            }
+        }
+
+        // 2) خط دفاع: قاعدة البيانات (تغطي حالة إعادة تشغيل الخادم قبل استكمال resumeAll)
+        try {
+            const rows = await SystemDB.all(
+                `SELECT id, status, cfg, stats FROM live_publish_sessions WHERE status IN ('running', 'paused')`
+            );
+            for (const row of rows) {
+                const cfg = typeof row.cfg === 'string' ? JSON.parse(row.cfg) : row.cfg;
+                const cfgAccountIds = cfg?.accountIds || [];
+                if (cfgAccountIds.some((id) => idSet.has(id))) {
+                    const stats = typeof row.stats === 'string' ? JSON.parse(row.stats) : row.stats;
+                    return { sessionId: row.id, status: row.status, ...(stats || {}), logs: [] };
+                }
+            }
+        } catch (e) {
+            console.error('[LivePublishService] findActiveSession DB fallback error:', e.message);
+        }
+
+        return null;
+    }
+
     // ── الحلقة الرئيسية ───────────────────────────────────────────
     async _run(sess) {
         const { accountIds, accountsInfo, groupJids, sendToMembers, excludeAdmins, messages } = sess.cfg;
