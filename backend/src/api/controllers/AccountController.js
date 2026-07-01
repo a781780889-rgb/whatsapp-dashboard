@@ -85,7 +85,16 @@ class AccountController {
 
             const cached = await CacheService.get(pageCacheKey);
             if (cached) {
-                return res.json({ ...cached, from_cache: true });
+                // [FIX-LIVE-PUBLISH-READY] is_ready حالة حية لا تُخزَّن في الكاش
+                // (الكاش قد يكون قديماً بدقائق) — تُحسب دائماً عند كل طلب من
+                // WhatsAppManager.isReady() مباشرة، لتعكس حالة اتصال Baileys
+                // الفعلية اللحظية بدل الاعتماد فقط على status='connected' في DB
+                // (والتي قد تكون صحيحة بينما الـ socket لا يزال يعيد الاتصال
+                // بعد إعادة تشغيل الخادم).
+                const liveAccounts = (cached.accounts || []).map(a => ({
+                    ...a, is_ready: WhatsAppManager.isReady(a.id),
+                }));
+                return res.json({ ...cached, accounts: liveAccounts, from_cache: true });
             }
 
             let accounts, total;
@@ -135,10 +144,18 @@ class AccountController {
                 },
             };
 
-            // [FIX-22] حفظ في الكاش
+            // [FIX-22] حفظ في الكاش (بدون is_ready — حالة حية لا تُخزَّن)
             await CacheService.set(pageCacheKey, result, CacheService.TTL.ACCOUNTS);
 
-            return res.json(result);
+            // [FIX-LIVE-PUBLISH-READY] إضافة is_ready بعد الكاش مباشرة من حالة
+            // الذاكرة الحية في WhatsAppManager — تُميّز بين "الحساب معنون
+            // كمتصل في قاعدة البيانات" و"متصل فعلياً وجاهز للإرسال الآن".
+            const resultWithReady = {
+                ...result,
+                accounts: accounts.map(a => ({ ...a, is_ready: WhatsAppManager.isReady(a.id) })),
+            };
+
+            return res.json(resultWithReady);
         } catch (error) {
             return res.status(500).json({ success: false, error: 'Internal Server Error' });
         }
