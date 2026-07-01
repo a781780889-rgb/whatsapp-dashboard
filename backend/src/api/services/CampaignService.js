@@ -2,26 +2,9 @@ const DatabaseManager = require('../../database/DatabaseManager');
 const crypto = require('crypto');
 const JobScheduler = require('../../scheduler/JobScheduler');
 const WhatsAppManager = require('../../bot/WhatsAppManager');
-const { ProtectionService } = require('./ProtectionService');
 const { queryAll: pgQueryAll } = require('../../lib/postgres');
 
 class CampaignService {
-
-    // ── [البند 1+2] جلب userId لحساب معين (لاستخدام Redis-backed ProtectionService
-    //    المرتبط بالمستخدم وليس بالحساب فقط) — كاش قصير لتفادي ضغط DB ──────────
-    async _getUserId(accountId) {
-        this._userIdCache = this._userIdCache || new Map();
-        const cached = this._userIdCache.get(accountId);
-        if (cached && (Date.now() - cached.ts) < 60000) return cached.userId;
-        try {
-            const rows = await pgQueryAll(`SELECT user_id FROM accounts WHERE id = $1`, [accountId]);
-            const userId = rows?.[0]?.user_id || null;
-            this._userIdCache.set(accountId, { userId, ts: Date.now() });
-            return userId;
-        } catch {
-            return null;
-        }
-    }
 
     async preflightCheck(accountId, { targetType, targetIds, excludeAdmins, excludeDuplicates }) {
         let totalRaw = 0;
@@ -129,12 +112,6 @@ class CampaignService {
         // 1. Fetch Campaign Info
         const campaign = await accountDB.get(`SELECT * FROM campaigns WHERE id = $1`, [campaignId]);
         if (!campaign) throw new Error('Campaign not found');
-
-        // [البند 3] لا نبدأ حملة على حساب موقوف تلقائياً (محظور/متجاوز عتبة الأخطاء)
-        const userId = await this._getUserId(accountId);
-        if (userId && await ProtectionService.getInstance().isSuspended(userId, accountId)) {
-            throw new Error('الحساب موقوف تلقائياً بسبب الحماية (حظر أو أخطاء متكررة) — لا يمكن بدء الحملة');
-        }
 
         // 2. Update status
         await accountDB.run(`UPDATE campaigns SET status = 'running', updated_at = NOW() WHERE id = $1`, [campaignId]);
