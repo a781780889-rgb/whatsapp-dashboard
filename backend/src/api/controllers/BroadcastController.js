@@ -5,7 +5,6 @@ const fs = require('fs');
 const path = require('path');
 const LivePublishService = require('../services/LivePublishService');
 const { queryAll: pgQueryAll } = require('../../lib/postgres');
-const { ProtectionService } = require('../services/ProtectionService');
 
 class BroadcastController {
 
@@ -26,16 +25,10 @@ class BroadcastController {
         }
     }
 
-    // ── [البند 1+2] تأخير آمن وعشوائي بدل أي setTimeout ثابت. يتدهور بأمان
-    //    (fallback لقيمة عشوائية بسيطة) إن تعذّر تحديد userId. ─────────────────
+    // ── تأخير عشوائي بسيط بين الرسائل المتتالية ─────────────────────────────
     async _safeDelay(accountId, operationType = 'group') {
-        const userId = await this._getUserId(accountId);
-        if (!userId) {
-            const ms = 800 + Math.floor(Math.random() * 700);
-            return new Promise(r => setTimeout(r, ms));
-        }
-        const svc = ProtectionService.getInstance();
-        return svc.safeDelay(userId, operationType);
+        const ms = 800 + Math.floor(Math.random() * 700);
+        return new Promise(r => setTimeout(r, ms));
     }
 
     async getAll(req, res) {
@@ -164,7 +157,7 @@ class BroadcastController {
 
     // ── Helper: send one message to a JID — [البند 1] يمر إلزامياً عبر
     //    WhatsAppManager.sendMessageSafe، وهي النقطة المركزية الوحيدة المسموح
-    //    بها للإرسال: تستدعي ProtectionService.checkOperation قبل الإرسال،
+    //    بها للإرسال: تمر عبر sendMessageSafe مع محاكاة سلوك بشري قبل الإرسال،
     //    تحاكي السلوك البشري (composing/typing/paused)، ثم تسجل النتيجة عبر
     //    recordSuccess/recordFailure تلقائياً. لا إرسال مباشر بعد الآن. ───────
     async _sendOne(accountId, jid, messageContent, options = {}) {
@@ -217,12 +210,6 @@ class BroadcastController {
             if (!session) {
                 return res.status(400).json({ success: false, error: 'الحساب غير متصل بواتساب' });
             }
-            // [البند 3] لا نرسل من حساب موقوف تلقائياً (محظور/متجاوز الأخطاء)
-            const userIdForCheck = await this._getUserId(accountId);
-            if (userIdForCheck && await ProtectionService.getInstance().isSuspended(userIdForCheck, accountId)) {
-                return res.status(403).json({ success: false, error: 'الحساب موقوف تلقائياً بسبب الحماية (حظر أو أخطاء متكررة) — لا يمكن الإرسال منه' });
-            }
-
             const accountDB = await DatabaseManager.getAccountDB(accountId);
             await this._ensureDirectPublishLogTable(accountDB);
 
@@ -251,7 +238,7 @@ class BroadcastController {
             }
 
             // [البند 1+2] memberDelay/adDelay لم تعد تُستخدم فعلياً للتأخير (استُبدلت
-            // بـ ProtectionService.safeDelay العشوائي)، ونُبقيها فقط لأغراض التوافق مع
+            // تأخير عشوائي بسيط بدل التأخير الثابت)، ونُبقيها فقط لأغراض التوافق مع
             // الواجهة الأمامية وسجل الإرسال (قيمة توثيقية لا تؤثر على التوقيت الفعلي).
             const memberDelay = Number.isFinite(member_delay_ms) ? Math.max(0, member_delay_ms) : 1500;
             const adDelay     = Number.isFinite(ad_delay_ms)     ? Math.max(0, ad_delay_ms)     : 2000;
