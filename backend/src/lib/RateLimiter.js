@@ -11,8 +11,8 @@
  * instances فعلياً (ثغرة brute-force bypass)، وتُصفَّر العدادات بالكامل عند
  * أي إعادة تشغيل. تم استبداله بـ RedisRateLimitStore مخصص يعتمد على نفس
  * اتصال Redis المركزي (RedisManager.getRateLimit())، بعمليات ذرية
- * (INCR + EXPIRE فقط عند أول طلب) متّسقة مع نمط RedisCounters في
- * ProtectionService.js.
+ * (INCR + EXPIRE فقط عند أول طلب) متّسقة مع نمط RedisCounters المستخدم
+ * في أجزاء أخرى من المشروع.
  */
 const rateLimit = require('express-rate-limit');
 const RedisManager = require('./RedisManager');
@@ -20,8 +20,7 @@ const RedisManager = require('./RedisManager');
 const STORE_PREFIX = 'http-rl:';
 
 // ── Redis Store مخصص متوافق مع واجهة express-rate-limit v8 ─────────────────
-// (init / increment / decrement / resetKey) — Atomic عبر INCR + EXPIRE،
-// بنفس فلسفة RedisCounters.incrWithExpire في ProtectionService.js.
+// (init / increment / decrement / resetKey) — Atomic عبر INCR + EXPIRE.
 class RedisRateLimitStore {
     // [إصلاح حرج] كل limiter يجب أن يملك namespace خاص في Redis — بدون هذا،
     // طلب من نفس IP يُحسب في limiter "تسجيل الدخول" وlimiter "تجديد التوكن"
