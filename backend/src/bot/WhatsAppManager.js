@@ -625,6 +625,16 @@ class WhatsAppManager {
             const n = normalize(c);
             if (n) selfIds.add(n);
         }
+        // [FIX-PRIVATE-SEND-SELF] أضف أيضاً رقم الهاتف الحقيقي للحساب نفسه
+        // بصيغة @s.whatsapp.net — فحص selfIds السابق يقارن jid/lid الخام، لكن
+        // بعد حل الأعضاء عبر onWhatsApp() أدناه قد يتحول jid عضو آخر (كان
+        // بصيغة @lid مختلفة) إلى نفس رقم الحساب المُرسِل الحقيقي (يحدث هذا
+        // فعلياً عندما يكون صاحب الحساب نفسه عضواً في المجموعة تحت LID مختلف
+        // عن sock.user.id). إرسال رسالة "خاصة" لنفس رقم المُرسِل يُقبل محلياً
+        // من Baileys بنجاح (لا استثناء) لكنها لا تصل كمحادثة فعلية على واتساب
+        // — بالضبط عرض المشكلة المُبلَّغ عنه (✅ في السجل لكن لا استلام حقيقي).
+        const selfPhoneJid = normalize(sock.user?.id)?.split('@')[0] || null;
+        if (selfPhoneJid) selfIds.add(`${selfPhoneJid}@s.whatsapp.net`);
 
         const all = [];
         const admins = [];
@@ -723,6 +733,12 @@ class WhatsAppManager {
                         if (!originalPJid || !r?.exists || !r?.jid) return;
                         const resolvedJid = normalize(r.jid);
                         if (!resolvedJid) return;
+                        // [FIX-PRIVATE-SEND-SELF] استبعاد أي عضو تبيّن بعد الحل
+                        // النهائي أن رقمه الحقيقي هو نفسه رقم الحساب المُرسِل
+                        // (كان يظهر تحت LID مختلف قبل onWhatsApp فلم يُكتشف
+                        // بفحص selfIds الأولي). إرسال "خاص" لهذا الرقم يعني
+                        // إرسال رسالة للحساب نفسه — لا تصل كمحادثة فعلية.
+                        if (selfIds.has(resolvedJid)) return;
                         sendableByJid[originalPJid] = resolvedJid;
                         if (resolvedJid.endsWith('@s.whatsapp.net')) {
                             phoneByJid[originalPJid] = resolvedJid.split('@')[0];
