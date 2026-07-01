@@ -598,18 +598,19 @@ class WhatsAppManager {
 
     // ── [البند 9] محاكاة السلوك البشري قبل/بعد كل إرسال ───────────────────────
     async _sendWithPresence(sock, jid, content) {
-        // [FIX-SEND-GHOST-SUBSCRIBE] presenceSubscribe() يؤسس/يؤكد جلسة
-        // التشفير (Signal session) مع الطرف الآخر قبل أي محاولة تواصل معه.
-        // إرسال sendPresenceUpdate('composing') مباشرة لجهة اتصال "جديدة"
-        // (بدون presenceSubscribe سابق) قد يفشل بصمت في بعض إصدارات Baileys
-        // أو يترك الجلسة في حالة غير مكتملة — وهو تفسير محتمل لحالات حيث
-        // sendMessage() يُحل الـ promise دون استثناء لكن الرسالة لا تُبث
-        // فعلياً ولا تظهر حتى في صندوق الصادر لدى المُرسِل نفسه.
-        try { await sock.presenceSubscribe(jid); } catch { /* بعض الأنواع لا تدعمها — تجاهل بأمان */ }
+        const isGroup = jid.endsWith('@g.us');
 
-        try {
-            await sock.sendPresenceUpdate('composing', jid);
-        } catch { /* بعض أنواع الـ jid (مثل القنوات) قد لا تدعم presence — تجاهل بأمان */ }
+        // [ROLLBACK-FIX-SEND-GHOST-SUBSCRIBE] presenceSubscribe()+composing
+        // قبل الإرسال الخاص كانت إضافة تجريبية لتفسير مشكلة "✅ في السجل لكن
+        // لا وصول فعلي" — تأكَّد لاحقاً (بمراسلة طرف ثالث حقيقي) أن المشكلة
+        // ما زالت قائمة رغم هذه الإضافة، أي أنها لم تكن الحل، وقد تكون هي
+        // نفسها من يُدخل جلسة التشفير الخاصة في حالة غير متوقعة قبل أول
+        // رسالة فعلية لجهة جديدة. لذا نُبقيها فقط للمجموعات (حيث لم تُثبت
+        // أنها مشكلة) ونزيلها تماماً من مسار الإرسال الخاص.
+        if (isGroup) {
+            try { await sock.presenceSubscribe(jid); } catch { /* بعض الأنواع لا تدعمها — تجاهل بأمان */ }
+            try { await sock.sendPresenceUpdate('composing', jid); } catch { /* تجاهل بأمان */ }
+        }
 
         // مدة الكتابة المحاكاة: مرتبطة بطول النص (≈ سرعة كتابة بشرية معقولة)
         // بحد أدنى وأقصى معقولين لتفادي تأخير غير واقعي على رسائل طويلة جداً.
@@ -619,7 +620,9 @@ class WhatsAppManager {
 
         try {
             const result = await sock.sendMessage(jid, content);
-            try { await sock.sendPresenceUpdate('paused', jid); } catch {}
+            if (isGroup) {
+                try { await sock.sendPresenceUpdate('paused', jid); } catch {}
+            }
 
             // [DEBUG-SEND-GHOST] تسجيل تشخيصي مؤقت لفهم شكل النتيجة الفعلية
             // التي يُرجعها Baileys عند الإرسال الخاص — ضروري لتحديد السبب
@@ -659,7 +662,9 @@ class WhatsAppManager {
 
             return result;
         } catch (err) {
-            try { await sock.sendPresenceUpdate('paused', jid); } catch {}
+            if (isGroup) {
+                try { await sock.sendPresenceUpdate('paused', jid); } catch {}
+            }
             throw err;
         }
     }
