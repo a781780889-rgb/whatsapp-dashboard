@@ -97,6 +97,14 @@ const REDIS_PREFIX = 'protection';
 const SEC_PER_HOUR  = 3600;
 const SEC_PER_DAY   = 86400;
 
+// [PROTECTION-KILL-SWITCH] تعطيل كامل ونهائي لنظام الحماية على مستوى الكود
+// نفسه — لا يعتمد على إعدادات قاعدة البيانات (is_active) ولا على أي رفع
+// جزئي سابق. عند true: كل عمليات التحقق (checkOperation) تسمح فوراً بأي
+// عملية، وكل فحوصات isSuspended تُرجع false دائماً، بصرف النظر عن أي حالة
+// إيقاف محفوظة مسبقاً في Redis/PostgreSQL. لإعادة تفعيل نظام الحماية
+// مستقبلاً، غيّر هذه القيمة إلى false.
+const PROTECTION_HARD_DISABLED = true;
+
 // ════════════════════════════════════════════════════════════════════════════
 //  أدوات Redis مساعدة — عمليات ذرية على العدادات
 // ════════════════════════════════════════════════════════════════════════════
@@ -696,6 +704,8 @@ class ProtectionService {
      * @param {string|Date|number|null} [opts.accountCreatedAt=null]  [البند 7]
      */
     async checkOperation(userId, accountId, opts = {}) {
+        if (PROTECTION_HARD_DISABLED) return { allowed: true };
+
         const operationType    = opts.operationType ?? 'group';
         const accountCreatedAt = opts.accountCreatedAt ?? null;
 
@@ -753,6 +763,11 @@ class ProtectionService {
      * @param {object} [meta.errorObject]  كائن الخطأ الأصلي (لتصنيف أدق من classifyError)
      */
     async recordFailure(userId, accountId, taskId, errorMsg, meta = {}) {
+        if (PROTECTION_HARD_DISABLED) {
+            this._distributor(userId).release(accountId);
+            return { shouldRetry: false, errorCategory: 'disabled' };
+        }
+
         const operationType = meta.operationType ?? 'group';
         const cfg     = await this.loadConfig(userId);
         const monitor = this._monitors.get(userId);
@@ -824,6 +839,7 @@ class ProtectionService {
     }
 
     async isSuspended(userId, accountId) {
+        if (PROTECTION_HARD_DISABLED) return false;
         return RedisCounters.sismember(this._suspendedKey(userId), accountId);
     }
 
