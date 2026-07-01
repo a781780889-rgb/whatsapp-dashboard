@@ -415,6 +415,28 @@ class LivePublishService {
                 continue;
             }
 
+            // [FIX-LIVE-PUBLISH-READY] الـ socket موجود لكن قد لا يكون قد أكمل
+            // المصافحة الفعلية مع واتساب بعد (خاصة مباشرة بعد إعادة تشغيل
+            // الخادم على Railway، أو عند بدء جلسة نشر فور الضغط على "بدء" بينما
+            // الحساب لا يزال يتصل). سابقاً كان الكود يعتبر أي socket موجود
+            // = "متصل" فيدخل حلقة الإرسال مباشرة، فتفشل أول محاولة إرسال فوراً
+            // وتُسجَّل المجموعة "مكتملة" مع خطأ واحد ودون أي رسائل مُرسلة أو
+            // فاشلة فعلياً — بالضبط الأعراض التي كانت تظهر في اللوحة (1/1
+            // مجموعات، 0 رسائل مُرسلة، 0 فاشلة، 1 خطأ). الآن ننتظر جاهزية
+            // حقيقية حتى 20 ثانية قبل المتابعة، بدل الفشل الفوري.
+            if (!WhatsAppManager.isReady(accountId)) {
+                sess.log('warning', `⏳ الحساب "${accName}" لا يزال يتصل بواتساب — انتظار اكتمال الاتصال...`);
+                const becameReady = await WhatsAppManager.waitUntilReady(accountId, 20_000);
+                if (!becameReady) {
+                    sess.log('error', `الحساب "${accName}" لم يكتمل اتصاله خلال المهلة — تم التخطي`);
+                    sess.stats.errorCount++;
+                    sess.stats.completedGroups += groupJids.length;
+                    sess.tick();
+                    continue;
+                }
+                sess.log('success', `✅ الحساب "${accName}" أصبح جاهزاً — استئناف النشر`);
+            }
+
             // [البند 3] لا نبدأ بحساب موقوف تلقائياً (محظور / متجاوز عتبة الأخطاء)
             const accUserId = await this._getUserId(accountId);
             if (accUserId && await ProtectionService.getInstance().isSuspended(accUserId, accountId)) {
@@ -471,7 +493,11 @@ class LivePublishService {
                                 break;
                             }
                             // [البند 8] لا نعيد المحاولة لأخطاء غير قابلة لإعادة المحاولة (مثل invalid jid)
-                            const nonRetryable = e.protectionReason && e.protectionReason !== 'rate_limit_hour' && e.protectionReason !== 'rate_limit_day';
+                            // [FIX-LIVE-PUBLISH-READY] 'not_ready' (الاتصال لم يكتمل بعد) خطأ عابر
+                            // بطبيعته ويجب إعادة المحاولة، وليس فشلاً نهائياً كأخطاء
+                            // invalid jid/forbidden.
+                            const RETRYABLE_REASONS = new Set(['rate_limit_hour', 'rate_limit_day', 'not_ready']);
+                            const nonRetryable = e.protectionReason && !RETRYABLE_REASONS.has(e.protectionReason);
                             if (attempt <= MAX_RETRY && !nonRetryable) {
                                 sess.log('warning', `⚠️ إعادة المحاولة ${attempt}/${MAX_RETRY} — ${groupName}`, e.message);
                                 await this._safeDelay(sess, accountId, 'group');
@@ -567,7 +593,11 @@ class LivePublishService {
                                             break;
                                         }
                                         // أخطاء غير قابلة لإعادة المحاولة (رقم غير موجود، jid خاطئ...) لا داعي لتكرارها
-                                        const nonRetryable = e.protectionReason && e.protectionReason !== 'rate_limit_hour' && e.protectionReason !== 'rate_limit_day';
+                                        // [FIX-LIVE-PUBLISH-READY] 'not_ready' (الاتصال لم يكتمل بعد) خطأ عابر
+                            // بطبيعته ويجب إعادة المحاولة، وليس فشلاً نهائياً كأخطاء
+                            // invalid jid/forbidden.
+                            const RETRYABLE_REASONS = new Set(['rate_limit_hour', 'rate_limit_day', 'not_ready']);
+                            const nonRetryable = e.protectionReason && !RETRYABLE_REASONS.has(e.protectionReason);
                                         if (attempt <= MAX_RETRY && !nonRetryable) {
                                             sess.log('warning', `⚠️ إعادة المحاولة ${attempt}/${MAX_RETRY} — خاص → ${sendJid.split('@')[0]}`, e.message);
                                             await this._safeDelay(sess, accountId, 'private');
