@@ -569,6 +569,15 @@ class WhatsAppManager {
 
     // ── [البند 9] محاكاة السلوك البشري قبل/بعد كل إرسال ───────────────────────
     async _sendWithPresence(sock, jid, content) {
+        // [FIX-SEND-GHOST-SUBSCRIBE] presenceSubscribe() يؤسس/يؤكد جلسة
+        // التشفير (Signal session) مع الطرف الآخر قبل أي محاولة تواصل معه.
+        // إرسال sendPresenceUpdate('composing') مباشرة لجهة اتصال "جديدة"
+        // (بدون presenceSubscribe سابق) قد يفشل بصمت في بعض إصدارات Baileys
+        // أو يترك الجلسة في حالة غير مكتملة — وهو تفسير محتمل لحالات حيث
+        // sendMessage() يُحل الـ promise دون استثناء لكن الرسالة لا تُبث
+        // فعلياً ولا تظهر حتى في صندوق الصادر لدى المُرسِل نفسه.
+        try { await sock.presenceSubscribe(jid); } catch { /* بعض الأنواع لا تدعمها — تجاهل بأمان */ }
+
         try {
             await sock.sendPresenceUpdate('composing', jid);
         } catch { /* بعض أنواع الـ jid (مثل القنوات) قد لا تدعم presence — تجاهل بأمان */ }
@@ -582,6 +591,36 @@ class WhatsAppManager {
         try {
             const result = await sock.sendMessage(jid, content);
             try { await sock.sendPresenceUpdate('paused', jid); } catch {}
+
+            // [DEBUG-SEND-GHOST] تسجيل تشخيصي مؤقت لفهم شكل النتيجة الفعلية
+            // التي يُرجعها Baileys عند الإرسال الخاص — ضروري لتحديد السبب
+            // الجذري الحقيقي (بدل التخمين) بعد رصد حالات "✅ في السجل لكن
+            // بلا وصول فعلي ولا حتى ظهور في صندوق الصادر لدى المُرسِل نفسه).
+            if (!jid.endsWith('@g.us')) {
+                console.log(`[WAManager][DEBUG-SEND-GHOST] jid=${jid} result=`, JSON.stringify({
+                    hasKey: !!result?.key,
+                    keyId: result?.key?.id || null,
+                    keyRemoteJid: result?.key?.remoteJid || null,
+                    keyFromMe: result?.key?.fromMe ?? null,
+                    messageTimestamp: result?.messageTimestamp || null,
+                    status: result?.status ?? null,
+                }));
+            }
+
+            // [FIX-SEND-GHOST-CONFIRM] sock.sendMessage() قد يُحل الـ promise
+            // بنجاح (بدون رمي استثناء) حتى عندما لا تُبَث الرسالة فعلياً على
+            // الشبكة — لاحظنا هذا تحديداً حين لا يُرجع Baileys معرّف رسالة
+            // حقيقياً (result.key.id). الاعتماد على "عدم وجود خطأ" وحده غير
+            // كافٍ لتأكيد الإرسال الفعلي؛ التأكيد الوحيد الموثوق هو وجود
+            // key.id صالح في النتيجة، وهو ما يعنيه Baileys بأن الرسالة دخلت
+            // فعلياً طابور الإرسال على الشبكة.
+            if (!result?.key?.id) {
+                const err = new Error('sendMessage أعاد نتيجة بلا معرّف رسالة (key.id) — الإرسال لم يُؤكَّد فعلياً على الشبكة رغم عدم وجود استثناء');
+                err.protectionReason = 'send_unconfirmed';
+                err.rawResult = result;
+                throw err;
+            }
+
             return result;
         } catch (err) {
             try { await sock.sendPresenceUpdate('paused', jid); } catch {}
