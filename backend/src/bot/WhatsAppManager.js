@@ -9,18 +9,15 @@
  *
  *  [البند 1] sendMessageSafe() — نقطة الإرسال المركزية الوحيدة المعتمدة:
  *      كل إرسال في المشروع (Broadcast/Campaign/PrivateCampaign/LivePublish/
- *      GroupJoiner...) يجب أن يمر عبرها. تقوم تلقائياً بـ:
- *        ProtectionService.checkOperation() → محاكاة سلوك بشري → الإرسال
- *        → ProtectionService.recordSuccess()/recordFailure()
- *      الدوال القديمة (sendMessage/sendTextMessage/sendGroupMessage) بقيت
- *      كما هي لأي كود لا يزال يستدعيها مباشرة (توافق عكسي)، لكنها الآن
- *      أيضاً تمر داخلياً عبر sendMessageSafe لضمان عدم وجود أي مسار إرسال
- *      "غير محمي" في المشروع بأكمله.
+ *      GroupJoiner...) يجب أن يمر عبرها. تقوم تلقائياً بمحاكاة سلوك بشري
+ *      ثم تنفيذ الإرسال. الدوال القديمة (sendMessage/sendTextMessage/
+ *      sendGroupMessage) بقيت كما هي لأي كود لا يزال يستدعيها مباشرة
+ *      (توافق عكسي)، لكنها الآن أيضاً تمر داخلياً عبر sendMessageSafe.
  *
  *  [البند 3] اكتشاف الحظر الحقيقي:
  *      يميّز forbidden/banned عن مجرد disconnected، ويُفعّل تلقائياً:
- *        status='banned' في DB → ProtectionService.suspendAccount() →
- *        Socket Notification → استبعاد من كل الحملات الحالية/المستقبلية
+ *        status='banned' في DB → Socket Notification →
+ *        استبعاد من كل الحملات الحالية/المستقبلية
  *      (عبر BullMQ removeAccountJobs + تحديث حالة targets المرتبطة).
  *
  *  [البند 9] محاكاة السلوك البشري:
@@ -387,25 +384,11 @@ class WhatsAppManager {
             console.error(`[WAManager] _handleAccountBanned: failed to update status:`, err.message);
         }
 
-        // 2) ProtectionService.suspendAccount() — توقف فوري عن أي استخدام مستقبلي
-        try {
-            const meta = await this._getAccountMeta(accountId);
-            if (meta.userId) {
-                const { ProtectionService } = require('../api/services/ProtectionService');
-                const svc = ProtectionService.getInstance();
-                await svc.suspendAccount(meta.userId, accountId, 'whatsapp_forbidden_ban');
-            } else {
-                console.warn(`[WAManager] _handleAccountBanned: no user_id found for ${accountId}, cannot suspend in ProtectionService.`);
-            }
-        } catch (err) {
-            console.error(`[WAManager] _handleAccountBanned: ProtectionService.suspendAccount failed:`, err.message);
-        }
-
-        // 3) Socket Notification — إشعار فوري للواجهة الأمامية
+        // 2) Socket Notification — إشعار فوري للواجهة الأمامية
         emit('account_status', { accountId, status: 'banned' });
         emit('account_banned', { accountId, reason: 'forbidden', statusCode, timestamp: Date.now() });
 
-        // 4) استبعاد الحساب من جميع الحملات الحالية والمستقبلية
+        // 3) استبعاد الحساب من جميع الحملات الحالية والمستقبلية
         await this._excludeFromAllCampaigns(accountId);
     }
 
@@ -551,12 +534,8 @@ class WhatsAppManager {
      * كل إرسال في المشروع يجب أن يمر من هنا. تقوم هذه الدالة بـ:
      *   1. تحديد operationType تلقائياً (group اذا كان الـ jid ينتهي بـ @g.us، وإلا private)
      *      ما لم يُمرَّر صراحة عبر options.operationType.
-     *   2. ProtectionService.checkOperation() — رفض الإرسال إن تجاوز الحدود أو كان الحساب موقوفاً.
-     *   3. [البند 9] محاكاة سلوك بشري: sendPresenceUpdate('composing') → انتظار
+     *   2. [البند 9] محاكاة سلوك بشري: sendPresenceUpdate('composing') → انتظار
      *      مرتبط بطول الرسالة → sendMessage() → sendPresenceUpdate('paused').
-     *   4. تسجيل النتيجة عبر ProtectionService.recordSuccess/recordFailure تلقائياً
-     *      (ما لم يُطلب تعطيل ذلك صراحة عبر options.skipProtection — لأغراض
-     *      اختبارية فقط، غير مستخدم في مسارات الإنتاج).
      *
      * @param {string} accountId
      * @param {string} jid
@@ -592,34 +571,11 @@ class WhatsAppManager {
         const userId = meta.userId;
         console.log(`[WAManager][SEND-DEBUG] 2) رقم المستلم=${jid.split('@')[0]} | userId=${userId || 'غير موجود'} | accountId=${accountId}`);
 
-        // إن لم نجد user_id (حالة نادرة/بيانات قديمة) ننفذ الإرسال مباشرة دون
-        // حماية بدل رمي خطأ يكسر التوافق — لكن مع تحذير صريح في السجل.
-        if (!userId) {
-            console.warn(`[WAManager][SEND-DEBUG] sendMessageSafe: no user_id for account ${accountId} — sending WITHOUT protection.`);
-            return this._sendWithPresence(sock, jid, content);
-        }
-
-        const { ProtectionService } = require('../api/services/ProtectionService');
-        const svc = ProtectionService.getInstance();
-
-        const check = await svc.checkOperation(userId, accountId, {
-            operationType,
-            accountCreatedAt: meta.createdAt,
-        });
-
-        if (!check.allowed) {
-            console.error(`[WAManager][SEND-DEBUG] فشل — رفض من نظام الحماية: ${check.reason} — ${check.message}`);
-            const err = new Error(check.message || `العملية مرفوضة: ${check.reason}`);
-            err.protectionReason = check.reason;
-            throw err;
-        }
-
-        console.log(`[WAManager][SEND-DEBUG] 3) اجتاز فحوصات الحماية — بدء الإرسال الفعلي إلى ${jid}`);
+        console.log(`[WAManager][SEND-DEBUG] 3) بدء الإرسال الفعلي إلى ${jid}`);
 
         try {
             const result = await this._sendWithPresence(sock, jid, content);
             console.log(`[WAManager][SEND-DEBUG] 5) ✅ نجاح مؤكَّد فعلياً — messageId=${result?.key?.id} jid=${jid}`);
-            await svc.recordSuccess(userId, accountId, taskId, { operationType });
             return result;
         } catch (sendErr) {
             console.error(`[WAManager][SEND-DEBUG] 5) ❌ فشل — jid=${jid} السبب: ${sendErr.message} | protectionReason=${sendErr.protectionReason || 'غير محدد'}`);
@@ -643,22 +599,13 @@ class WhatsAppManager {
                     await repairCorruptedSessions(accountId, SystemDB, targetPhone);
                     const retryResult = await this._sendWithPresence(sock, jid, content);
                     console.log(`[WAManager][SEND-DEBUG] ✅ نجحت إعادة المحاولة بعد إصلاح الجلسة — messageId=${retryResult?.key?.id}`);
-                    await svc.recordSuccess(userId, accountId, taskId, { operationType });
                     return retryResult;
                 } catch (retryErr) {
                     console.error(`[WAManager][SEND-DEBUG] ❌ فشلت إعادة المحاولة أيضاً بعد إصلاح الجلسة — jid=${jid} السبب: ${retryErr.message}`);
-                    await svc.recordFailure(userId, accountId, taskId, retryErr.message, {
-                        operationType,
-                        errorObject: retryErr,
-                    });
                     throw retryErr;
                 }
             }
 
-            await svc.recordFailure(userId, accountId, taskId, sendErr.message, {
-                operationType,
-                errorObject: sendErr,
-            });
             throw sendErr;
         }
     }
