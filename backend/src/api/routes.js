@@ -287,6 +287,7 @@ router.get('/accounts/:accountId/broadcast/log',                  auth, Broadcas
 
 // ── Live Publish — نشر مباشر متعدد الحسابات مع Socket.IO ────────────────────
 router.post('/live-publish/start',                   auth, BroadcastController.startLivePublish.bind(BroadcastController));
+router.get ('/live-publish/active',                   auth, BroadcastController.getActiveLivePublishSession.bind(BroadcastController)); // [إصلاح استمرارية اللوحة] يجب أن يسبق الراوت الديناميكي :sessionId أدناه
 router.post('/live-publish/:sessionId/control',      auth, BroadcastController.controlLivePublish.bind(BroadcastController));
 router.get ('/live-publish/:sessionId/status',       auth, BroadcastController.getLivePublishStatus.bind(BroadcastController));
 
