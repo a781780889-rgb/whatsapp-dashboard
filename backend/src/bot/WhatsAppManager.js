@@ -549,7 +549,12 @@ class WhatsAppManager {
         const all = [];
         const admins = [];
         const targetJids = [];
-        const phoneByJid = {}; // [فلتر السعودية] jid → رقم الهاتف الحقيقي (وليس معرّف LID)
+        const phoneByJid    = {}; // [فلتر السعودية] jid → رقم الهاتف الحقيقي (وليس معرّف LID)
+        const sendableByJid = {}; // [إصلاح الإرسال الخاص] jid → jid فعلي قابل لاستقبال رسالة خاصة
+
+        // [إصلاح الإرسال الخاص] الأعضاء الذين لا نملك لهم رقماً حقيقياً مباشراً
+        // (أي pJid ينتهي بـ @lid بدون phoneNumber) — نحتاج تحويلهم عبر onWhatsApp.
+        const needsResolve = [];
 
         for (const p of participants) {
             const pJid = normalize(p.id);
@@ -570,16 +575,53 @@ class WhatsAppManager {
             const entry = { jid: pJid, phone: realPhone, is_admin: isAdmin };
             phoneByJid[pJid] = realPhone;
 
+            // [إصلاح الإرسال الخاص] jid فعلي قابل لاستقبال DM:
+            // - إن كان pJid نفسه بصيغة @s.whatsapp.net فهو صالح مباشرة للإرسال الخاص.
+            // - إن توفر phoneNumber (حتى لو pJid كان @lid) نبني منه jid صالحاً للإرسال.
+            // - غير ذلك (LID بلا رقم) — يُجدوَل للتحويل عبر onWhatsApp لاحقاً.
+            if (pJid.endsWith('@s.whatsapp.net')) {
+                sendableByJid[pJid] = pJid;
+            } else if (realPhoneJid) {
+                sendableByJid[pJid] = realPhoneJid;
+            } else {
+                needsResolve.push(pJid);
+            }
+
             all.push(entry);
             if (isAdmin) admins.push(pJid);
             else targetJids.push(pJid);
+        }
+
+        // [إصلاح الإرسال الخاص] تحويل معرّفات LID المتبقية إلى jid فعلي عبر
+        // sock.onWhatsApp() — استعلام شبكي حقيقي يُرجع الرقم/الـ jid القابل للإرسال.
+        // يُنفَّذ فقط لمن لا يوجد لهم بديل جاهز، وبأمان (تجاهل الفشل الفردي).
+        if (needsResolve.length && typeof sock.onWhatsApp === 'function') {
+            try {
+                const lookupInputs = needsResolve.map(j => j.split('@')[0]);
+                const results = await sock.onWhatsApp(...lookupInputs);
+                for (const r of results || []) {
+                    if (!r?.exists || !r?.jid) continue;
+                    const resolvedJid = normalize(r.jid);
+                    // نربط كل نتيجة بمعرّف LID الأصلي الذي طلبناه عبر lid إن توفر، أو نطابق بالترتيب
+                    const originalLid = r.lid ? normalize(r.lid) : null;
+                    if (originalLid && needsResolve.includes(originalLid)) {
+                        sendableByJid[originalLid] = resolvedJid;
+                        if (resolvedJid.endsWith('@s.whatsapp.net')) {
+                            phoneByJid[originalLid] = resolvedJid.split('@')[0];
+                        }
+                    }
+                }
+            } catch {
+                // فشل التحويل الجماعي — الأعضاء غير المحلولين سيُستبعدون تلقائياً أدناه
+            }
         }
 
         return {
             all,
             admins,
             target_jids: targetJids,
-            phone_by_jid: phoneByJid, // [فلتر السعودية] للفلترة بالرقم الحقيقي بدل LID
+            phone_by_jid:    phoneByJid,    // [فلتر السعودية] للفلترة بالرقم الحقيقي بدل LID
+            sendable_by_jid: sendableByJid, // [إصلاح الإرسال الخاص] jid فعلي صالح للإرسال الخاص لكل عضو
             total: all.length,
             admins_count: admins.length,
             members_count: targetJids.length,
