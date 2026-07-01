@@ -28,7 +28,7 @@
  *      بطول النص، ثم الإرسال، ثم sendPresenceUpdate('paused').
  * ─────────────────────────────────────────────────────────────────────────
  */
-const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, WAMessageStatus } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const SystemDB = require('../database/SystemDB');
 const DatabaseManager = require('../database/DatabaseManager');
@@ -49,6 +49,43 @@ const reconnectAt = new Map();    // accountId → attempt count (exponential ba
 // حين تكون كل الحسابات لا تزال في طور إعادة الاتصال).
 // هذا الـ Set يتتبع الحسابات التي أكدت فعلياً الوصول لـ connection === 'open'.
 const readySessions = new Set();  // accountId
+
+// [PRIVATE-SEND-ACK-TRACKING] تتبّع تأكيد استلام خادم واتساب الفعلي، مُقيَّد
+// على الرسائل الخاصة (private) فقط — لا يُطبَّق على المجموعات إطلاقاً، بعد
+// أن ثبت سابقاً أن تطبيقه على المجموعات كان يُفشِل إرسالاً جماعياً كان
+// يعمل بنجاح فعلياً (على الأرجح لأن حدث messages.update للمجموعات يختلف في
+// توقيته/بنيته عن الخاص). نتيجة sock.sendMessage() الناجحة محلياً (key.id
+// موجود) لا تعني وصول الرسالة فعلياً لخوادم واتساب — التأكيد الحقيقي الوحيد
+// هو حدث messages.update لاحق لنفس key.id بحالة SERVER_ACK أو أعلى.
+const _pendingPrivateAcks = new Map(); // messageId → { resolve, reject, timer, jid }
+const PRIVATE_ACK_TIMEOUT_MS = 30_000; // مهلة أطول من محاولة سابقة (كانت 12 ثانية وقد تكون قصيرة جداً)
+
+function _waitForPrivateAck(messageId, jid) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            _pendingPrivateAcks.delete(messageId);
+            console.warn(`[WAManager][PRIVATE-ACK] TIMEOUT — لم يصل أي تحديث حالة لـ messageId=${messageId} jid=${jid} خلال ${PRIVATE_ACK_TIMEOUT_MS / 1000}ث`);
+            reject(Object.assign(
+                new Error('لم يصل تأكيد استلام من خادم واتساب خلال المهلة — الرسالة قد تكون لم تُبَث فعلياً'),
+                { protectionReason: 'send_unconfirmed' }
+            ));
+        }, PRIVATE_ACK_TIMEOUT_MS);
+        _pendingPrivateAcks.set(messageId, { resolve, reject, timer, jid });
+    });
+}
+
+function _resolvePrivateAck(messageId, status) {
+    const entry = _pendingPrivateAcks.get(messageId);
+    if (!entry) return; // ليست رسالة خاصة قيد التتبع (أو مجموعة، أو انتهت مهلتها بالفعل)
+    clearTimeout(entry.timer);
+    _pendingPrivateAcks.delete(messageId);
+    console.log(`[WAManager][PRIVATE-ACK] وصل تحديث حالة — messageId=${messageId} jid=${entry.jid} status=${status}`);
+    if (status === WAMessageStatus.ERROR) {
+        entry.reject(Object.assign(new Error('خادم واتساب أعاد حالة خطأ (ERROR) لهذه الرسالة'), { protectionReason: 'send_server_error' }));
+    } else {
+        entry.resolve(status);
+    }
+}
 
 // [البند 4: Multi-Tenant] لا نخزّن user_id بشكل ثابت — نجلبه عند الحاجة عبر
 // _getAccountMeta() مع كاش قصير العمر (60 ثانية) لكل accountId لتفادي ضغط DB
@@ -296,6 +333,20 @@ class WhatsAppManager {
             }
         });
 
+        // [PRIVATE-SEND-ACK-TRACKING] هذا المستمع آمن بالتصميم لأنه لا يفعل
+        // شيئاً إلا لو كان messageId موجوداً فعلاً في _pendingPrivateAcks —
+        // أي رسالة لم تُسجَّل هناك (كل رسائل المجموعات، وأي رسالة خاصة انتهت
+        // مهلة انتظارها بالفعل) تُتجاهَل بأمان دون أي أثر جانبي.
+        sock.ev.on('messages.update', (updates) => {
+            for (const u of updates) {
+                const id = u.key?.id;
+                if (!id) continue;
+                const status = u.update?.status;
+                if (status === undefined || status === null) continue;
+                _resolvePrivateAck(id, status);
+            }
+        });
+
         sock.ev.on('groups.upsert', (newGroups) => {
             try {
                 require('../api/services/GroupRealtimeSync').onGroupsUpsert(accountId, sock, newGroups);
@@ -515,28 +566,36 @@ class WhatsAppManager {
      * @param {string} [options.taskId]                     معرّف المهمة لأغراض SmartRetry
      */
     async sendMessageSafe(accountId, jid, content, options = {}) {
+        const operationType = options.operationType
+            || (jid.endsWith('@g.us') ? 'group' : 'private');
+
+        console.log(`[WAManager][SEND-DEBUG] 1) طلب إرسال مستلم — accountId=${accountId} jid=${jid} type=${operationType}`);
+
         const sock = sessions.get(accountId);
-        if (!sock) throw new Error('Account not connected');
+        if (!sock) {
+            console.error(`[WAManager][SEND-DEBUG] فشل — الحساب ${accountId} غير متصل (لا يوجد socket)`);
+            throw new Error('Account not connected');
+        }
         // [FIX-LIVE-PUBLISH-READY] وجود الـ socket في sessions لا يعني اتصالاً
         // فعلياً مكتملاً (قد يكون لا يزال في طور المصافحة بعد إعادة تشغيل
         // الخادم) — الإرسال على socket غير جاهز يفشل فوراً وبصمت.
         if (!readySessions.has(accountId)) {
+            console.error(`[WAManager][SEND-DEBUG] فشل — الحساب ${accountId} socket موجود لكن الاتصال غير مكتمل بعد`);
             const err = new Error('الحساب لا يزال يتصل بواتساب — لم تكتمل المصافحة بعد');
             err.protectionReason = 'not_ready';
             throw err;
         }
 
-        const operationType = options.operationType
-            || (jid.endsWith('@g.us') ? 'group' : 'private');
         const taskId = options.taskId || null;
 
         const meta = await this._getAccountMeta(accountId);
         const userId = meta.userId;
+        console.log(`[WAManager][SEND-DEBUG] 2) رقم المستلم=${jid.split('@')[0]} | userId=${userId || 'غير موجود'} | accountId=${accountId}`);
 
         // إن لم نجد user_id (حالة نادرة/بيانات قديمة) ننفذ الإرسال مباشرة دون
         // حماية بدل رمي خطأ يكسر التوافق — لكن مع تحذير صريح في السجل.
         if (!userId) {
-            console.warn(`[WAManager] sendMessageSafe: no user_id for account ${accountId} — sending WITHOUT protection.`);
+            console.warn(`[WAManager][SEND-DEBUG] sendMessageSafe: no user_id for account ${accountId} — sending WITHOUT protection.`);
             return this._sendWithPresence(sock, jid, content);
         }
 
@@ -549,16 +608,22 @@ class WhatsAppManager {
         });
 
         if (!check.allowed) {
+            console.error(`[WAManager][SEND-DEBUG] فشل — رفض من نظام الحماية: ${check.reason} — ${check.message}`);
             const err = new Error(check.message || `العملية مرفوضة: ${check.reason}`);
             err.protectionReason = check.reason;
             throw err;
         }
 
+        console.log(`[WAManager][SEND-DEBUG] 3) اجتاز فحوصات الحماية — بدء الإرسال الفعلي إلى ${jid}`);
+
         try {
             const result = await this._sendWithPresence(sock, jid, content);
+            console.log(`[WAManager][SEND-DEBUG] 5) ✅ نجاح مؤكَّد فعلياً — messageId=${result?.key?.id} jid=${jid}`);
             await svc.recordSuccess(userId, accountId, taskId, { operationType });
             return result;
         } catch (sendErr) {
+            console.error(`[WAManager][SEND-DEBUG] 5) ❌ فشل — jid=${jid} السبب: ${sendErr.message} | protectionReason=${sendErr.protectionReason || 'غير محدد'}`);
+
             // [FIX-SESSION-RACE-RECOVERY] بعض حالات فشل الإرسال الصامت جذرها
             // جلسة Signal تالفة لهذا الطرف تحديداً (بقايا سباق كتابة قديم قبل
             // إضافة القفل التسلسلي في PostgreSQLAuthState). عند اكتشاف نمط
@@ -574,12 +639,14 @@ class WhatsAppManager {
             if (looksLikeSessionCorruption && !options._sessionRepairRetried) {
                 try {
                     const targetPhone = jid.split('@')[0];
-                    console.warn(`[WAManager] sendMessageSafe: session corruption detected for ${jid} — repairing and retrying once.`);
+                    console.warn(`[WAManager][SEND-DEBUG] اكتشاف عطل محتمل في الجلسة لـ ${jid} — إصلاح وإعادة محاولة واحدة فقط.`);
                     await repairCorruptedSessions(accountId, SystemDB, targetPhone);
                     const retryResult = await this._sendWithPresence(sock, jid, content);
+                    console.log(`[WAManager][SEND-DEBUG] ✅ نجحت إعادة المحاولة بعد إصلاح الجلسة — messageId=${retryResult?.key?.id}`);
                     await svc.recordSuccess(userId, accountId, taskId, { operationType });
                     return retryResult;
                 } catch (retryErr) {
+                    console.error(`[WAManager][SEND-DEBUG] ❌ فشلت إعادة المحاولة أيضاً بعد إصلاح الجلسة — jid=${jid} السبب: ${retryErr.message}`);
                     await svc.recordFailure(userId, accountId, taskId, retryErr.message, {
                         operationType,
                         errorObject: retryErr,
@@ -618,47 +685,43 @@ class WhatsAppManager {
         const typingMs = Math.min(4000, Math.max(400, textLength * 35 + Math.floor(Math.random() * 300)));
         await new Promise(r => setTimeout(r, typingMs));
 
+        console.log(`[WAManager][SEND-DEBUG] 4) استدعاء sock.sendMessage — jid=${jid} isGroup=${isGroup}`);
+
         try {
             const result = await sock.sendMessage(jid, content);
             if (isGroup) {
                 try { await sock.sendPresenceUpdate('paused', jid); } catch {}
             }
 
-            // [DEBUG-SEND-GHOST] تسجيل تشخيصي مؤقت لفهم شكل النتيجة الفعلية
-            // التي يُرجعها Baileys عند الإرسال الخاص — ضروري لتحديد السبب
-            // الجذري الحقيقي (بدل التخمين) بعد رصد حالات "✅ في السجل لكن
-            // بلا وصول فعلي ولا حتى ظهور في صندوق الصادر لدى المُرسِل نفسه).
-            if (!jid.endsWith('@g.us')) {
-                console.log(`[WAManager][DEBUG-SEND-GHOST] jid=${jid} result=`, JSON.stringify({
-                    hasKey: !!result?.key,
-                    keyId: result?.key?.id || null,
-                    keyRemoteJid: result?.key?.remoteJid || null,
-                    keyFromMe: result?.key?.fromMe ?? null,
-                    messageTimestamp: result?.messageTimestamp || null,
-                    status: result?.status ?? null,
-                }));
-            }
+            console.log(`[WAManager][SEND-DEBUG] استجابة Baileys الأولية — jid=${jid} messageId=${result?.key?.id || 'مفقود'} status=${result?.status ?? 'مفقود'}`);
 
-            // [FIX-SEND-GHOST-CONFIRM] sock.sendMessage() قد يُحل الـ promise
-            // بنجاح (بدون رمي استثناء) حتى عندما لا تُبَث الرسالة فعلياً على
-            // الشبكة — لاحظنا هذا تحديداً حين لا يُرجع Baileys معرّف رسالة
-            // حقيقياً (result.key.id). الاعتماد على "عدم وجود خطأ" وحده غير
-            // كافٍ لتأكيد الإرسال الفعلي؛ التأكيد الوحيد الموثوق هو وجود
-            // key.id صالح في النتيجة، وهو ما يعنيه Baileys بأن الرسالة دخلت
-            // فعلياً طابور الإرسال على الشبكة.
+            // وجود key.id فقط يعني أن Baileys بنى الرسالة محلياً وأرسلها
+            // لطابور الشبكة — status:1 (PENDING) في النتيجة يؤكد ذلك فقط،
+            // وليس وصولها الفعلي لخوادم واتساب. لا نقبل نتيجة بلا معرّف
+            // رسالة على الإطلاق.
             if (!result?.key?.id) {
-                const err = new Error('sendMessage أعاد نتيجة بلا معرّف رسالة (key.id) — الإرسال لم يُؤكَّد فعلياً على الشبكة رغم عدم وجود استثناء');
+                const err = new Error('sendMessage أعاد نتيجة بلا معرّف رسالة (key.id) — الإرسال لم يُبنَ محلياً حتى');
                 err.protectionReason = 'send_unconfirmed';
                 err.rawResult = result;
                 throw err;
             }
 
-            // [ROLLBACK-FIX-SEND-SERVER-ACK] تمت إزالة انتظار حدث messages.update
-            // (SERVER_ACK) الذي كان مضافاً هنا سابقاً — تبيّن أنه كان يتسبب في
-            // فشل إرسال طبيعي وناجح فعلياً (كان يصل للمستلمين بشكل مؤكَّد قبل
-            // إضافته)، على الأرجح لأن الحدث لا يصل بالشكل/التوقيت المتوقع لكل
-            // أنواع الرسائل (خاصة الجماعية)، فكانت المهلة تنتهي وتُفشِل إرسالاً
-            // كان سينجح فعلياً. وجود result.key.id يبقى المؤشر العملي المعتمد.
+            // [PRIVATE-SEND-ACK-TRACKING] للرسائل الخاصة فقط: ننتظر فعلياً
+            // حدث messages.update الذي يرفع حالة هذه الرسالة تحديداً إلى
+            // SERVER_ACK أو أعلى، قبل اعتبار الإرسال ناجحاً بشكل نهائي.
+            // المجموعات مستثناة تماماً من هذا الانتظار (سبق أن ثبت أنه
+            // يُفشِل إرسالها الطبيعي دون داعٍ).
+            if (!isGroup && (result.status ?? WAMessageStatus.PENDING) < WAMessageStatus.SERVER_ACK) {
+                console.log(`[WAManager][SEND-DEBUG] الحالة الأولية PENDING — انتظار تأكيد SERVER_ACK فعلي من واتساب (حتى ${PRIVATE_ACK_TIMEOUT_MS / 1000}ث)...`);
+                try {
+                    const finalStatus = await _waitForPrivateAck(result.key.id, jid);
+                    console.log(`[WAManager][SEND-DEBUG] ✅ تأكيد فعلي وصل — jid=${jid} finalStatus=${finalStatus}`);
+                } catch (ackErr) {
+                    console.error(`[WAManager][SEND-DEBUG] ❌ لم يصل تأكيد فعلي — jid=${jid} السبب: ${ackErr.message}`);
+                    ackErr.rawResult = result;
+                    throw ackErr;
+                }
+            }
 
             return result;
         } catch (err) {
