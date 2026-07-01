@@ -9,7 +9,6 @@ const { Queue, Worker } = require('bullmq');
 const crypto = require('crypto');
 const { getBullMQConnection } = require('../lib/redis');
 const DatabaseManager = require('../database/DatabaseManager');
-const { ProtectionService } = require('../api/services/ProtectionService');
 
 const QUEUE_NAME = 'wa-tasks';
 
@@ -116,22 +115,6 @@ class JobScheduler {
         if (!session) throw new Error(`WhatsApp session not active for account ${accountId}`);
 
         const accountDB = await DatabaseManager.getAccountDB(accountId);
-
-        // [البند 3] فحص مركزي واحد لكل أنواع المهام: لا تنفيذ على حساب موقوف
-        // تلقائياً (محظور/متجاوز عتبة الأخطاء) — نفشل المهمة بصمت (لا retry
-        // عبر BullMQ لأن إعادة المحاولة على حساب محظور عديمة الجدوى ومضرة).
-        try {
-            const accRow = await DatabaseManager.systemDB?.get
-                ? await DatabaseManager.systemDB.get(`SELECT user_id FROM accounts WHERE id = $1`, [accountId])
-                : null;
-            const userId = accRow?.user_id || null;
-            if (userId && await ProtectionService.getInstance().isSuspended(userId, accountId)) {
-                console.warn(`[BullMQ] Skipping job ${job.id} (${job.name}) — account ${accountId} is suspended by protection.`);
-                return; // اكتمال "ناجح" — التوقف متعمَّد، ليس فشلاً يستدعي retry
-            }
-        } catch (e) {
-            console.warn(`[BullMQ] suspension check failed for ${accountId}, proceeding cautiously:`, e.message);
-        }
 
         switch (job.name) {
             case 'send_campaign_message':
@@ -290,14 +273,7 @@ class JobScheduler {
         const _send = (jid, operationType) =>
             WhatsAppManager.sendMessageSafe(accountId, jid, buildContent(), { operationType, taskId: `${scheduleId}:${jid}` });
 
-        // [البند 1+2] جلب userId للحساب لاستخدام safeDelay المرتبط بإعدادات الحماية
-        let userId = null;
-        try {
-            const row = await DatabaseManager.systemDB?.get?.(`SELECT user_id FROM accounts WHERE id = $1`, [accountId]);
-            userId = row?.user_id || null;
-        } catch { /* تجاهل — fallback أدناه */ }
         const _safeDelay = async (operationType = 'private') => {
-            if (userId) return ProtectionService.getInstance().safeDelay(userId, operationType);
             return new Promise(r => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
         };
 
