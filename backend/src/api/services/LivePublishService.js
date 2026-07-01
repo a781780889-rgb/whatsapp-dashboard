@@ -109,6 +109,18 @@ class LiveSession {
         };
         this.logs.push(entry);
         if (this.logs.length > 500) this.logs = this.logs.slice(-400);
+
+        // [عرض تفاصيل اللوحة أونلاين] هذه الأحداث كانت تُبث فقط عبر Socket.IO
+        // للواجهة، فلا تظهر إطلاقاً في سجلات الخادم (Railway Deploy Logs) —
+        // فمهما فشلت جلسة نشر، لا يوجد أي أثر يمكن تتبعه من لوحة Railway.
+        // نُكرّر كل حدث هنا أيضاً في console حتى يمكن متابعة/تشخيص النشر
+        // المباشر فعلياً من سجلات الخادم أونلاين، تماماً كباقي الخدمات.
+        const tag  = `[LivePublish:${this.id.slice(0, 8)}]`;
+        const line = details ? `${tag} ${msg} — ${details}` : `${tag} ${msg}`;
+        if (level === 'error')        console.error(line);
+        else if (level === 'warning') console.warn(line);
+        else                           console.log(line);
+
         SocketBridge.to(`${ROOM_PRE}${this.id}`).emit('live_publish:log', {
             sessionId: this.id, ...entry,
         });
