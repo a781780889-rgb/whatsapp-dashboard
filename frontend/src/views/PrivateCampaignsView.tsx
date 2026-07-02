@@ -8,7 +8,8 @@ import {
   Rocket, Plus, Play, Pause, Trash2, Eye, RefreshCcw,
   Users, Clock, CalendarRange, MessageSquare, Zap, Check,
   ChevronRight, BarChart2, AlertCircle, Target, Settings2,
-  Smartphone, Timer, ArrowRight, Radio, X, Info, TrendingUp
+  Smartphone, Timer, ArrowRight, Radio, X, Info, TrendingUp,
+  Shield, ShieldCheck, ShieldAlert, Library, Sparkles
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { authFetch, API } from '@/utils/api';
@@ -36,8 +37,30 @@ interface Group {
   id: string;
   group_jid: string;
   name: string;
-  participants_count: number;
+  members_count: number;
+  admins_count: number;
+  announce: boolean;      // true = مقيدة (النشر للمشرفين فقط)
+  restrict: boolean;      // true = تعديل الإعدادات مقيّد للمشرفين
+  is_member: boolean;     // true = نشطة (لا تزال ضمن عضوية الحساب)
+  is_admin: boolean;      // true = الحساب مشرف في هذه المجموعة
+  publish_status: string;
+}
+
+type GroupFilter = 'all' | 'restricted' | 'active' | 'admin';
+
+const GROUP_FILTERS: { id: GroupFilter; label: string; icon: any }[] = [
+  { id: 'all',        label: 'الكل',            icon: Users        },
+  { id: 'active',     label: 'نشطة',            icon: ShieldCheck  },
+  { id: 'restricted', label: 'مقيدة',           icon: ShieldAlert  },
+  { id: 'admin',      label: 'أنا مشرف فيها',   icon: Shield       },
+];
+
+interface AdLibraryItem {
+  id: string;
+  name: string;
+  content: string;
   is_active: boolean;
+  priority: number;
 }
 
 interface Account {
@@ -270,7 +293,13 @@ function CreateCampaignWizard({
   const [groups, setGroups] = useState<Group[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(true);
   const [searchGroup, setSearchGroup] = useState('');
+  const [groupFilter, setGroupFilter] = useState<GroupFilter>('active');
   const [error, setError] = useState('');
+
+  // Ad library
+  const [ads, setAds] = useState<AdLibraryItem[]>([]);
+  const [loadingAds, setLoadingAds] = useState(false);
+  const [showAdPicker, setShowAdPicker] = useState(false);
 
   // Form state
   const [form, setForm] = useState({
@@ -287,14 +316,29 @@ function CreateCampaignWizard({
 
   useEffect(() => {
     const fetchGroups = async () => {
+      setLoadingGroups(true);
       try {
-        const res = await authFetch(`${API}/accounts/${accountId}/groups?limit=200`);
+        // نجلب كل المجموعات (member=true) بحد أقصى مرتفع كي لا تُقتصر النتائج
+        // على أول دفعة (كانت سابقاً 200 فقط مرتبة حسب عدد الأعضاء، ما يُخفي
+        // المجموعات النشطة غير المقيدة التي تأتي لاحقاً في الترتيب).
+        const res = await authFetch(`${API}/accounts/${accountId}/groups?limit=2000`);
         const d = await res.json();
         if (d.success) setGroups(d.groups ?? []);
       } catch { /* silent */ }
       finally { setLoadingGroups(false); }
     };
     fetchGroups();
+
+    const fetchAds = async () => {
+      setLoadingAds(true);
+      try {
+        const res = await authFetch(`${API}/accounts/${accountId}/ads`);
+        const d = await res.json();
+        if (d.success) setAds((d.ads ?? []).filter((a: AdLibraryItem) => a.is_active));
+      } catch { /* silent */ }
+      finally { setLoadingAds(false); }
+    };
+    fetchAds();
 
     // Auto-set start time to now
     const now = new Date();
@@ -309,9 +353,36 @@ function CreateCampaignWizard({
   }, [accountId]);
 
   const connectedAccounts = accounts.filter(a => a.status === 'connected');
-  const filteredGroups = groups.filter(g =>
-    g.name?.toLowerCase().includes(searchGroup.toLowerCase()) || g.group_jid?.includes(searchGroup)
-  );
+
+  // ── فلترة المجموعات: بحث + حالة (الكل/نشطة/مقيدة/أنا مشرف) ──
+  const filteredGroups = groups
+    .filter(g =>
+      g.name?.toLowerCase().includes(searchGroup.toLowerCase()) || g.group_jid?.includes(searchGroup)
+    )
+    .filter(g => {
+      switch (groupFilter) {
+        case 'active':     return g.is_member;                 // نشطة = لا تزال ضمن العضوية
+        case 'restricted': return g.announce === true;          // مقيدة = النشر للمشرفين فقط
+        case 'admin':      return g.is_admin === true;          // أنا مشرف فيها
+        default:           return true;                         // الكل
+      }
+    });
+
+  const groupCounts = {
+    all:        groups.length,
+    active:     groups.filter(g => g.is_member).length,
+    restricted: groups.filter(g => g.announce === true).length,
+    admin:      groups.filter(g => g.is_admin === true).length,
+  };
+
+  const applyAdToMessage = (ad: AdLibraryItem) => {
+    setForm(f => ({
+      ...f,
+      messageText: ad.content || f.messageText,
+      name: f.name || ad.name,
+    }));
+    setShowAdPicker(false);
+  };
 
   const toggleGroup = (id: string) =>
     setForm(f => ({
@@ -450,7 +521,17 @@ function CreateCampaignWizard({
                 <p className="text-xs text-[var(--text-muted)] text-left">{form.name.length}/100</p>
               </div>
               <div className="space-y-1.5">
-                <label className="text-sm font-medium text-[var(--text-primary)]">نص الرسالة *</label>
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-[var(--text-primary)]">نص الرسالة *</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdPicker(true)}
+                    className="flex items-center gap-1.5 text-xs font-semibold text-[var(--brand-primary)] hover:underline"
+                  >
+                    <Library className="w-3.5 h-3.5" />
+                    استخدام من مكتبة الإعلانات
+                  </button>
+                </div>
                 <textarea
                   className="input w-full min-h-[140px] resize-none"
                   placeholder="اكتب محتوى الرسالة هنا... يمكن استخدام الرموز التعبيرية ✅"
@@ -460,6 +541,40 @@ function CreateCampaignWizard({
                 />
                 <p className="text-xs text-[var(--text-muted)] text-left">{form.messageText.length}/4096</p>
               </div>
+
+              {/* Ad library picker */}
+              {showAdPicker && (
+                <div className="border border-[var(--border-default)] rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-default)]">
+                    <span className="text-xs font-semibold text-[var(--text-secondary)] flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-[var(--brand-primary)]" />
+                      اختر إعلاناً من المكتبة
+                    </span>
+                    <button onClick={() => setShowAdPicker(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="max-h-56 overflow-y-auto">
+                    {loadingAds ? (
+                      <div className="p-6 text-center text-[var(--text-muted)] text-sm">جارٍ التحميل...</div>
+                    ) : ads.length === 0 ? (
+                      <div className="p-6 text-center text-[var(--text-muted)] text-sm">
+                        لا توجد إعلانات نشطة في المكتبة. أضف إعلانات من قسم مكتبة الإعلانات أولاً.
+                      </div>
+                    ) : ads.map(ad => (
+                      <button
+                        key={ad.id}
+                        onClick={() => applyAdToMessage(ad)}
+                        className="w-full text-right p-3 border-b border-[var(--border-default)] last:border-0 hover:bg-[var(--bg-elevated)] transition-colors"
+                      >
+                        <p className="text-sm font-medium text-[var(--text-primary)]">{ad.name}</p>
+                        <p className="text-xs text-[var(--text-muted)] truncate mt-0.5">{ad.content}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-start gap-2 p-3 bg-blue-500/5 border border-blue-500/15 rounded-xl">
                 <Info className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
                 <p className="text-xs text-blue-400">
@@ -502,12 +617,38 @@ function CreateCampaignWizard({
                 value={searchGroup}
                 onChange={e => setSearchGroup(e.target.value)}
               />
+
+              {/* فلاتر الحالة */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {GROUP_FILTERS.map(f => {
+                  const active = groupFilter === f.id;
+                  return (
+                    <button
+                      key={f.id}
+                      onClick={() => setGroupFilter(f.id)}
+                      className={cn(
+                        'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all border',
+                        active
+                          ? 'bg-[var(--brand-primary)] border-[var(--brand-primary)] text-white'
+                          : 'border-[var(--border-default)] text-[var(--text-secondary)] hover:border-[var(--brand-primary)]'
+                      )}
+                    >
+                      <f.icon className="w-3.5 h-3.5" />
+                      {f.label}
+                      <span className={cn('text-[10px]', active ? 'text-white/80' : 'text-[var(--text-muted)]')}>
+                        ({groupCounts[f.id]})
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
               <div className="border border-[var(--border-default)] rounded-xl overflow-hidden max-h-72 overflow-y-auto">
                 {loadingGroups ? (
                   <div className="p-8 text-center text-[var(--text-muted)] text-sm">جارٍ تحميل المجموعات...</div>
                 ) : filteredGroups.length === 0 ? (
                   <div className="p-8 text-center text-[var(--text-muted)] text-sm">
-                    {searchGroup ? 'لا توجد نتائج' : 'لا توجد مجموعات متاحة'}
+                    {searchGroup ? 'لا توجد نتائج' : 'لا توجد مجموعات ضمن هذا الفلتر'}
                   </div>
                 ) : filteredGroups.map(g => {
                   const selected = form.selectedGroupIds.includes(g.id);
@@ -530,18 +671,28 @@ function CreateCampaignWizard({
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-sm text-[var(--text-primary)] truncate">{g.name || g.group_jid}</p>
-                        <p className="text-xs text-[var(--text-muted)]">{g.participants_count?.toLocaleString() || 0} عضو</p>
+                        <p className="text-xs text-[var(--text-muted)]">{g.members_count?.toLocaleString() || 0} عضو</p>
                       </div>
-                      {!g.is_active && (
-                        <Badge variant="outline" className="border-red-500/20 text-red-400 text-xs">غير نشطة</Badge>
-                      )}
+                      <div className="flex items-center gap-1 shrink-0">
+                        {g.is_admin && (
+                          <Badge variant="outline" className="border-blue-500/20 text-blue-400 text-xs">مشرف</Badge>
+                        )}
+                        {g.announce ? (
+                          <Badge variant="outline" className="border-yellow-500/20 text-yellow-500 text-xs">مقيدة</Badge>
+                        ) : (
+                          <Badge variant="outline" className="border-green-500/20 text-green-500 text-xs">نشطة</Badge>
+                        )}
+                        {!g.is_member && (
+                          <Badge variant="outline" className="border-red-500/20 text-red-400 text-xs">غير عضو</Badge>
+                        )}
+                      </div>
                     </label>
                   );
                 })}
               </div>
               <div className="text-xs text-[var(--text-muted)] flex items-center gap-1">
                 <Info className="w-3.5 h-3.5" />
-                إجمالي: {groups.length} مجموعة متاحة
+                إجمالي: {groups.length} مجموعة — يعرض الفلتر الحالي {filteredGroups.length} مجموعة
               </div>
             </div>
           )}
@@ -603,14 +754,14 @@ function CreateCampaignWizard({
                 </label>
                 <div className="flex items-center gap-3">
                   <input
-                    type="range" min={1} max={500} step={1}
+                    type="range" min={1} max={5000} step={1}
                     value={form.messagesPerAccount}
                     onChange={e => setForm(f => ({ ...f, messagesPerAccount: Number(e.target.value) }))}
                     className="flex-1 accent-[var(--brand-primary)]"
                   />
-                  <div className="w-20">
+                  <div className="w-24">
                     <input
-                      type="number" min={1} max={500}
+                      type="number" min={1} max={5000}
                       value={form.messagesPerAccount}
                       onChange={e => setForm(f => ({ ...f, messagesPerAccount: Number(e.target.value) }))}
                       className="input w-full text-center text-sm"
