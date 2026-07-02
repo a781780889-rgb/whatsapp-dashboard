@@ -429,7 +429,7 @@ function CreateCampaignWizard({
     }));
 
   const selectAllGroups = () => setForm(f => ({
-    ...f, selectedGroupIds: filteredGroups.map(g => g.id)
+    ...f, selectedGroupIds: filteredGroups.map(g => g.group_jid)
   }));
 
   const validateStep = () => {
@@ -457,10 +457,19 @@ function CreateCampaignWizard({
     setLoading(true);
     setError('');
     try {
+      // خريطة jid → اسم المجموعة، لعرض اسم واضح في سجل التنفيذ بدل الـ jid الخام
+      const groupNamesByJid: Record<string, string> = {};
+      groups.forEach(g => {
+        if (form.selectedGroupIds.includes(g.group_jid)) {
+          groupNamesByJid[g.group_jid] = g.name || g.group_jid;
+        }
+      });
+
       const payload = {
         name: form.name,
         messageText: form.messageText,
         groupIds: form.selectedGroupIds,
+        groupNamesByJid,
         accountIds: form.selectedAccountIds,
         messagesPerAccount: form.messagesPerAccount,
         intervalSeconds: form.intervalSeconds,
@@ -679,7 +688,11 @@ function CreateCampaignWizard({
                     {searchGroup ? 'لا توجد نتائج' : 'لا توجد مجموعات ضمن هذا الفلتر'}
                   </div>
                 ) : filteredGroups.map(g => {
-                  const selected = form.selectedGroupIds.includes(g.id);
+                  // نستخدم group_jid (معرّف واتساب الحقيقي @g.us) كقيمة الاختيار
+                  // — وليس g.id (وهو مجرد مُعرّف صف داخلي في قاعدة البيانات).
+                  // إرسال g.id بالخطأ كان يجعل الحملة تحاول الإرسال إلى معرّف
+                  // واتساب غير موجود أصلاً، فتفشل بـ Timed Out دون أي نشر حقيقي.
+                  const selected = form.selectedGroupIds.includes(g.group_jid);
                   return (
                     <label
                       key={g.id}
@@ -687,7 +700,7 @@ function CreateCampaignWizard({
                         'flex items-center gap-3 p-3 border-b border-[var(--border-default)] last:border-0 cursor-pointer transition-colors',
                         selected ? 'bg-[var(--brand-primary)]/5' : 'hover:bg-[var(--bg-elevated)]'
                       )}
-                      onClick={() => toggleGroup(g.id)}
+                      onClick={() => toggleGroup(g.group_jid)}
                     >
                       <div className={cn(
                         'w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-all',
