@@ -416,7 +416,174 @@ class PrivateCampaignController {
         }
     }
 
+    // ── [فلتر السعودية] هل رقم العضو سعودي (+966)؟ ─────────────────────────────
+    //    jid على شكل "9665xxxxxxxx@s.whatsapp.net" أو "+9665xxxxxxxx@..."
+    //    (نفس منطق LivePublishService._isSaudiNumber، مكرَّر هنا عمداً لعدم
+    //    إدخال اعتمادية جديدة بين الخدمتين).
+    _isSaudiNumber(jidOrPhone) {
+        if (!jidOrPhone) return false;
+        const raw = String(jidOrPhone).split('@')[0].replace(/[^\d+]/g, '');
+        const normalized = raw.startsWith('+') ? raw : `+${raw}`;
+        return normalized.startsWith('+966');
+    }
+
+    // ── [إعادة بناء الحملة الخاصة] توسيع كل مجموعة مُختارة إلى أعضائها ─────────
+    // المؤهَّلين فقط (سعودي + ليس مشرفاً) واستبدال صف "المجموعة" الواحد بصفٍّ
+    // مستقل لكل عضو مؤهَّل — بحيث يصبح كل صف في private_campaign_groups يمثّل
+    // "رسالة خاصة إلى عضو" وليس "رسالة إلى المجموعة نفسها". هذا التوسيع يتم
+    // مرة واحدة فقط لكل مجموعة (تُعلَّم الصفوف الأصلية بـ status='expanded'
+    // بعد استبدالها كي لا تُعاد معالجتها إن أُعيد تشغيل الحملة).
+    async _expandGroupsToMembers(campaignId, messagesPerAccount) {
+        const pendingGroups = await pool.query(
+            `SELECT * FROM private_campaign_groups
+             WHERE campaign_id=$1 AND status='pending'
+             ORDER BY created_at ASC`,
+            [campaignId]
+        );
+
+        if (pendingGroups.rows.length === 0) return;
+
+        // عدد الرسائل الخاصة المُرسَلة/المُجدوَلة فعلياً لكل حساب حتى الآن —
+        // يُستخدم لتطبيق حد "عدد الرسائل لكل حساب" على الأعضاء (وليس على
+        // عدد المجموعات كما كان سابقاً)، لأن هذا هو المعنى الحقيقي لهذا
+        // الحقل كما يظهر للمستخدم في الواجهة ("عدد الرسائل لكل حساب").
+        const already = await pool.query(
+            `SELECT account_id, COUNT(*)::int AS cnt
+             FROM private_campaign_groups
+             WHERE campaign_id=$1 AND status IN ('pending','sent','failed')
+             GROUP BY account_id`,
+            [campaignId]
+        );
+        const perAccountCount = {};
+        already.rows.forEach(r => { perAccountCount[r.account_id] = r.cnt; });
+
+        for (const grp of pendingGroups.rows) {
+            const accountId = grp.account_id;
+            const rawJid = String(grp.group_jid || '');
+            const isValidGroupIdentifier = /^[0-9]{5,}(-[0-9]+)?(@g\.us)?$/.test(rawJid);
+
+            if (!isValidGroupIdentifier) {
+                await pool.query(
+                    `UPDATE private_campaign_groups SET status='failed', error_msg=$2 WHERE id=$1`,
+                    [grp.id, `معرّف المجموعة غير صالح (group_jid="${rawJid}")`]
+                );
+                await this._log(campaignId, 'error',
+                    `❌ تعذّر توسيع المجموعة ${grp.group_name || rawJid}: معرّف غير صالح`,
+                    accountId
+                );
+                continue;
+            }
+
+            const groupJid = rawJid.includes('@') ? rawJid : `${rawJid}@g.us`;
+
+            try {
+                const membersInfo = await WhatsAppManager.getGroupMembers(accountId, groupJid);
+
+                // 1) استثناء جميع المشرفين/السوبر أدمن — target_jids لا يحتوي
+                //    عليهم أصلاً، لكن نُبقي الفحص صريحاً لضمان الالتزام حتى لو
+                //    تغيّر مصدر البيانات مستقبلاً.
+                const adminSet = new Set(membersInfo.admins || []);
+                const nonAdminMembers = (membersInfo.target_jids || [])
+                    .filter(memberJid => !adminSet.has(memberJid));
+                const excludedAdminsCount = adminSet.size;
+
+                // 2) الإبقاء فقط على الأرقام السعودية (+966) — الفحص على رقم
+                //    الهاتف الحقيقي (phone_by_jid) وليس على الـ jid مباشرة،
+                //    لأن الأخير قد يكون معرّف LID داخلي عشوائي عند تفعيل
+                //    خصوصية الرقم في واتساب.
+                const phoneByJid    = membersInfo.phone_by_jid    || {};
+                const sendableByJid = membersInfo.sendable_by_jid || {};
+                const saudiMembers = nonAdminMembers.filter(memberJid => {
+                    const realPhone = phoneByJid[memberJid] || memberJid;
+                    return this._isSaudiNumber(realPhone);
+                });
+                const excludedNonSaudiCount = nonAdminMembers.length - saudiMembers.length;
+
+                // 3) الإبقاء فقط على الأعضاء الذين تأكَّد فعلياً أن لديهم jid
+                //    قابلاً لاستقبال رسالة خاصة حقيقية (sendable_by_jid) — من
+                //    دون ذلك لا يوجد ضمان وصول الرسالة كمحادثة خاصة فعلية.
+                const eligible = saudiMembers
+                    .map(memberJid => ({ memberJid, sendJid: sendableByJid[memberJid] }))
+                    .filter(e => !!e.sendJid);
+                const excludedUnresolvedCount = saudiMembers.length - eligible.length;
+
+                await this._log(campaignId, 'info',
+                    `👥 ${grp.group_name || groupJid} — مؤهّلون: ${eligible.length} | ` +
+                    `مشرفون مستثناة: ${excludedAdminsCount} | ` +
+                    `أرقام غير سعودية مستبعدة: ${excludedNonSaudiCount}` +
+                    (excludedUnresolvedCount > 0 ? ` | تعذّر تأكيد رقمهم: ${excludedUnresolvedCount}` : ''),
+                    accountId
+                );
+
+                // تطبيق حد "رسائل/حساب" على الأعضاء المؤهَّلين لهذا الحساب
+                const currentCount = perAccountCount[accountId] || 0;
+                const remainingSlots = Math.max(0, messagesPerAccount - currentCount);
+                const toInsert = eligible.slice(0, remainingSlots);
+                const skippedByLimit = eligible.length - toInsert.length;
+
+                const client = await pool.connect();
+                try {
+                    await client.query('BEGIN');
+                    for (const { sendJid } of toInsert) {
+                        await client.query(
+                            `INSERT INTO private_campaign_groups
+                                (id, campaign_id, account_id, group_jid, group_name, status)
+                             VALUES ($1,$2,$3,$4,$5,'pending')`,
+                            [crypto.randomUUID(), campaignId, accountId, sendJid,
+                             grp.group_name ? `عضو من: ${grp.group_name}` : null]
+                        );
+                    }
+                    // الصف الأصلي (كان يمثّل "المجموعة") تم استبداله بصفوف
+                    // الأعضاء أعلاه؛ نُعلّمه expanded كي لا يُعاد توسيعه أو
+                    // إرساله كرسالة إلى المجموعة نفسها.
+                    await client.query(
+                        `UPDATE private_campaign_groups SET status='expanded' WHERE id=$1`,
+                        [grp.id]
+                    );
+                    await client.query('COMMIT');
+                } catch (txErr) {
+                    await client.query('ROLLBACK');
+                    throw txErr;
+                } finally {
+                    client.release();
+                }
+
+                perAccountCount[accountId] = currentCount + toInsert.length;
+
+                if (skippedByLimit > 0) {
+                    await this._log(campaignId, 'warning',
+                        `⚠️ تم تجاوز ${skippedByLimit} عضو مؤهَّل من ${grp.group_name || groupJid} بسبب حد "رسائل/حساب"`,
+                        accountId
+                    );
+                }
+
+                // تحديث total_targets ليعكس العدد الحقيقي للأعضاء المؤهَّلين
+                await pool.query(
+                    `UPDATE private_campaigns SET
+                        total_targets = (SELECT COUNT(*) FROM private_campaign_groups WHERE campaign_id=$1 AND status IN ('pending','sent','failed')),
+                        updated_at = NOW()
+                     WHERE id=$1`,
+                    [campaignId]
+                );
+            } catch (err) {
+                await pool.query(
+                    `UPDATE private_campaign_groups SET status='failed', error_msg=$2 WHERE id=$1`,
+                    [grp.id, err.message]
+                );
+                await this._log(campaignId, 'error',
+                    `❌ تعذّر جلب أعضاء ${grp.group_name || rawJid}: ${err.message}`,
+                    accountId
+                );
+            }
+        }
+    }
+
     // ── Execution Engine ───────────────────────────────────────────────────────
+    // [إعادة بناء الحملة الخاصة] الحملة "الخاصة" يجب ألا تُرسل أي رسالة إلى
+    // المجموعة نفسها بتاتاً. بدلاً من ذلك: لكل مجموعة مُختارة، نجلب أعضاءها
+    // عبر WhatsAppManager.getGroupMembers، نستثني كل المشرفين، ونُبقي فقط على
+    // الأرقام السعودية (+966)، ثم نُرسل رسالة خاصة (DM) لكل عضو مؤهَّل — أبداً
+    // إلى المجموعة. هذا يستبدل الاستدعاء القديم لـ sendGroupMessage بالكامل.
     async _executeEngine(campaignId, userId, intervalSeconds, startTime, endTime) {
         const delay = ms => new Promise(r => setTimeout(r, ms));
 
@@ -433,7 +600,22 @@ class PrivateCampaignController {
 
         await this._log(campaignId, 'info', '🔄 بدأ تنفيذ الحملة');
 
-        // Main loop: fetch pending groups in batches
+        // [إعادة بناء الحملة الخاصة] توسيع المجموعات المختارة إلى أعضائها
+        // المؤهَّلين (سعودي + غير مشرف) قبل أي إرسال. يجب أن يتم هذا قبل بدء
+        // حلقة الإرسال كي تعكس total_targets/العدادات العدد الحقيقي للأهداف.
+        try {
+            const campRes = await pool.query(
+                `SELECT messages_per_account FROM private_campaigns WHERE id=$1`,
+                [campaignId]
+            );
+            const messagesPerAccount = campRes.rows[0]?.messages_per_account || 50;
+            await this._expandGroupsToMembers(campaignId, messagesPerAccount);
+        } catch (expandErr) {
+            await this._log(campaignId, 'error', `❌ فشل توسيع المجموعات إلى أعضاء: ${expandErr.message}`);
+        }
+
+        // Main loop: fetch pending member-targets one at a time (each row is
+        // now a single qualifying member — never the group itself)
         while (true) {
             // Check campaign status
             const statusRes = await pool.query(
@@ -487,27 +669,23 @@ class PrivateCampaignController {
             );
             const messageText = msgRes.rows[0]?.message_text || '';
 
-            // Try to send
+            // Try to send — الهدف هنا دائماً عضو مؤهَّل (رسالة خاصة)، أبداً
+            // المجموعة نفسها — لا يوجد أي مسار هنا يستدعي sendGroupMessage.
             try {
-                // [FIX-REAL-GROUP-SEND] الهدف هنا دائماً مجموعة واتساب، لذا
-                // يجب استخدام sendGroupMessage (تُلحق @g.us) وليس
-                // sendTextMessage (كانت تُلحق @s.whatsapp.net خطأً وتحوّل
-                // الإرسال إلى محادثة خاصة بدل نشر داخل المجموعة — وهذا كان
-                // السبب الجذري لفشل كل عمليات النشر الفعلي بـ Timed Out).
-                //
-                // كذلك نتحقق دفاعياً أن group_jid المخزَّن هو معرّف واتساب
-                // صالح فعلاً (رقمي وينتهي بـ @g.us أو رقمي خام قابل للإلحاق)
-                // وليس UUID داخلياً تسرّب من قاعدة البيانات عن طريق الخطأ —
-                // فهذا يفشل فوراً بخطأ واضح بدل الانتظار حتى Timed Out.
                 const rawJid = String(target.group_jid || '');
-                const isValidGroupIdentifier = /^[0-9]{5,}(-[0-9]+)?(@g\.us)?$/.test(rawJid);
-                if (!isValidGroupIdentifier) {
+                const isValidMemberJid = /^[0-9]{5,}@s\.whatsapp\.net$/.test(rawJid);
+                if (!isValidMemberJid) {
                     throw new Error(
-                        `معرّف المجموعة غير صالح (group_jid="${rawJid}") — يبدو أنه معرّف داخلي وليس معرّف واتساب حقيقي. يجب اختيار المجموعة من جديد.`
+                        `معرّف العضو غير صالح للإرسال الخاص (jid="${rawJid}")`
                     );
                 }
 
-                await WhatsAppManager.sendGroupMessage(target.account_id, rawJid, { text: messageText });
+                // [البند 5+6] إرسال خاص حصراً عبر sendMessageSafe مع
+                // operationType='private' صراحةً.
+                await WhatsAppManager.sendMessageSafe(target.account_id, rawJid, { text: messageText }, {
+                    operationType: 'private',
+                    taskId: target.id,
+                });
 
                 await pool.query(
                     `UPDATE private_campaign_groups SET status='sent', sent_at=NOW() WHERE id=$1`,
@@ -518,7 +696,7 @@ class PrivateCampaignController {
                     [campaignId, target.account_id]
                 );
                 await this._log(campaignId, 'success',
-                    `✅ أُرسلت إلى: ${target.group_name || target.group_jid} (عبر ${target.account_id})`,
+                    `✅ أُرسلت خاص إلى: ${rawJid.split('@')[0]} (عبر ${target.account_id})`,
                     target.account_id
                 );
             } catch (err) {
@@ -531,7 +709,7 @@ class PrivateCampaignController {
                     [campaignId, target.account_id]
                 );
                 await this._log(campaignId, 'error',
-                    `❌ فشل الإرسال إلى ${target.group_name || target.group_jid}: ${err.message}`,
+                    `❌ فشل الإرسال الخاص إلى ${String(target.group_jid || '').split('@')[0]}: ${err.message}`,
                     target.account_id
                 );
             }
