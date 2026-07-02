@@ -117,7 +117,8 @@ class PrivateCampaignController {
     async createCampaign(userId, {
         name, messageText, groupIds, accountIds,
         messagesPerAccount, intervalSeconds,
-        startTime, endTime, autoStart
+        startTime, endTime, autoStart,
+        groupNamesByJid = {}   // [FIX-REAL-GROUP-SEND] اختياري: { [group_jid]: group_name }
     }) {
         await this.ensureTables();
 
@@ -170,9 +171,9 @@ class PrivateCampaignController {
             // Insert group targets
             for (const { groupId, accountId } of groupAssignments) {
                 await client.query(
-                    `INSERT INTO private_campaign_groups (id, campaign_id, account_id, group_jid, status)
-                     VALUES ($1,$2,$3,$4,'pending')`,
-                    [crypto.randomUUID(), campaignId, accountId, groupId]
+                    `INSERT INTO private_campaign_groups (id, campaign_id, account_id, group_jid, group_name, status)
+                     VALUES ($1,$2,$3,$4,$5,'pending')`,
+                    [crypto.randomUUID(), campaignId, accountId, groupId, groupNamesByJid[groupId] || null]
                 );
             }
 
@@ -488,7 +489,25 @@ class PrivateCampaignController {
 
             // Try to send
             try {
-                await WhatsAppManager.sendTextMessage(target.account_id, target.group_jid, messageText);
+                // [FIX-REAL-GROUP-SEND] الهدف هنا دائماً مجموعة واتساب، لذا
+                // يجب استخدام sendGroupMessage (تُلحق @g.us) وليس
+                // sendTextMessage (كانت تُلحق @s.whatsapp.net خطأً وتحوّل
+                // الإرسال إلى محادثة خاصة بدل نشر داخل المجموعة — وهذا كان
+                // السبب الجذري لفشل كل عمليات النشر الفعلي بـ Timed Out).
+                //
+                // كذلك نتحقق دفاعياً أن group_jid المخزَّن هو معرّف واتساب
+                // صالح فعلاً (رقمي وينتهي بـ @g.us أو رقمي خام قابل للإلحاق)
+                // وليس UUID داخلياً تسرّب من قاعدة البيانات عن طريق الخطأ —
+                // فهذا يفشل فوراً بخطأ واضح بدل الانتظار حتى Timed Out.
+                const rawJid = String(target.group_jid || '');
+                const isValidGroupIdentifier = /^[0-9]{5,}(-[0-9]+)?(@g\.us)?$/.test(rawJid);
+                if (!isValidGroupIdentifier) {
+                    throw new Error(
+                        `معرّف المجموعة غير صالح (group_jid="${rawJid}") — يبدو أنه معرّف داخلي وليس معرّف واتساب حقيقي. يجب اختيار المجموعة من جديد.`
+                    );
+                }
+
+                await WhatsAppManager.sendGroupMessage(target.account_id, rawJid, { text: messageText });
 
                 await pool.query(
                     `UPDATE private_campaign_groups SET status='sent', sent_at=NOW() WHERE id=$1`,
